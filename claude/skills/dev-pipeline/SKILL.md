@@ -54,7 +54,7 @@ No other arguments are accepted. If any unknown argument is present, report an e
     failed            Stops with explanation when iterations exhausted or environment error
 
   Prerequisites:
-    - dev-pipeline.config.json must exist in the project root (created by install.sh)
+    - .dev-pipeline/dev-pipeline.config.json must exist (created by install.sh)
     - Fill in llm.tester.build_instruction, install_instruction, test_instruction
     - Start with a clean working tree (no unrelated uncommitted changes)
 
@@ -70,11 +70,11 @@ No other arguments are accepted. If any unknown argument is present, report an e
 
 - [Step 0.3] If `--plan` is missing, report error and stop. Verify the plan file exists.
 
-- [Step 0.4] Locate the project root: the directory containing `dev-pipeline.config.json`. Use this command, which walks upward from the current directory:
+- [Step 0.4] Locate the project root: the directory containing `.dev-pipeline/dev-pipeline.config.json`. Use this command, which walks upward from the current directory:
   ```bash
-  dir="$(pwd)"; while [ "$dir" != "/" ]; do [ -f "$dir/dev-pipeline.config.json" ] && echo "$dir" && break; dir="$(dirname "$dir")"; done
+  dir="$(pwd)"; while [ "$dir" != "/" ]; do [ -f "$dir/.dev-pipeline/dev-pipeline.config.json" ] && echo "$dir" && break; dir="$(dirname "$dir")"; done
   ```
-  If it prints nothing, also try walking upward from the plan file's directory (replace `$(pwd)` with the plan's directory). If still not found, stop with: "dev-pipeline.config.json not found — run install.sh first." Save the result as `project_root`.
+  If it prints nothing, also try walking upward from the plan file's directory (replace `$(pwd)` with the plan's directory). If still not found, stop with: "`.dev-pipeline/dev-pipeline.config.json` not found — run install.sh first." Save the result as `project_root`.
 
 - [Step 0.5] Remind the user: **"For accurate review results, start this pipeline with a clean working tree (no unrelated uncommitted changes)."**
 
@@ -82,7 +82,7 @@ No other arguments are accepted. If any unknown argument is present, report an e
 - [ ] No unknown arguments
 - [ ] `--plan` argument is present and the file exists
 - [ ] `driver.py` found at `<skill_dir>/driver.py`
-- [ ] Project root (with `dev-pipeline.config.json`) identified
+- [ ] Project root (with `.dev-pipeline/dev-pipeline.config.json`) identified
 - [ ] User notified about clean working tree
 
 ---
@@ -93,9 +93,9 @@ No other arguments are accepted. If any unknown argument is present, report an e
 
 - [Step 1.1] Run driver init:
   ```bash
-  python3 <driver_path> init --plan <plan_path> --config <project_root>/dev-pipeline.config.json --project <project_root>
+  python3 <driver_path> init --plan <plan_path> --config <project_root>/.dev-pipeline/dev-pipeline.config.json --project <project_root>
   ```
-  - On non-zero exit: report the error message to the user and stop. Ask them to fix `dev-pipeline.config.json` and retry.
+  - On non-zero exit: report the error message to the user and stop. Ask them to fix `.dev-pipeline/dev-pipeline.config.json` and retry.
   - On success: parse the JSON output and save `run_dir`, `spec_path`, and `plan_path` for all subsequent steps. (`plan_path` is the resolved plan file path returned by init.)
   - Also note `config_snapshot_path = <run_dir>/config.snapshot.json`. Read it whenever you need runner config (`runners.implementor` / `runners.tester` / `runners.reviewer`). Build/install/test instructions and reviewer config are also echoed in advance outputs, so prefer those when available.
 
@@ -394,7 +394,7 @@ Stop immediately. Report:
   > "This failure appears to be an environment or configuration issue, not a code defect. Please check:
   > - Are all dependencies installed?
   > - Is the toolchain (compiler, runtime, etc.) available?
-  > - Is the `build_instruction` / `install_instruction` / `test_instruction` in `dev-pipeline.config.json` correct?
+  > - Is the `build_instruction` / `install_instruction` / `test_instruction` in `.dev-pipeline/dev-pipeline.config.json` correct?
   > After fixing, you can restart the pipeline."
 
 **`halt_reason: "iteration-exhausted"`**

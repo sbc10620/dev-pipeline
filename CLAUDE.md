@@ -8,7 +8,7 @@ The driver is the only executable component. No build step required — pure Pyt
 
 ```bash
 # Validate a project's config before running
-python3 agents/dev-pipeline-tools/driver.py validate-config --config <project>/dev-pipeline.config.json
+python3 agents/dev-pipeline-tools/driver.py validate-config --config <project>/.dev-pipeline/dev-pipeline.config.json
 
 # Check state of a running pipeline
 python3 agents/dev-pipeline-tools/driver.py status --run <project>/.dev-pipeline/latest
@@ -84,7 +84,10 @@ Codex is called with `--wait --json`. The `payload.result` field maps 1:1 to the
 ### Runtime layout (inside target project, not this repo)
 
 ```
-<project>/.dev-pipeline/runs/<YYYYMMDD-HHMMSS>/
+<project>/.dev-pipeline/
+├── dev-pipeline.config.json   # user config — seeded by install.sh, lives here (gitignored), NOT in project root
+├── latest -> runs/<run-id>
+└── runs/<YYYYMMDD-HHMMSS>/
 ├── state.json           # driver owns this
 ├── spec.md              # generated from plan at init; shared by implementor + reviewer
 ├── attempts.md          # failure log appended on every test/review failure; passed to implementor on retry
@@ -97,7 +100,7 @@ Codex is called with `--wait --json`. The `payload.result` field maps 1:1 to the
 
 ## Config requirements
 
-`dev-pipeline.config.json` must be present in the target project. The three tester instructions are **mandatory and may not contain placeholder values** (`<...>`):
+`.dev-pipeline/dev-pipeline.config.json` must be present in the target project (seeded by `install.sh` inside the gitignored `.dev-pipeline/` directory, not the project root). The three tester instructions are **mandatory and may not contain placeholder values** (`<...>`):
 
 ```json
 "tester": {

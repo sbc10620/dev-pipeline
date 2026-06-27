@@ -40,13 +40,13 @@ plan.md
 bash /path/to/dev-pipeline/install.sh /path/to/your/project
 ```
 
-This copies agents, the skill, `driver.py`, and schemas into `<project>/.claude/` (local only) and seeds a `dev-pipeline.config.json`. The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
+This copies agents, the skill, `driver.py`, and schemas into `<project>/.claude/` (local only) and seeds `dev-pipeline.config.json` inside the gitignored `<project>/.dev-pipeline/` directory (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
 
 ---
 
 ## Configuration
 
-Edit `dev-pipeline.config.json` in your project root. The three tester instructions are **required** — the tester will never infer or guess commands.
+Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester instructions are **required** — the tester will never infer or guess commands.
 
 ```json
 {
@@ -106,7 +106,7 @@ In Claude Code, with your project open:
 ```
 
 **Prerequisites:**
-- `dev-pipeline.config.json` must be present and valid
+- `.dev-pipeline/dev-pipeline.config.json` must be present and valid
 - Start with a **clean working tree** (no unrelated uncommitted changes — they will be included in the review scope)
 
 ---
@@ -146,6 +146,7 @@ Created at `<project>/.dev-pipeline/` (gitignored automatically).
 
 ```
 .dev-pipeline/
+├── dev-pipeline.config.json # your config — seeded by install.sh, lives here (gitignored)
 ├── latest -> runs/<run-id>
 └── runs/<run-id>/
     ├── state.json           # driver state (single source of truth)
@@ -166,7 +167,7 @@ Each `run-id` is a timestamp (`YYYYMMDD-HHMMSS`). Previous runs are preserved fo
 
 ```bash
 python3 agents/dev-pipeline-tools/driver.py --help
-python3 agents/dev-pipeline-tools/driver.py validate-config --config dev-pipeline.config.json
+python3 agents/dev-pipeline-tools/driver.py validate-config --config .dev-pipeline/dev-pipeline.config.json
 python3 agents/dev-pipeline-tools/driver.py status --run .dev-pipeline/latest
 python3 agents/dev-pipeline-tools/driver.py normalize-review --source codex \
     --in codex-raw.json --out review-result.json
@@ -203,7 +204,8 @@ dev-pipeline/
 ### After installation in target project
 ```
 <project>/
-├── dev-pipeline.config.json
+├── .dev-pipeline/
+│   └── dev-pipeline.config.json   ← your config (gitignored, not in project root)
 └── .claude/
     ├── agents/
     │   ├── dp-implementor.md

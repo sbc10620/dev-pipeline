@@ -251,10 +251,10 @@ def cmd_init(args) -> None:
         die(f"Plan file not found: {plan_path}")
 
     config_path = pathlib.Path(args.config).resolve() if args.config else (
-        pathlib.Path(args.project or ".").resolve() / "dev-pipeline.config.json"
+        pathlib.Path(args.project or ".").resolve() / ".dev-pipeline" / "dev-pipeline.config.json"
     )
     if not config_path.exists():
-        die(f"Config file not found: {config_path}\n  Create it from config.example.json and fill in the tester instructions.")
+        die(f"Config file not found: {config_path}\n  Run install.sh to seed .dev-pipeline/dev-pipeline.config.json, then fill in the tester instructions.")
 
     cfg = load_json(config_path)
     errors = validate_config_data(cfg)
@@ -262,7 +262,7 @@ def cmd_init(args) -> None:
         sys.stderr.write("[dev-pipeline] Config validation failed:\n")
         for e in errors:
             sys.stderr.write(f"  - {e}\n")
-        sys.stderr.write("\nFix dev-pipeline.config.json and retry.\n")
+        sys.stderr.write("\nFix .dev-pipeline/dev-pipeline.config.json and retry.\n")
         sys.exit(1)
 
     project_dir = pathlib.Path(args.project).resolve() if args.project else pathlib.Path(".").resolve()
@@ -643,7 +643,7 @@ WORKFLOW OVERVIEW
 1. Write a plan.md describing what to implement.
 2. Install dev-pipeline into your project:
      bash /path/to/dev-pipeline/install.sh /path/to/project
-3. Edit dev-pipeline.config.json — fill in build/install/test instructions.
+3. Edit .dev-pipeline/dev-pipeline.config.json — fill in build/install/test instructions.
 4. Invoke the SKILL inside Claude Code:
      /dev-pipeline --plan plan.md
 

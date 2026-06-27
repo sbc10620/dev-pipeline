@@ -18,9 +18,12 @@ What gets installed:
   .claude/skills/dev-pipeline/SKILL.md
   .claude/skills/dev-pipeline/driver.py
   .claude/skills/dev-pipeline/schemas/  (JSON schemas)
-  dev-pipeline.config.json (seeded from config.example.json, if not already present)
+  .dev-pipeline/dev-pipeline.config.json (seeded from config.example.json, if not already present)
 
-After installation, edit <project-dir>/dev-pipeline.config.json and fill in:
+The config lives inside .dev-pipeline/ (gitignored) so it never clutters the
+project root or gets confused with the project's own source files.
+
+After installation, edit <project-dir>/.dev-pipeline/dev-pipeline.config.json and fill in:
   llm.tester.build_instruction
   llm.tester.install_instruction
   llm.tester.test_instruction
@@ -40,13 +43,14 @@ SOURCE_AGENTS="${SCRIPT_DIR}/claude/agents"
 SOURCE_SKILL="${SCRIPT_DIR}/claude/skills/dev-pipeline"
 SOURCE_TOOLS="${SCRIPT_DIR}/agents/dev-pipeline-tools"
 CONFIG_EXAMPLE="${SOURCE_TOOLS}/config.example.json"
-CONFIG_DST="${PROJECT_DIR}/dev-pipeline.config.json"
+RUNTIME_DIR="${PROJECT_DIR}/.dev-pipeline"
+CONFIG_DST="${RUNTIME_DIR}/dev-pipeline.config.json"
 GITIGNORE="${PROJECT_DIR}/.gitignore"
 
 echo "[dev-pipeline] Installing into: ${PROJECT_DIR}"
 
 # Create destination directories
-mkdir -p "${AGENTS_DST}" "${SKILLS_DST}/schemas"
+mkdir -p "${AGENTS_DST}" "${SKILLS_DST}/schemas" "${RUNTIME_DIR}"
 
 # Copy agent files
 for f in dp-implementor.md dp-tester.md dp-reviewer.md; do
@@ -78,12 +82,12 @@ for f in config.schema.json test-result.schema.json review-result.schema.json st
 done
 echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/schemas/ (4 files)"
 
-# Seed config (only if not already present)
+# Seed config into .dev-pipeline/ (only if not already present)
 if [[ ! -f "${CONFIG_DST}" ]]; then
   cp "${CONFIG_EXAMPLE}" "${CONFIG_DST}"
-  echo "[dev-pipeline] Created: dev-pipeline.config.json (from example)"
+  echo "[dev-pipeline] Created: .dev-pipeline/dev-pipeline.config.json (from example)"
 else
-  echo "[dev-pipeline] Skipped: dev-pipeline.config.json already exists"
+  echo "[dev-pipeline] Skipped: .dev-pipeline/dev-pipeline.config.json already exists"
 fi
 
 # Add .dev-pipeline/ to .gitignore
