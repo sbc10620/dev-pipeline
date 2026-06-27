@@ -62,11 +62,12 @@ No other arguments are accepted. If any unknown argument is present, report an e
     bash /path/to/dev-pipeline/install.sh /path/to/project
   ```
 
-- [Step 0.2] Locate the driver. It is installed in the same directory as this SKILL.md file:
+- [Step 0.2] Locate the driver and schemas. Let `skill_dir` be the directory containing this SKILL.md file. Then:
   ```
-  driver_path = <directory containing this SKILL.md>/driver.py
+  skill_dir   = <directory containing this SKILL.md>
+  driver_path = <skill_dir>/driver.py
   ```
-  Verify it exists. If not, stop with: "driver.py not found — re-run install.sh to repair the installation."
+  The result schemas live at `<skill_dir>/schemas/` (e.g. `<skill_dir>/schemas/test-result.schema.json`). Verify `driver_path` exists. If not, stop with: "driver.py not found — re-run install.sh to repair the installation."
 
 - [Step 0.3] If `--plan` is missing, report error and stop. Verify the plan file exists.
 
@@ -183,6 +184,7 @@ No other arguments are accepted. If any unknown argument is present, report an e
 
 - [Step 3.2] Dispatch to tester runner (from config `runners.tester`):
   - Pass the `build_instruction`, `install_instruction`, and `test_instruction` fields **returned by the Step 2.3 advance output** (the driver includes them there).
+  - Pass the **path to the authoritative result schema** so the tester emits exactly the required shape: `<skill_dir>/schemas/test-result.schema.json` (the tester has the Read tool; instruct it to read this and match it exactly). The top-level keys are exactly `status`, `failure_type`, `stages`, `summary`, `failure_details`, `log_excerpt` — **no other keys are allowed** (the schema sets `additionalProperties: false`). Do NOT invent fields such as `failure_stage`.
   - The tester returns a JSON object as its final message.
 
 - [Step 3.3] Extract the JSON from the tester's final message.
@@ -192,7 +194,7 @@ No other arguments are accepted. If any unknown argument is present, report an e
   ```bash
   python3 <driver_path> validate-result --type test --file <TEST_ITER_DIR>/test-result.json
   ```
-  On non-zero exit: the tester produced invalid output — report to user and stop.
+  On non-zero exit, the tester produced invalid output. **Do NOT run the build/install/test commands yourself — that violates Global Rule 3.** Instead, re-dispatch to the tester runner **once**, including the exact `validate-result` error text and the schema path again, and instruct it to return corrected JSON. Overwrite `<TEST_ITER_DIR>/test-result.json` and validate again. If it still fails to validate, report the error to the user and stop.
 
 - [Step 3.5] Call driver advance:
   ```bash
@@ -213,9 +215,10 @@ No other arguments are accepted. If any unknown argument is present, report an e
   - `"failed"` → proceed to Step FAILED
 
 **Step 3 checklist:**
-- [ ] Tester received all three instructions
+- [ ] Tester received all three instructions AND the path to `test-result.schema.json`
+- [ ] Build/install/test commands were run ONLY by the tester, never by the main session
 - [ ] JSON written to `TEST_ITER_DIR/test-result.json`
-- [ ] `driver validate-result --type test` passed
+- [ ] `driver validate-result --type test` passed (after at most one re-dispatch on schema failure)
 - [ ] `driver advance` called before `append-attempt`
 - [ ] If next_state is implementation: attempt appended to `attempts.md` after advance
 - [ ] `next_state` followed

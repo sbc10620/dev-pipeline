@@ -90,18 +90,43 @@ else
   echo "[dev-pipeline] Skipped: .dev-pipeline/dev-pipeline.config.json already exists"
 fi
 
-# Add .dev-pipeline/ to .gitignore
-GITIGNORE_ENTRY=".dev-pipeline/"
-if [[ -f "${GITIGNORE}" ]]; then
-  if grep -qxF "${GITIGNORE_ENTRY}" "${GITIGNORE}" 2>/dev/null; then
-    echo "[dev-pipeline] .gitignore: .dev-pipeline/ already present"
-  else
-    printf '\n# dev-pipeline runtime directory\n%s\n' "${GITIGNORE_ENTRY}" >> "${GITIGNORE}"
-    echo "[dev-pipeline] Updated: .gitignore (added .dev-pipeline/)"
+# Gitignore the runtime directory AND the installed machinery.
+# Reason: the reviewer scope (codex --scope working-tree, and the dp-reviewer
+# fallback's `git ls-files --others`) would otherwise sweep in these untracked
+# files and review dev-pipeline's own tooling instead of the user's changes.
+GITIGNORE_ENTRIES=(
+  ".dev-pipeline/"
+  ".claude/agents/dp-implementor.md"
+  ".claude/agents/dp-tester.md"
+  ".claude/agents/dp-reviewer.md"
+  ".claude/skills/dev-pipeline/"
+)
+
+created=0
+if [[ ! -f "${GITIGNORE}" ]]; then
+  : > "${GITIGNORE}"
+  created=1
+fi
+
+added=0
+# Ensure the section header exists only when we actually add something below.
+for entry in "${GITIGNORE_ENTRIES[@]}"; do
+  if grep -qxF "${entry}" "${GITIGNORE}" 2>/dev/null; then
+    continue
   fi
+  if [[ "${added}" -eq 0 ]]; then
+    printf '\n# dev-pipeline (runtime + installed machinery — kept out of review scope)\n' >> "${GITIGNORE}"
+  fi
+  printf '%s\n' "${entry}" >> "${GITIGNORE}"
+  added=$((added + 1))
+done
+
+if [[ "${created}" -eq 1 ]]; then
+  echo "[dev-pipeline] Created: .gitignore (with ${added} dev-pipeline entries)"
+elif [[ "${added}" -gt 0 ]]; then
+  echo "[dev-pipeline] Updated: .gitignore (added ${added} dev-pipeline entr$([[ ${added} -eq 1 ]] && echo y || echo ies))"
 else
-  printf '# dev-pipeline runtime directory\n%s\n' "${GITIGNORE_ENTRY}" > "${GITIGNORE}"
-  echo "[dev-pipeline] Created: .gitignore (with .dev-pipeline/)"
+  echo "[dev-pipeline] .gitignore: all dev-pipeline entries already present"
 fi
 
 echo ""

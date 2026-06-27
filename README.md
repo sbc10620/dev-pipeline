@@ -108,6 +108,7 @@ In Claude Code, with your project open:
 **Prerequisites:**
 - `.dev-pipeline/dev-pipeline.config.json` must be present and valid
 - Start with a **clean working tree** (no unrelated uncommitted changes — they will be included in the review scope)
+- **Gitignore your build outputs** (compiled binaries, object files, etc.). The review uses `working-tree` scope, so any untracked artifact produced by the test phase would otherwise be reviewed alongside your real changes. (dev-pipeline's own installed files under `.claude/` and `.dev-pipeline/` are gitignored by `install.sh` for this reason.)
 
 ---
 
