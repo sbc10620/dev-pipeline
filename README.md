@@ -178,6 +178,23 @@ python3 agents/dev-pipeline-tools/driver.py normalize-review --source codex \
 
 ---
 
+## Testing
+
+Deterministic tests for the state machine live in `agents/dev-pipeline-tools/test/`.
+They drive `driver.py` as a CLI subprocess — exactly as the SKILL does — and assert on
+state transitions, the review gate, schema validation, and the auxiliary subcommands.
+
+```bash
+python3 agents/dev-pipeline-tools/test/test_driver.py
+# or
+python3 -m unittest discover -s agents/dev-pipeline-tools/test -v
+```
+
+Standard library only, no external dependencies. The tests do **not** invoke any LLM
+agent or codex — they verify `driver.py`'s deterministic logic in isolation.
+
+---
+
 ## Versioning
 
 dev-pipeline follows [Semantic Versioning](https://semver.org/). The version is
@@ -216,6 +233,8 @@ dev-pipeline/
     └── dev-pipeline-tools/
         ├── driver.py
         ├── config.example.json
+        ├── test/
+        │   └── test_driver.py
         └── schemas/
             ├── config.schema.json
             ├── test-result.schema.json

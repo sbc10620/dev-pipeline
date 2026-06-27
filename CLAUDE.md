@@ -84,6 +84,7 @@ Codex is called with `--wait --json`. The `payload.result` field maps 1:1 to the
 | Path | Role |
 |---|---|
 | `agents/dev-pipeline-tools/driver.py` | State machine — single source of truth for state transitions |
+| `agents/dev-pipeline-tools/test/test_driver.py` | Deterministic black-box tests for the driver (CLI subprocess; no LLM) |
 | `agents/dev-pipeline-tools/schemas/` | JSON schemas for config, test-result, review-result, state |
 | `agents/dev-pipeline-tools/config.example.json` | Seed config (English defaults, placeholders for tester instructions) |
 | `claude/agents/dp-implementor.md` | Implementor subagent — reads attempts.md to avoid repeating failed approaches |
@@ -122,6 +123,19 @@ Codex is called with `--wait --json`. The `payload.result` field maps 1:1 to the
 ```
 
 `driver validate-config` enforces this and rejects placeholder values.
+
+## Testing
+
+Deterministic tests for the state machine live in `agents/dev-pipeline-tools/test/test_driver.py`.
+They drive `driver.py` as a CLI subprocess (the way the SKILL does) and assert on state
+transitions, the review gate, schema validation, and the auxiliary subcommands. No LLM agent
+or codex is invoked; standard library only. After changing `driver.py` or any schema, run:
+
+```bash
+python3 agents/dev-pipeline-tools/test/test_driver.py
+# or
+python3 -m unittest discover -s agents/dev-pipeline-tools/test -v
+```
 
 ## Schema validation
 

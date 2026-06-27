@@ -9,6 +9,16 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .claude/skills/dev-pipeline/driver.py --version`.
 
+## [1.1.1] - 2026-06-27
+
+### Added
+- Deterministic test suite for `driver.py` in `agents/dev-pipeline-tools/test/`.
+  Drives the driver as a CLI subprocess (as the SKILL does) and verifies state
+  transitions, the review gate (severity and verdict modes), schema validation,
+  and the auxiliary subcommands — without invoking any LLM agent or codex.
+  Standard library only. Run with
+  `python3 agents/dev-pipeline-tools/test/test_driver.py`.
+
 ## [1.1.0] - 2026-06-27
 
 ### Added
