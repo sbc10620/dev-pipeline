@@ -40,7 +40,7 @@ plan.md
 bash /path/to/dev-pipeline/install.sh /path/to/your/project
 ```
 
-This copies agents and the skill into `<project>/.claude/` (local only) and seeds a `dev-pipeline.config.json`.
+This copies agents, the skill, `driver.py`, and schemas into `<project>/.claude/` (local only) and seeds a `dev-pipeline.config.json`. The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
 
 ---
 
@@ -102,7 +102,6 @@ In Claude Code, with your project open:
 
 ```
 /dev-pipeline --plan plan.md
-/dev-pipeline --plan plan.md --config dev-pipeline.config.json
 /dev-pipeline --help
 ```
 
@@ -177,6 +176,7 @@ python3 agents/dev-pipeline-tools/driver.py normalize-review --source codex \
 
 ## Directory structure
 
+### Source repo
 ```
 dev-pipeline/
 ├── install.sh
@@ -198,6 +198,26 @@ dev-pipeline/
             ├── test-result.schema.json
             ├── review-result.schema.json
             └── state.schema.json
+```
+
+### After installation in target project
+```
+<project>/
+├── dev-pipeline.config.json
+└── .claude/
+    ├── agents/
+    │   ├── dp-implementor.md
+    │   ├── dp-tester.md
+    │   └── dp-reviewer.md
+    └── skills/
+        └── dev-pipeline/
+            ├── SKILL.md
+            ├── driver.py           ← installed for standalone operation
+            └── schemas/
+                ├── config.schema.json
+                ├── test-result.schema.json
+                ├── review-result.schema.json
+                └── state.schema.json
 ```
 
 ---

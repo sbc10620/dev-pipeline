@@ -70,9 +70,19 @@ def save_json(path: pathlib.Path, obj: dict) -> None:
 # Lightweight schema validator (no external deps)
 # ---------------------------------------------------------------------------
 
-def _validate(data, schema: dict, path: str = "") -> list[str]:
+def _validate(data, schema: dict, path: str = "", root_schema: dict = None) -> list[str]:
     """Return list of violation messages."""
     errors = []
+
+    # Resolve $ref before anything else
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        resolved = _resolve_ref(ref, root_schema or schema)
+        if resolved is not None:
+            return _validate(data, resolved, path, root_schema)
+        # Unresolvable $ref — skip silently rather than crash
+
+    root_schema = root_schema or schema
     t = schema.get("type")
 
     # type check (allow arrays of types for oneOf-style null support)
@@ -94,7 +104,7 @@ def _validate(data, schema: dict, path: str = "") -> list[str]:
         props = schema.get("properties", {})
         for k, v in data.items():
             if k in props:
-                errors.extend(_validate(v, props[k], f"{path}.{k}"))
+                errors.extend(_validate(v, props[k], f"{path}.{k}", root_schema))
             elif schema.get("additionalProperties") is False:
                 errors.append(f"{path}.{k}: unexpected field")
 
@@ -102,7 +112,7 @@ def _validate(data, schema: dict, path: str = "") -> list[str]:
         item_schema = schema.get("items")
         if item_schema:
             for i, item in enumerate(data):
-                errors.extend(_validate(item, item_schema, f"{path}[{i}]"))
+                errors.extend(_validate(item, item_schema, f"{path}[{i}]", root_schema))
         mn = schema.get("minItems")
         if mn is not None and len(data) < mn:
             errors.append(f"{path}: minItems {mn}, got {len(data)}")
@@ -115,22 +125,38 @@ def _validate(data, schema: dict, path: str = "") -> list[str]:
         if enum is not None and data not in enum:
             errors.append(f"{path}: must be one of {enum}, got {data!r}")
 
-    if t == "integer" or (t == "number" and isinstance(data, (int, float))):
-        mn = schema.get("minimum")
-        if mn is not None and data < mn:
-            errors.append(f"{path}: minimum {mn}, got {data}")
-        mx = schema.get("maximum")
-        if mx is not None and data > mx:
-            errors.append(f"{path}: maximum {mx}, got {data}")
+    # numeric constraints — apply when data is int/float regardless of how type is declared
+    if isinstance(data, (int, float)) and not isinstance(data, bool):
+        types_list = t if isinstance(t, list) else ([t] if t else [])
+        if any(x in types_list for x in ("integer", "number")) or not types_list:
+            mn = schema.get("minimum")
+            if mn is not None and data < mn:
+                errors.append(f"{path}: minimum {mn}, got {data}")
+            mx = schema.get("maximum")
+            if mx is not None and data > mx:
+                errors.append(f"{path}: maximum {mx}, got {data}")
 
     # oneOf: at least one subschema must produce zero errors
     one_of = schema.get("oneOf")
     if one_of:
-        match_count = sum(1 for s in one_of if not _validate(data, s, path))
+        match_count = sum(1 for s in one_of if not _validate(data, s, path, root_schema))
         if match_count == 0:
             errors.append(f"{path}: matches none of the oneOf schemas")
 
     return errors
+
+
+def _resolve_ref(ref: str, root_schema: dict):
+    """Resolve a JSON Schema $ref of the form '#/$defs/Name'."""
+    if not ref.startswith("#/"):
+        return None
+    parts = ref.lstrip("#/").split("/")
+    node = root_schema
+    for part in parts:
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
 
 
 def validate_against_schema(data: dict, schema_name: str) -> list[str]:
@@ -138,7 +164,7 @@ def validate_against_schema(data: dict, schema_name: str) -> list[str]:
     if not schema_path.exists():
         return [f"Schema file not found: {schema_path}"]
     schema = load_json(schema_path)
-    return _validate(data, schema)
+    return _validate(data, schema, root_schema=schema)
 
 
 # ---------------------------------------------------------------------------
@@ -186,11 +212,17 @@ def save_state(run_dir: pathlib.Path, state: dict) -> None:
     save_json(state_path(run_dir), state)
 
 
-def current_iter_dir(run_dir: pathlib.Path, state: dict) -> pathlib.Path:
+def get_iter_path(run_dir: pathlib.Path, state: dict) -> pathlib.Path:
+    """Compute the current iteration directory path WITHOUT creating it (pure)."""
     test_n = state["iterations"]["test"]
     review_n = state["iterations"]["review"]
     n = test_n + review_n
-    d = run_dir / "iterations" / str(n)
+    return run_dir / "iterations" / str(n)
+
+
+def ensure_iter_dir(run_dir: pathlib.Path, state: dict) -> pathlib.Path:
+    """Compute the current iteration directory path AND create it on disk."""
+    d = get_iter_path(run_dir, state)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -240,9 +272,14 @@ def cmd_init(args) -> None:
 
     # latest symlink
     latest_link = project_dir / ".dev-pipeline" / "latest"
-    if latest_link.is_symlink() or latest_link.exists():
+    if latest_link.is_symlink():
         latest_link.unlink()
-    latest_link.symlink_to(run_dir)
+    elif latest_link.is_dir():
+        die(f"Cannot create 'latest' symlink: {latest_link} is a directory. Remove it manually.")
+    elif latest_link.exists():
+        latest_link.unlink()
+    # Relative target keeps the symlink valid if the project dir is moved/remounted.
+    latest_link.symlink_to(pathlib.Path("runs") / rid)
 
     spec_path = run_dir / "spec.md"
 
@@ -333,8 +370,7 @@ def cmd_advance(args) -> None:
 
     # --- implementation → test (automatic, no result file needed) ---
     elif current == "implementation":
-        state["iterations"]["test"] = state["iterations"].get("test", 0)
-        iter_dir = current_iter_dir(run_dir, state)
+        iter_dir = ensure_iter_dir(run_dir, state)
         transition("test", "implementation_done",
                    extra={"directive": "run_tester",
                           "iter_dir": str(iter_dir),
@@ -344,8 +380,7 @@ def cmd_advance(args) -> None:
 
     # --- test ---
     elif current == "test":
-        iter_dir = current_iter_dir(run_dir, state)
-        result_file = iter_dir / "test-result.json"
+        result_file = get_iter_path(run_dir, state) / "test-result.json"
         if not result_file.exists():
             die(f"test-result.json not found at {result_file}. Write the tester result first.")
         result = load_json(result_file)
@@ -357,10 +392,11 @@ def cmd_advance(args) -> None:
         failure_type = result.get("failure_type")
 
         if status == "pass":
-            iter_dir2 = current_iter_dir(run_dir, state)
+            # No counter change on pass — review reuses the same iteration directory.
+            iter_dir = ensure_iter_dir(run_dir, state)
             transition("review", "test_pass",
                        extra={"directive": "run_reviewer",
-                              "iter_dir": str(iter_dir2),
+                              "iter_dir": str(iter_dir),
                               "spec_path": state["spec_path"],
                               "reviewer_config": cfg["llm"]["reviewer"]})
         elif failure_type == "environment":
@@ -377,11 +413,11 @@ def cmd_advance(args) -> None:
                            extra={"directive": "report_failure",
                                   "failure_details": result.get("failure_details", "")})
             else:
-                iter_dir2 = current_iter_dir(run_dir, state)
+                iter_dir = ensure_iter_dir(run_dir, state)
                 transition("implementation", "test_fail_retry", failure_type="code",
                            extra={"directive": "run_implementor",
                                   "test_iter": state["iterations"]["test"],
-                                  "iter_dir": str(iter_dir2),
+                                  "iter_dir": str(iter_dir),
                                   "spec_path": state["spec_path"],
                                   "plan_path": state["plan_path"],
                                   "attempts_path": str(run_dir / "attempts.md"),
@@ -390,8 +426,7 @@ def cmd_advance(args) -> None:
 
     # --- review ---
     elif current == "review":
-        iter_dir = current_iter_dir(run_dir, state)
-        result_file = iter_dir / "review-result.json"
+        result_file = get_iter_path(run_dir, state) / "review-result.json"
         if not result_file.exists():
             die(f"review-result.json not found at {result_file}. Write the reviewer result first.")
         result = load_json(result_file)
@@ -416,11 +451,11 @@ def cmd_advance(args) -> None:
                                   "summary": result.get("summary", ""),
                                   "findings": result.get("findings", [])})
             else:
-                iter_dir2 = current_iter_dir(run_dir, state)
+                iter_dir = ensure_iter_dir(run_dir, state)
                 transition("implementation", "review_fail_retry",
                            extra={"directive": "run_implementor",
                                   "review_iter": state["iterations"]["review"],
-                                  "iter_dir": str(iter_dir2),
+                                  "iter_dir": str(iter_dir),
                                   "spec_path": state["spec_path"],
                                   "plan_path": state["plan_path"],
                                   "attempts_path": str(run_dir / "attempts.md"),
@@ -536,7 +571,11 @@ def cmd_normalize_review(args) -> None:
             "recommendation": str(f.get("recommendation") or "").strip(),
         }
 
-    findings_raw = result_data.get("findings") or []
+    findings_raw = result_data.get("findings")
+    if findings_raw is None:
+        findings_raw = []
+    elif not isinstance(findings_raw, list):
+        die(f"codex payload.result.findings is not an array: {type(findings_raw).__name__}")
     findings = [norm_finding(f, i) for i, f in enumerate(findings_raw) if isinstance(f, dict)]
 
     next_steps_raw = result_data.get("next_steps") or []
@@ -569,11 +608,16 @@ def cmd_append_attempt(args) -> None:
     test_n = state["iterations"]["test"]
     review_n = state["iterations"]["review"]
 
-    outcome_text = args.outcome
-    # If it looks like a file path and the file exists, read it
-    outcome_path = pathlib.Path(outcome_text)
-    if outcome_path.exists() and outcome_path.is_file():
+    if args.outcome_file:
+        outcome_path = pathlib.Path(args.outcome_file).resolve()
+        if not outcome_path.exists():
+            die(f"--outcome-file not found: {outcome_path}")
         outcome_text = outcome_path.read_text(encoding="utf-8")
+    else:
+        outcome_text = args.outcome or ""
+
+    if not outcome_text.strip():
+        die("append-attempt requires non-empty content via --outcome or --outcome-file")
 
     ts = now_iso()
     label = f"### Attempt — state={args.state}, test_iter={test_n}, review_iter={review_n} ({ts})"
@@ -632,8 +676,8 @@ ITERATION LIMITS
 REVIEW GATE
 -----------
   review_block_severity (array)  — findings with listed severities block the review.
-  If null or omitted, uses verdict: "needs-attention" to block.
-  Default: ["critical", "high"]
+  If null, the review passes only when verdict == "approve".
+  If omitted, defaults to ["critical", "high"] (severity-based gating).
 
 CONFIG REQUIREMENTS
 -------------------
@@ -681,7 +725,8 @@ def main() -> None:
     p_aa = sub.add_parser("append-attempt")
     p_aa.add_argument("--run", required=True)
     p_aa.add_argument("--state", required=True, choices=["test", "review"])
-    p_aa.add_argument("--outcome", required=True)
+    p_aa.add_argument("--outcome", default="")
+    p_aa.add_argument("--outcome-file", dest="outcome_file", default="")
 
     args = parser.parse_args()
 

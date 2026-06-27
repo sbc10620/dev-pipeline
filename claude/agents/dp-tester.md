@@ -33,7 +33,7 @@ For each stage:
 
 ### [Step 3] Classify failure type (only when status is "fail")
 - [Step 3.1] Read the log output of the failed stage.
-- [Step 3.2] Classify as `environment` if the failure is clearly due to: missing dependency/package, network error, toolchain not found, permission error, or external service unavailability — i.e., failures unrelated to the implementation code.
+- [Step 3.2] Classify as `environment` if the failure is clearly due to: missing dependency/package, network error, toolchain not found, permission error, external service unavailability, **or clearly flaky/non-deterministic behavior** (e.g. race conditions, intermittent timeouts, port conflicts) — i.e., failures unrelated to the implementation code itself.
 - [Step 3.3] Classify as `code` if the failure is due to: compilation error, test assertion failure, import error in the code being tested, or any implementation-level defect.
 - [Step 3.4] When in doubt, classify as `code` (conservative).
 - [Step 3.5] When status is `pass`, set `failure_type: null`.

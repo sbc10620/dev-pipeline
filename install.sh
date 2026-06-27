@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dev-pipeline installer — copies Claude agents and skill into the target project's local .claude/
+# dev-pipeline installer — copies all components into the target project's local .claude/
 
 set -euo pipefail
 
@@ -16,11 +16,9 @@ What gets installed:
   .claude/agents/dp-tester.md
   .claude/agents/dp-reviewer.md
   .claude/skills/dev-pipeline/SKILL.md
+  .claude/skills/dev-pipeline/driver.py
+  .claude/skills/dev-pipeline/schemas/  (JSON schemas)
   dev-pipeline.config.json (seeded from config.example.json, if not already present)
-
-The driver script and schemas stay in:
-  ${SCRIPT_DIR}/agents/dev-pipeline-tools/
-  (referenced by absolute path — no copy needed)
 
 After installation, edit <project-dir>/dev-pipeline.config.json and fill in:
   llm.tester.build_instruction
@@ -40,14 +38,15 @@ AGENTS_DST="${CLAUDE_DIR}/agents"
 SKILLS_DST="${CLAUDE_DIR}/skills/dev-pipeline"
 SOURCE_AGENTS="${SCRIPT_DIR}/claude/agents"
 SOURCE_SKILL="${SCRIPT_DIR}/claude/skills/dev-pipeline"
-CONFIG_EXAMPLE="${SCRIPT_DIR}/agents/dev-pipeline-tools/config.example.json"
+SOURCE_TOOLS="${SCRIPT_DIR}/agents/dev-pipeline-tools"
+CONFIG_EXAMPLE="${SOURCE_TOOLS}/config.example.json"
 CONFIG_DST="${PROJECT_DIR}/dev-pipeline.config.json"
 GITIGNORE="${PROJECT_DIR}/.gitignore"
 
 echo "[dev-pipeline] Installing into: ${PROJECT_DIR}"
 
 # Create destination directories
-mkdir -p "${AGENTS_DST}" "${SKILLS_DST}"
+mkdir -p "${AGENTS_DST}" "${SKILLS_DST}/schemas"
 
 # Copy agent files
 for f in dp-implementor.md dp-tester.md dp-reviewer.md; do
@@ -63,6 +62,21 @@ done
 # Copy skill
 cp "${SOURCE_SKILL}/SKILL.md" "${SKILLS_DST}/SKILL.md"
 echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/SKILL.md"
+
+# Copy driver script (must be co-located with schemas for standalone operation)
+cp "${SOURCE_TOOLS}/driver.py" "${SKILLS_DST}/driver.py"
+echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/driver.py"
+
+# Copy schemas (driver.py expects schemas/ in the same directory)
+for f in config.schema.json test-result.schema.json review-result.schema.json state.schema.json; do
+  src="${SOURCE_TOOLS}/schemas/${f}"
+  if [[ ! -f "$src" ]]; then
+    echo "[dev-pipeline] ERROR: Schema file not found: ${src}"
+    exit 1
+  fi
+  cp "${src}" "${SKILLS_DST}/schemas/${f}"
+done
+echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/schemas/ (4 files)"
 
 # Seed config (only if not already present)
 if [[ ! -f "${CONFIG_DST}" ]]; then
@@ -99,6 +113,3 @@ echo "  2. Write your plan.md"
 echo ""
 echo "  3. In Claude Code, run:"
 echo "     /dev-pipeline --plan plan.md"
-echo ""
-echo "Driver location (no copy needed):"
-echo "  ${SCRIPT_DIR}/agents/dev-pipeline-tools/driver.py"
