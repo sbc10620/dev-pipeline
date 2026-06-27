@@ -9,6 +9,28 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .claude/skills/dev-pipeline/driver.py --version`.
 
+## [1.2.0] - 2026-06-28
+
+### Added
+- `driver.py bootstrap-config [--project <dir>]` — seeds
+  `.dev-pipeline/dev-pipeline.config.json` from the template when it is absent.
+  The driver detects the project root (git top-level, else cwd), creates the
+  directory, copies the template, and idempotently adds `.dev-pipeline/` to
+  `.gitignore` (in a git repo). Emits a JSON object with
+  `status` (`created`/`exists`), `config_path`, and `required_fields`. Existing
+  configs are never overwritten.
+
+### Changed
+- Config seeding moved from `install.sh` into the skill. On the first
+  `/dev-pipeline` run, the SKILL calls `driver bootstrap-config` when no config
+  is found, then stops so the user can fill in the tester instructions and
+  re-run. This makes the pipeline self-bootstrapping for anyone who obtains the
+  repo without knowing about `install.sh`.
+- `install.sh` no longer creates `.dev-pipeline/dev-pipeline.config.json`.
+  Instead it copies `config.example.json` next to the installed `driver.py`
+  (`.claude/skills/dev-pipeline/config.example.json`) so `bootstrap-config` can
+  find the template standalone. It still adds `.dev-pipeline/` to `.gitignore`.
+
 ## [1.1.1] - 2026-06-27
 
 ### Added

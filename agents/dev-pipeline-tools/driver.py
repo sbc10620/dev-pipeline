@@ -3,6 +3,7 @@
 dev-pipeline driver — deterministic state machine for the implement→test→review loop.
 
 Usage:
+  python3 driver.py bootstrap-config [--project <dir>]
   python3 driver.py init             --plan <path> [--config <path>] [--project <dir>]
   python3 driver.py advance          --run <run_dir>
   python3 driver.py status           --run <run_dir>
@@ -19,6 +20,8 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -30,9 +33,12 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
+# Config template, co-located with driver.py (install.sh copies it next to this
+# file). Resolved the same way as SCHEMA_DIR so an installed copy is standalone.
+EXAMPLE_PATH = pathlib.Path(__file__).parent / "config.example.json"
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 VALID_SEVERITIES = set(SEVERITY_RANK)
 
@@ -260,7 +266,7 @@ def cmd_init(args) -> None:
         pathlib.Path(args.project or ".").resolve() / ".dev-pipeline" / "dev-pipeline.config.json"
     )
     if not config_path.exists():
-        die(f"Config file not found: {config_path}\n  Run install.sh to seed .dev-pipeline/dev-pipeline.config.json, then fill in the tester instructions.")
+        die(f"Config file not found: {config_path}\n  Run /dev-pipeline once — it bootstraps .dev-pipeline/dev-pipeline.config.json from the template on first run — then fill in the tester instructions and re-run.")
 
     cfg = load_json(config_path)
     errors = validate_config_data(cfg)
@@ -498,6 +504,93 @@ def cmd_status(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: bootstrap-config
+# ---------------------------------------------------------------------------
+
+GITIGNORE_ENTRY = ".dev-pipeline/"
+
+
+def _git_toplevel(start: pathlib.Path) -> "pathlib.Path | None":
+    """Return the git repository root containing `start`, or None if not a repo."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    top = out.stdout.strip()
+    return pathlib.Path(top) if top else None
+
+
+def _ensure_gitignore_entry(project_root: pathlib.Path) -> bool:
+    """Idempotently ensure `.dev-pipeline/` is gitignored. Returns True if added."""
+    gitignore = project_root / ".gitignore"
+    if gitignore.exists():
+        lines = gitignore.read_text(encoding="utf-8").splitlines()
+        if GITIGNORE_ENTRY in lines:
+            return False
+        text = gitignore.read_text(encoding="utf-8")
+        sep = "" if text.endswith("\n") or text == "" else "\n"
+        gitignore.write_text(
+            f"{text}{sep}\n# dev-pipeline runtime directory\n{GITIGNORE_ENTRY}\n",
+            encoding="utf-8",
+        )
+    else:
+        gitignore.write_text(
+            f"# dev-pipeline runtime directory\n{GITIGNORE_ENTRY}\n",
+            encoding="utf-8",
+        )
+    return True
+
+
+def cmd_bootstrap_config(args) -> None:
+    """Create .dev-pipeline/dev-pipeline.config.json from the template if absent.
+
+    All filesystem decisions (project-root detection, directory creation, copy,
+    .gitignore handling) live here so the SKILL never runs ad-hoc shell for them.
+    """
+    if args.project:
+        project_root = pathlib.Path(args.project).resolve()
+    else:
+        git_root = _git_toplevel(pathlib.Path.cwd())
+        project_root = git_root if git_root is not None else pathlib.Path.cwd()
+
+    config_path = project_root / ".dev-pipeline" / "dev-pipeline.config.json"
+
+    if config_path.exists():
+        emit({
+            "status": "exists",
+            "project_root": str(project_root),
+            "config_path": str(config_path),
+        })
+        return
+
+    if not EXAMPLE_PATH.exists():
+        die(f"Config template not found: {EXAMPLE_PATH}\n  Re-run install.sh to repair the installation.")
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(EXAMPLE_PATH, config_path)
+
+    # Only touch .gitignore when project_root is actually a git repository.
+    is_git_repo = _git_toplevel(project_root) is not None
+    gitignore_updated = _ensure_gitignore_entry(project_root) if is_git_repo else False
+
+    emit({
+        "status": "created",
+        "project_root": str(project_root),
+        "config_path": str(config_path),
+        "gitignore_updated": gitignore_updated,
+        "required_fields": [
+            "llm.tester.build_instruction",
+            "llm.tester.install_instruction",
+            "llm.tester.test_instruction",
+        ],
+        "next_action": "Fill in the three tester instructions (placeholder <...> values are rejected), then re-run /dev-pipeline --plan <path>.",
+    })
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: validate-config
 # ---------------------------------------------------------------------------
 
@@ -650,9 +743,11 @@ WORKFLOW OVERVIEW
 1. Write a plan.md describing what to implement.
 2. Install dev-pipeline into your project:
      bash /path/to/dev-pipeline/install.sh /path/to/project
-3. Edit .dev-pipeline/dev-pipeline.config.json — fill in build/install/test instructions.
-4. Invoke the SKILL inside Claude Code:
+3. Invoke the SKILL inside Claude Code:
      /dev-pipeline --plan plan.md
+   On first run it bootstraps .dev-pipeline/dev-pipeline.config.json from the
+   template and stops so you can fill in build/install/test instructions.
+4. Edit .dev-pipeline/dev-pipeline.config.json, then re-run /dev-pipeline.
 
 STATES
 ------
@@ -665,6 +760,7 @@ STATES
 
 DRIVER CLI
 ----------
+  bootstrap-config Seed .dev-pipeline/dev-pipeline.config.json from the template
   init             Create a new run from a plan + config
   advance          Compute and apply the next state transition
   status           Print current run state
@@ -711,6 +807,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(add_help=False)
     sub = parser.add_subparsers(dest="cmd")
 
+    p_bc = sub.add_parser("bootstrap-config")
+    p_bc.add_argument("--project")
+
     p_init = sub.add_parser("init")
     p_init.add_argument("--plan", required=True)
     p_init.add_argument("--config")
@@ -743,6 +842,7 @@ def main() -> None:
     args = parser.parse_args()
 
     dispatch = {
+        "bootstrap-config": cmd_bootstrap_config,
         "init":             cmd_init,
         "advance":          cmd_advance,
         "status":           cmd_status,

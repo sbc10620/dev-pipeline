@@ -15,6 +15,7 @@ Run:
 
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -684,6 +685,88 @@ class TestAppendAttempt(PipelineTestCase):
         r = run_driver("append-attempt", "--run", str(p.run_dir),
                        "--state", "test", "--outcome", "   ")
         self.assertNotEqual(r.returncode, 0)
+
+
+class TestBootstrapConfig(unittest.TestCase):
+    """bootstrap-config seeds the config from the template deterministically."""
+
+    def _tmp_project(self, git=False):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        if git:
+            subprocess.run(["git", "init", "-q", str(d)], check=True)
+        return d
+
+    def test_creates_config_in_non_git_dir(self):
+        proj = self._tmp_project(git=False)
+        r = run_driver("bootstrap-config", "--project", str(proj))
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.json["status"], "created")
+        config = proj / ".dev-pipeline" / "dev-pipeline.config.json"
+        self.assertTrue(config.exists())
+        # No git repo → .gitignore is not touched.
+        self.assertFalse(r.json["gitignore_updated"])
+        self.assertFalse((proj / ".gitignore").exists())
+        self.assertEqual(
+            r.json["required_fields"],
+            ["llm.tester.build_instruction",
+             "llm.tester.install_instruction",
+             "llm.tester.test_instruction"],
+        )
+
+    def test_existing_config_not_overwritten(self):
+        proj = self._tmp_project(git=False)
+        run_driver("bootstrap-config", "--project", str(proj))
+        config = proj / ".dev-pipeline" / "dev-pipeline.config.json"
+        config.write_text('{"sentinel": true}', encoding="utf-8")
+
+        r = run_driver("bootstrap-config", "--project", str(proj))
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.json["status"], "exists")
+        # Content is preserved, not re-seeded from the template.
+        self.assertEqual(json.loads(config.read_text(encoding="utf-8")),
+                         {"sentinel": True})
+
+    def test_gitignore_updated_in_git_repo(self):
+        proj = self._tmp_project(git=True)
+        r = run_driver("bootstrap-config", "--project", str(proj))
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.json["status"], "created")
+        self.assertTrue(r.json["gitignore_updated"])
+        gitignore = proj / ".gitignore"
+        self.assertIn(".dev-pipeline/",
+                      gitignore.read_text(encoding="utf-8").splitlines())
+
+    def test_gitignore_entry_is_idempotent(self):
+        proj = self._tmp_project(git=True)
+        (proj / ".gitignore").write_text(".dev-pipeline/\n", encoding="utf-8")
+        r = run_driver("bootstrap-config", "--project", str(proj))
+        self.assertEqual(r.returncode, 0)
+        # Already present → not added again.
+        self.assertFalse(r.json["gitignore_updated"])
+        occurrences = (proj / ".gitignore").read_text(
+            encoding="utf-8").splitlines().count(".dev-pipeline/")
+        self.assertEqual(occurrences, 1)
+
+    def test_seeded_config_validates_after_filling_instructions(self):
+        proj = self._tmp_project(git=False)
+        run_driver("bootstrap-config", "--project", str(proj))
+        config = proj / ".dev-pipeline" / "dev-pipeline.config.json"
+
+        # The template ships with placeholder tester instructions, so it must
+        # NOT validate until the user fills them in.
+        r_before = run_driver("validate-config", "--config", str(config))
+        self.assertNotEqual(r_before.returncode, 0)
+
+        cfg = json.loads(config.read_text(encoding="utf-8"))
+        cfg["llm"]["tester"]["build_instruction"] = "no build step"
+        cfg["llm"]["tester"]["install_instruction"] = "no install step"
+        cfg["llm"]["tester"]["test_instruction"] = "pytest"
+        config.write_text(json.dumps(cfg), encoding="utf-8")
+
+        r_after = run_driver("validate-config", "--config", str(config))
+        self.assertEqual(r_after.returncode, 0)
+        self.assertTrue(r_after.json["valid"])
 
 
 if __name__ == "__main__":

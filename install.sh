@@ -18,16 +18,19 @@ What gets installed:
   .claude/skills/dev-pipeline/SKILL.md
   .claude/skills/dev-pipeline/driver.py
   .claude/skills/dev-pipeline/schemas/  (JSON schemas)
-  .dev-pipeline/dev-pipeline.config.json (seeded from config.example.json, if not already present)
+  .claude/skills/dev-pipeline/config.example.json  (config template)
 
-The config lives inside .dev-pipeline/ (gitignored) so it never clutters the
-project root or gets confused with the project's own source files.
+This installer does NOT create .dev-pipeline/dev-pipeline.config.json. The skill
+bootstraps it from the template on the first /dev-pipeline run (driver
+bootstrap-config) and stops so you can fill in the tester instructions. The
+config lives inside .dev-pipeline/ (gitignored) so it never clutters the project
+root or gets confused with the project's own source files.
 
 The installed .claude/ files are NOT gitignored (their history is tracked, e.g.
 for self-evolution). Commit them before running /dev-pipeline so the reviewer
 does not mistake them for your changes (the install output explains how).
 
-After installation, edit <project-dir>/.dev-pipeline/dev-pipeline.config.json and fill in:
+After the first /dev-pipeline run, edit <project-dir>/.dev-pipeline/dev-pipeline.config.json and fill in:
   llm.tester.build_instruction
   llm.tester.install_instruction
   llm.tester.test_instruction
@@ -47,8 +50,8 @@ SOURCE_AGENTS="${SCRIPT_DIR}/claude/agents"
 SOURCE_SKILL="${SCRIPT_DIR}/claude/skills/dev-pipeline"
 SOURCE_TOOLS="${SCRIPT_DIR}/agents/dev-pipeline-tools"
 CONFIG_EXAMPLE="${SOURCE_TOOLS}/config.example.json"
+# Display-only path; the skill (driver bootstrap-config) creates this on first run.
 RUNTIME_DIR="${PROJECT_DIR}/.dev-pipeline"
-CONFIG_DST="${RUNTIME_DIR}/dev-pipeline.config.json"
 GITIGNORE="${PROJECT_DIR}/.gitignore"
 
 # Read the version from driver.py (the single source of truth).
@@ -58,7 +61,7 @@ DP_VERSION="${DP_VERSION:-unknown}"
 echo "[dev-pipeline] Installing version ${DP_VERSION} into: ${PROJECT_DIR}"
 
 # Create destination directories
-mkdir -p "${AGENTS_DST}" "${SKILLS_DST}/schemas" "${RUNTIME_DIR}"
+mkdir -p "${AGENTS_DST}" "${SKILLS_DST}/schemas"
 
 # Copy agent files
 for f in dp-implementor.md dp-tester.md dp-reviewer.md; do
@@ -90,13 +93,15 @@ for f in config.schema.json test-result.schema.json review-result.schema.json st
 done
 echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/schemas/ (4 files)"
 
-# Seed config into .dev-pipeline/ (only if not already present)
-if [[ ! -f "${CONFIG_DST}" ]]; then
-  cp "${CONFIG_EXAMPLE}" "${CONFIG_DST}"
-  echo "[dev-pipeline] Created: .dev-pipeline/dev-pipeline.config.json (from example)"
-else
-  echo "[dev-pipeline] Skipped: .dev-pipeline/dev-pipeline.config.json already exists"
+# Copy the config template next to driver.py so `driver bootstrap-config` can
+# seed .dev-pipeline/dev-pipeline.config.json on the first /dev-pipeline run.
+# This installer intentionally does NOT create the config itself.
+if [[ ! -f "${CONFIG_EXAMPLE}" ]]; then
+  echo "[dev-pipeline] ERROR: Config template not found: ${CONFIG_EXAMPLE}"
+  exit 1
 fi
+cp "${CONFIG_EXAMPLE}" "${SKILLS_DST}/config.example.json"
+echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/config.example.json"
 
 # Gitignore the runtime directory only.
 # The installed machinery under .claude/ is intentionally NOT gitignored: it is
@@ -132,12 +137,15 @@ echo "            .claude/agents/dp-reviewer.md .claude/skills/dev-pipeline/"
 echo "    git commit -m \"Add dev-pipeline (agents + skill)\""
 echo ""
 echo "Next steps:"
-echo "  1. Edit ${CONFIG_DST}"
+echo "  1. Write your plan.md"
+echo ""
+echo "  2. In Claude Code, run:"
+echo "     /dev-pipeline --plan plan.md"
+echo "     The first run creates ${RUNTIME_DIR}/dev-pipeline.config.json"
+echo "     from the template and stops."
+echo ""
+echo "  3. Edit ${RUNTIME_DIR}/dev-pipeline.config.json"
 echo "     Fill in: llm.tester.build_instruction"
 echo "              llm.tester.install_instruction"
 echo "              llm.tester.test_instruction"
-echo ""
-echo "  2. Write your plan.md"
-echo ""
-echo "  3. In Claude Code, run:"
-echo "     /dev-pipeline --plan plan.md"
+echo "     Then re-run /dev-pipeline --plan plan.md"

@@ -54,7 +54,8 @@ No other arguments are accepted. If any unknown argument is present, report an e
     failed            Stops with explanation when iterations exhausted or environment error
 
   Prerequisites:
-    - .dev-pipeline/dev-pipeline.config.json must exist (created by install.sh)
+    - .dev-pipeline/dev-pipeline.config.json — created automatically on the
+      first run (from the template); fill in the tester instructions, then re-run
     - Fill in llm.tester.build_instruction, install_instruction, test_instruction
     - Start with a clean working tree (no unrelated uncommitted changes)
 
@@ -75,7 +76,25 @@ No other arguments are accepted. If any unknown argument is present, report an e
   ```bash
   dir="$(pwd)"; while [ "$dir" != "/" ]; do [ -f "$dir/.dev-pipeline/dev-pipeline.config.json" ] && echo "$dir" && break; dir="$(dirname "$dir")"; done
   ```
-  If it prints nothing, also try walking upward from the plan file's directory (replace `$(pwd)` with the plan's directory). If still not found, stop with: "`.dev-pipeline/dev-pipeline.config.json` not found — run install.sh first." Save the result as `project_root`.
+  If it prints nothing, also try walking upward from the plan file's directory (replace `$(pwd)` with the plan's directory).
+  - **(a) Found** → save the printed directory as `project_root` and continue to Step 0.5.
+  - **(b) Not found** → bootstrap the config via the driver (do NOT create directories or copy files yourself — the driver owns all of this):
+    ```bash
+    python3 <driver_path> bootstrap-config
+    ```
+    Parse the JSON output:
+    - `status == "created"`: the driver created the config from the template. **Stop here** and tell the user, using the returned `config_path` and `required_fields`:
+      > "✅ Created the dev-pipeline config from the template:
+      > `<config_path>`
+      >
+      > Before running, fill in these required fields (placeholder `<...>` values are rejected):
+      > - `llm.tester.build_instruction` (e.g. `npm run build`, or `no build step`)
+      > - `llm.tester.install_instruction` (e.g. `npm ci`, or `no install step`)
+      > - `llm.tester.test_instruction` (e.g. `npm test`, or `no test step`)
+      >
+      > Then re-run `/dev-pipeline --plan <your-plan.md>`."
+    - `status == "exists"` (rare race — another process created it): save the returned `project_root` and continue to Step 0.5.
+    - Non-zero exit: report the driver's error to the user and stop (e.g. the config template was not found — re-run install.sh to repair).
 
 - [Step 0.5] Remind the user: **"For accurate review results, start this pipeline with a clean working tree (no unrelated uncommitted changes). In particular, the installed dev-pipeline files (`.claude/agents/dp-*.md` and `.claude/skills/dev-pipeline/`) should already be committed — otherwise they appear as untracked files in the review scope and the reviewer may review dev-pipeline's own tooling instead of your code."**
 
@@ -83,7 +102,7 @@ No other arguments are accepted. If any unknown argument is present, report an e
 - [ ] No unknown arguments
 - [ ] `--plan` argument is present and the file exists
 - [ ] `driver.py` found at `<skill_dir>/driver.py`
-- [ ] Project root (with `.dev-pipeline/dev-pipeline.config.json`) identified
+- [ ] Project root identified — config found, OR bootstrapped via `driver bootstrap-config` (stop-and-configure on `status: "created"`)
 - [ ] User notified about clean working tree
 
 ---

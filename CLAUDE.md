@@ -91,13 +91,13 @@ Codex is called with `--wait --json`. The `payload.result` field maps 1:1 to the
 | `claude/agents/dp-tester.md` | Tester subagent — exit-code-only pass/fail, classifies `failure_type` |
 | `claude/agents/dp-reviewer.md` | Reviewer subagent — fully read-only, codex fallback |
 | `claude/skills/dev-pipeline/SKILL.md` | Orchestrator skill — step-by-step workflow with checklists per state |
-| `install.sh` | Copies agents+skill into `<project>/.claude/`, seeds config, updates .gitignore |
+| `install.sh` | Copies agents+skill (+ `config.example.json` template) into `<project>/.claude/`, updates .gitignore. Does NOT seed the config — the skill bootstraps it on first run. |
 
 ### Runtime layout (inside target project, not this repo)
 
 ```
 <project>/.dev-pipeline/
-├── dev-pipeline.config.json   # user config — seeded by install.sh, lives here (gitignored), NOT in project root
+├── dev-pipeline.config.json   # user config — bootstrapped by the skill (driver bootstrap-config) on first run, lives here (gitignored), NOT in project root
 ├── latest -> runs/<run-id>
 └── runs/<YYYYMMDD-HHMMSS>/
 ├── state.json           # driver owns this
@@ -112,7 +112,7 @@ Codex is called with `--wait --json`. The `payload.result` field maps 1:1 to the
 
 ## Config requirements
 
-`.dev-pipeline/dev-pipeline.config.json` must be present in the target project (seeded by `install.sh` inside the gitignored `.dev-pipeline/` directory, not the project root). The three tester instructions are **mandatory and may not contain placeholder values** (`<...>`):
+`.dev-pipeline/dev-pipeline.config.json` must be present in the target project. It is **bootstrapped by the skill on the first `/dev-pipeline` run** — when the config is absent, the SKILL calls `driver bootstrap-config`, which copies it from the template into the gitignored `.dev-pipeline/` directory (not the project root) and stops so the user can configure it. The three tester instructions are **mandatory and may not contain placeholder values** (`<...>`):
 
 ```json
 "tester": {
@@ -147,4 +147,4 @@ python3 -m unittest discover -s agents/dev-pipeline-tools/test -v
 bash install.sh <project-dir>
 ```
 
-Installs into `<project-dir>/.claude/` only (never user-global). `install.sh` copies `driver.py` and the `schemas/` directory into `<project-dir>/.claude/skills/dev-pipeline/` so the installed pipeline runs standalone without the source repo present. `driver.py` resolves its schemas relative to its own location (`SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"`), so the copied driver finds the copied schemas. The SKILL locates the driver as `<skill_dir>/driver.py`.
+Installs into `<project-dir>/.claude/` only (never user-global). `install.sh` copies `driver.py`, the `schemas/` directory, and `config.example.json` into `<project-dir>/.claude/skills/dev-pipeline/` so the installed pipeline runs standalone without the source repo present. `driver.py` resolves both its schemas and the config template relative to its own location (`SCHEMA_DIR` / `EXAMPLE_PATH = pathlib.Path(__file__).parent / ...`), so the copied driver finds them. The SKILL locates the driver as `<skill_dir>/driver.py`. `install.sh` does **not** create the config — `driver bootstrap-config` seeds it from the template on the first run.
