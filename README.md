@@ -107,8 +107,9 @@ In Claude Code, with your project open:
 
 **Prerequisites:**
 - `.dev-pipeline/dev-pipeline.config.json` must be present and valid
+- **Commit the installed dev-pipeline files** (`.claude/agents/dp-*.md`, `.claude/skills/dev-pipeline/`) before running. They are tracked (not gitignored, so self-evolution can manage their history), and the review uses `working-tree` scope — committing them keeps the reviewer focused on your code instead of dev-pipeline's own tooling.
 - Start with a **clean working tree** (no unrelated uncommitted changes — they will be included in the review scope)
-- **Gitignore your build outputs** (compiled binaries, object files, etc.). The review uses `working-tree` scope, so any untracked artifact produced by the test phase would otherwise be reviewed alongside your real changes. (dev-pipeline's own installed files under `.claude/` and `.dev-pipeline/` are gitignored by `install.sh` for this reason.)
+- **Gitignore your build outputs** (compiled binaries, object files, etc.). The review uses `working-tree` scope, so any untracked artifact produced by the test phase would otherwise be reviewed alongside your real changes.
 
 ---
 

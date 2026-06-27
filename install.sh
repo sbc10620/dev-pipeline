@@ -23,6 +23,10 @@ What gets installed:
 The config lives inside .dev-pipeline/ (gitignored) so it never clutters the
 project root or gets confused with the project's own source files.
 
+The installed .claude/ files are NOT gitignored (their history is tracked, e.g.
+for self-evolution). Commit them before running /dev-pipeline so the reviewer
+does not mistake them for your changes (the install output explains how).
+
 After installation, edit <project-dir>/.dev-pipeline/dev-pipeline.config.json and fill in:
   llm.tester.build_instruction
   llm.tester.install_instruction
@@ -90,47 +94,36 @@ else
   echo "[dev-pipeline] Skipped: .dev-pipeline/dev-pipeline.config.json already exists"
 fi
 
-# Gitignore the runtime directory AND the installed machinery.
-# Reason: the reviewer scope (codex --scope working-tree, and the dp-reviewer
-# fallback's `git ls-files --others`) would otherwise sweep in these untracked
-# files and review dev-pipeline's own tooling instead of the user's changes.
-GITIGNORE_ENTRIES=(
-  ".dev-pipeline/"
-  ".claude/agents/dp-implementor.md"
-  ".claude/agents/dp-tester.md"
-  ".claude/agents/dp-reviewer.md"
-  ".claude/skills/dev-pipeline/"
-)
-
-created=0
-if [[ ! -f "${GITIGNORE}" ]]; then
-  : > "${GITIGNORE}"
-  created=1
-fi
-
-added=0
-# Ensure the section header exists only when we actually add something below.
-for entry in "${GITIGNORE_ENTRIES[@]}"; do
-  if grep -qxF "${entry}" "${GITIGNORE}" 2>/dev/null; then
-    continue
+# Gitignore the runtime directory only.
+# The installed machinery under .claude/ is intentionally NOT gitignored: it is
+# tracked so its history can be managed (e.g. by self-evolution). To keep the
+# reviewer from confusing the installed agents/skill with the user's changes,
+# the user must COMMIT the installed .claude/ files before running /dev-pipeline
+# (see the post-install notice below). Once committed, they are no longer part
+# of the working-tree review scope.
+GITIGNORE_ENTRY=".dev-pipeline/"
+if [[ -f "${GITIGNORE}" ]]; then
+  if grep -qxF "${GITIGNORE_ENTRY}" "${GITIGNORE}" 2>/dev/null; then
+    echo "[dev-pipeline] .gitignore: .dev-pipeline/ already present"
+  else
+    printf '\n# dev-pipeline runtime directory\n%s\n' "${GITIGNORE_ENTRY}" >> "${GITIGNORE}"
+    echo "[dev-pipeline] Updated: .gitignore (added .dev-pipeline/)"
   fi
-  if [[ "${added}" -eq 0 ]]; then
-    printf '\n# dev-pipeline (runtime + installed machinery — kept out of review scope)\n' >> "${GITIGNORE}"
-  fi
-  printf '%s\n' "${entry}" >> "${GITIGNORE}"
-  added=$((added + 1))
-done
-
-if [[ "${created}" -eq 1 ]]; then
-  echo "[dev-pipeline] Created: .gitignore (with ${added} dev-pipeline entries)"
-elif [[ "${added}" -gt 0 ]]; then
-  echo "[dev-pipeline] Updated: .gitignore (added ${added} dev-pipeline entr$([[ ${added} -eq 1 ]] && echo y || echo ies))"
 else
-  echo "[dev-pipeline] .gitignore: all dev-pipeline entries already present"
+  printf '# dev-pipeline runtime directory\n%s\n' "${GITIGNORE_ENTRY}" > "${GITIGNORE}"
+  echo "[dev-pipeline] Created: .gitignore (with .dev-pipeline/)"
 fi
 
 echo ""
 echo "[dev-pipeline] Installation complete."
+echo ""
+echo "IMPORTANT: Commit the installed dev-pipeline files BEFORE running /dev-pipeline."
+echo "  The review step uses working-tree scope, so any uncommitted/untracked file"
+echo "  is treated as part of your change. Committing the installed agents and skill"
+echo "  keeps the reviewer focused on your code, not on dev-pipeline's own tooling:"
+echo "    git add .claude/agents/dp-implementor.md .claude/agents/dp-tester.md \\"
+echo "            .claude/agents/dp-reviewer.md .claude/skills/dev-pipeline/"
+echo "    git commit -m \"Add dev-pipeline (agents + skill)\""
 echo ""
 echo "Next steps:"
 echo "  1. Edit ${CONFIG_DST}"

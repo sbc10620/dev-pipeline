@@ -77,7 +77,7 @@ No other arguments are accepted. If any unknown argument is present, report an e
   ```
   If it prints nothing, also try walking upward from the plan file's directory (replace `$(pwd)` with the plan's directory). If still not found, stop with: "`.dev-pipeline/dev-pipeline.config.json` not found — run install.sh first." Save the result as `project_root`.
 
-- [Step 0.5] Remind the user: **"For accurate review results, start this pipeline with a clean working tree (no unrelated uncommitted changes)."**
+- [Step 0.5] Remind the user: **"For accurate review results, start this pipeline with a clean working tree (no unrelated uncommitted changes). In particular, the installed dev-pipeline files (`.claude/agents/dp-*.md` and `.claude/skills/dev-pipeline/`) should already be committed — otherwise they appear as untracked files in the review scope and the reviewer may review dev-pipeline's own tooling instead of your code."**
 
 **Step 0 checklist:**
 - [ ] No unknown arguments
@@ -349,19 +349,19 @@ No other arguments are accepted. If any unknown argument is present, report an e
 - [Step 5.3] **Workflow Retrospective Feedback** — Review `state.json` history and evaluate each state's execution against the workflow rules. Output to the user:
 
   ```markdown
-  ## Workflow 회고 피드백
+  ## Workflow Retrospective Feedback
 
   ### init state
-  - <issues with init procedure, or "특이사항 없음">
+  - <issues with init procedure, or "No issues">
 
   ### implementation state
-  - <issues with implementation procedure across all iterations, or "특이사항 없음">
+  - <issues with implementation procedure across all iterations, or "No issues">
 
   ### test state
-  - <issues with test procedure, or "특이사항 없음">
+  - <issues with test procedure, or "No issues">
 
   ### review state
-  - <issues with review procedure, or "특이사항 없음">
+  - <issues with review procedure, or "No issues">
   ```
 
   Be honest. If the workflow was not followed precisely (e.g., an advance was called out of order, a validation was skipped), note it.
@@ -373,6 +373,12 @@ No other arguments are accepted. If any unknown argument is present, report an e
   - If `/advisor` is not active: only apply changes that are clearly necessary.
   - Modify the **installed** agent files (in the project's `.claude/agents/` or `.claude/skills/`).
   - Notify the user that source repo files are NOT updated.
+  - **If any installed file was changed, commit those changes** (in a git repo) as a separate commit so the evolution is tracked independently of the implementation commit from Step 5.1:
+    ```bash
+    git add <the changed .claude/ files>
+    git commit -m "dev-pipeline self-evolution: <one-line summary of what was tuned>"
+    ```
+    Do NOT push. If no file was changed, skip the commit. If not a git repo, inform the user that the evolution changes were not committed.
 
 - [Step 5.5] **Next-step recommendations** — Based on the work done, suggest 2-3 concrete next actions for the user.
 
@@ -380,7 +386,7 @@ No other arguments are accepted. If any unknown argument is present, report an e
 - [ ] Commit done (or skip with user notification)
 - [ ] plan file, spec.md, .dev-pipeline/ are NOT in the commit
 - [ ] Retrospective feedback output with all 4 state sections
-- [ ] Self-evolution skipped or performed conservatively
+- [ ] Self-evolution skipped or performed conservatively (and changes committed separately if any were made)
 - [ ] Next-step recommendations provided
 
 ---
