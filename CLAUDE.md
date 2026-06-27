@@ -19,9 +19,20 @@ python3 agents/dev-pipeline-tools/driver.py advance --run <run_dir>
 # Convert codex --json payload to canonical review-result JSON
 python3 agents/dev-pipeline-tools/driver.py normalize-review --source codex --in codex-raw.json --out review-result.json
 
+# Print version
+python3 agents/dev-pipeline-tools/driver.py --version
+
 # Full usage
 python3 agents/dev-pipeline-tools/driver.py --help
 ```
+
+## Versioning
+
+- **Single source of truth:** `__version__` in `agents/dev-pipeline-tools/driver.py`. SemVer.
+- `install.sh` and `state.json` (`dev_pipeline_version`) **read** this value — never hardcode the version elsewhere.
+- To cut a release: bump `__version__`, add a `CHANGELOG.md` section, commit, then `git tag -a <version>`.
+- An installed copy self-reports with `python3 .claude/skills/dev-pipeline/driver.py --version` (the install is a copy, so this is how you tell a stale install from the current source).
+- MAJOR bump when an existing install would break (e.g. the 1.1.0 config relocation from project root into `.dev-pipeline/`).
 
 ## Architecture
 

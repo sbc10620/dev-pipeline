@@ -51,7 +51,11 @@ RUNTIME_DIR="${PROJECT_DIR}/.dev-pipeline"
 CONFIG_DST="${RUNTIME_DIR}/dev-pipeline.config.json"
 GITIGNORE="${PROJECT_DIR}/.gitignore"
 
-echo "[dev-pipeline] Installing into: ${PROJECT_DIR}"
+# Read the version from driver.py (the single source of truth).
+DP_VERSION="$(python3 "${SOURCE_TOOLS}/driver.py" --version 2>/dev/null | awk '{print $2}')"
+DP_VERSION="${DP_VERSION:-unknown}"
+
+echo "[dev-pipeline] Installing version ${DP_VERSION} into: ${PROJECT_DIR}"
 
 # Create destination directories
 mkdir -p "${AGENTS_DST}" "${SKILLS_DST}/schemas" "${RUNTIME_DIR}"
@@ -115,7 +119,9 @@ else
 fi
 
 echo ""
-echo "[dev-pipeline] Installation complete."
+echo "[dev-pipeline] Installation complete (version ${DP_VERSION})."
+echo "  Check the installed version anytime with:"
+echo "    python3 .claude/skills/dev-pipeline/driver.py --version"
 echo ""
 echo "IMPORTANT: Commit the installed dev-pipeline files BEFORE running /dev-pipeline."
 echo "  The review step uses working-tree scope, so any uncommitted/untracked file"

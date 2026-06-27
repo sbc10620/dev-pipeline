@@ -169,11 +169,31 @@ Each `run-id` is a timestamp (`YYYYMMDD-HHMMSS`). Previous runs are preserved fo
 
 ```bash
 python3 agents/dev-pipeline-tools/driver.py --help
+python3 agents/dev-pipeline-tools/driver.py --version
 python3 agents/dev-pipeline-tools/driver.py validate-config --config .dev-pipeline/dev-pipeline.config.json
 python3 agents/dev-pipeline-tools/driver.py status --run .dev-pipeline/latest
 python3 agents/dev-pipeline-tools/driver.py normalize-review --source codex \
     --in codex-raw.json --out review-result.json
 ```
+
+---
+
+## Versioning
+
+dev-pipeline follows [Semantic Versioning](https://semver.org/). The version is
+defined once, in `driver.py`, and read everywhere else.
+
+```bash
+# Source repo
+python3 agents/dev-pipeline-tools/driver.py --version
+
+# An installed copy (tells you whether your install is stale vs. the latest source)
+python3 .claude/skills/dev-pipeline/driver.py --version
+```
+
+Each run also records the version under `dev_pipeline_version` in its `state.json`.
+See [CHANGELOG.md](CHANGELOG.md) for release history. Because installs are copies,
+re-run `install.sh` to upgrade an existing install to a newer version.
 
 ---
 

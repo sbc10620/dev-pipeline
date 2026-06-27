@@ -10,6 +10,7 @@ Usage:
   python3 driver.py validate-result  --type test|review --file <path>
   python3 driver.py normalize-review --source codex --in <file> --out <file>
   python3 driver.py append-attempt   --run <run_dir> --state <test|review> --outcome <text-or-file>
+  python3 driver.py --version
   python3 driver.py --help
 """
 
@@ -25,6 +26,11 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+# Single source of truth for the dev-pipeline version. driver.py is the only
+# executable copied into installs, so install.sh and state.json read this value
+# rather than maintaining their own copy.
+__version__ = "1.1.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
@@ -286,6 +292,7 @@ def cmd_init(args) -> None:
     ts = now_iso()
     state_obj = {
         "run_id": rid,
+        "dev_pipeline_version": __version__,
         "state": "init",
         "plan_path": str(plan_path),
         "config_path": str(config_path),
@@ -665,6 +672,7 @@ DRIVER CLI
   validate-result  Check a test-result or review-result file
   normalize-review Convert codex --json payload → canonical review-result JSON
   append-attempt   Log a failed attempt to attempts.md for implementor context
+  --version        Print the dev-pipeline version and exit
   --help           Show this message
 
 ITERATION LIMITS
@@ -692,6 +700,10 @@ CONFIG REQUIREMENTS
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V", "version"):
+        print(f"dev-pipeline {__version__}")
+        sys.exit(0)
+
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h", "help"):
         print(HELP_TEXT)
         sys.exit(0)

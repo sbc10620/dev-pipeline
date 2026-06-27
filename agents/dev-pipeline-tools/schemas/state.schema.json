@@ -2,9 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["run_id", "state", "plan_path", "config_path", "spec_path", "project_dir", "iterations", "max", "history", "started_at", "updated_at"],
+  "required": ["run_id", "dev_pipeline_version", "state", "plan_path", "config_path", "spec_path", "project_dir", "iterations", "max", "history", "started_at", "updated_at"],
   "properties": {
-    "run_id":      { "type": "string" },
+    "run_id":                { "type": "string" },
+    "dev_pipeline_version":  { "type": "string" },
     "state": {
       "type": "string",
       "enum": ["init", "implementation", "test", "review", "done", "failed"]
