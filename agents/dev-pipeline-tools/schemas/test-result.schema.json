@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "stages", "summary"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["pass", "fail"]
+    },
+    "failure_type": {
+      "oneOf": [
+        { "type": "string", "enum": ["code", "environment"] },
+        { "type": "null" }
+      ],
+      "description": "Advisory classification: 'code' for implementation defects, 'environment' for toolchain/dependency/network issues unrelated to the code. Always null when status is pass. When ambiguous, use 'code' (conservative)."
+    },
+    "stages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "command", "exit_code", "status", "summary"],
+        "properties": {
+          "name":      { "type": "string", "enum": ["build", "install", "test"] },
+          "command":   { "type": "string" },
+          "exit_code": { "type": ["integer", "null"] },
+          "status":    { "type": "string", "enum": ["pass", "fail", "skipped"] },
+          "summary":   { "type": "string" }
+        }
+      }
+    },
+    "summary": { "type": "string", "minLength": 1 },
+    "failure_details": { "type": "string" },
+    "log_excerpt":     { "type": "string" }
+  }
+}

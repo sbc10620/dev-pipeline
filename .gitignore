@@ -1,0 +1,9 @@
+# dev-pipeline runtime directory (created at install target projects)
+.dev-pipeline/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store

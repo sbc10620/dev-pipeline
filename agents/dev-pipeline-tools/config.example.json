@@ -1,0 +1,34 @@
+{
+  "driver": {
+    "max_test_iteration": 3,
+    "max_review_iteration": 3,
+    "run_self_evolution": false,
+    "review_block_severity": ["critical", "high"]
+  },
+  "llm": {
+    "implementor": {
+      "design_instruction": "Prefer reusing existing code patterns and utilities. Stay within the plan/spec scope. Implement in small, clear, testable units. Write code comments in English."
+    },
+    "tester": {
+      "build_instruction": "<REQUIRED: build command, e.g. 'npm run build' — or 'no build step' if not applicable>",
+      "install_instruction": "<REQUIRED: install command, e.g. 'npm ci' — or 'no install step' if not applicable>",
+      "test_instruction": "<REQUIRED: test command, e.g. 'npm test' — or 'no test step' if not applicable>"
+    },
+    "reviewer": {
+      "focus": "Adversarially review for correctness, boundary/exception handling, data integrity, security boundaries, and regression risk. Always verify that the spec's acceptance criteria are met.",
+      "scope": "working-tree"
+    }
+  },
+  "runners": {
+    "implementor": [
+      { "type": "claude-subagent", "agent": "dp-implementor" }
+    ],
+    "tester": [
+      { "type": "claude-subagent", "agent": "dp-tester" }
+    ],
+    "reviewer": [
+      { "type": "codex-adversarial-review" },
+      { "type": "claude-subagent", "agent": "dp-reviewer" }
+    ]
+  }
+}

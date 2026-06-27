@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "state", "plan_path", "config_path", "spec_path", "project_dir", "iterations", "max", "history", "started_at", "updated_at"],
+  "properties": {
+    "run_id":      { "type": "string" },
+    "state": {
+      "type": "string",
+      "enum": ["init", "implementation", "test", "review", "done", "failed"]
+    },
+    "plan_path":    { "type": "string" },
+    "config_path":  { "type": "string" },
+    "spec_path":    { "type": "string" },
+    "project_dir":  { "type": "string" },
+    "iterations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["test", "review"],
+      "properties": {
+        "test":   { "type": "integer", "minimum": 0 },
+        "review": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "max": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["test", "review"],
+      "properties": {
+        "test":   { "type": "integer", "minimum": 1 },
+        "review": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "halt_reason": {
+      "oneOf": [
+        { "type": "string", "enum": ["environment", "iteration-exhausted"] },
+        { "type": "null" }
+      ]
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state", "ts", "outcome"],
+        "properties": {
+          "state":        { "type": "string" },
+          "ts":           { "type": "string" },
+          "outcome":      { "type": "string" },
+          "failure_type": {
+            "oneOf": [
+              { "type": "string", "enum": ["code", "environment"] },
+              { "type": "null" }
+            ]
+          }
+        }
+      }
+    },
+    "started_at":  { "type": "string" },
+    "updated_at":  { "type": "string" }
+  }
+}

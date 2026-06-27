@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["driver", "llm", "runners"],
+  "properties": {
+    "driver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_test_iteration", "max_review_iteration", "run_self_evolution"],
+      "properties": {
+        "max_test_iteration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_review_iteration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_self_evolution": {
+          "type": "boolean"
+        },
+        "review_block_severity": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["critical", "high", "medium", "low"]
+              },
+              "minItems": 1
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "llm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implementor", "tester", "reviewer"],
+      "properties": {
+        "implementor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["design_instruction"],
+          "properties": {
+            "design_instruction": { "type": "string", "minLength": 1 }
+          }
+        },
+        "tester": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["build_instruction", "install_instruction", "test_instruction"],
+          "properties": {
+            "build_instruction":   { "type": "string", "minLength": 1 },
+            "install_instruction": { "type": "string", "minLength": 1 },
+            "test_instruction":    { "type": "string", "minLength": 1 }
+          }
+        },
+        "reviewer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["focus", "scope"],
+          "properties": {
+            "focus": { "type": "string", "minLength": 1 },
+            "scope": {
+              "type": "string",
+              "enum": ["working-tree", "branch", "auto"]
+            }
+          }
+        }
+      }
+    },
+    "runners": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implementor", "tester", "reviewer"],
+      "properties": {
+        "implementor": { "$ref": "#/$defs/runner_array" },
+        "tester":      { "$ref": "#/$defs/runner_array" },
+        "reviewer":    { "$ref": "#/$defs/runner_array" }
+      }
+    }
+  },
+  "$defs": {
+    "runner_array": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["claude-subagent", "codex-adversarial-review", "bash"]
+          },
+          "agent":       { "type": "string" },
+          "command":     { "type": "string" },
+          "result_path": { "type": "string" }
+        }
+      }
+    }
+  }
+}
