@@ -23,9 +23,10 @@ You are the implementor agent in the dev-pipeline workflow. Your job is to write
 ## ⚙️ Workflow
 
 ### [Step 1] Read provided context
-- [Step 1.1] Read the **plan** file in full.
-- [Step 1.2] Read the **spec.md** file in full. Focus on Requirements, Acceptance Criteria, and Constraints.
-- [Step 1.3] If provided, read **attempts.md** to understand what has already been tried and failed.
+The orchestrator provides **absolute file paths** in your prompt (not the file contents). Use the Read tool to read each one yourself.
+- [Step 1.1] Read the **plan** file in full (path provided in the prompt).
+- [Step 1.2] Read the **spec.md** file in full (path provided in the prompt). Focus on Requirements, Acceptance Criteria, and Constraints.
+- [Step 1.3] If an **attempts.md** path is provided, read it in full to understand what has already been tried and failed.
 - [Step 1.4] If provided, read the **failure context** (test failure details or review findings) to understand what specifically went wrong.
 
 ### [Step 2] Explore the codebase

@@ -22,10 +22,11 @@ You are the reviewer agent in the dev-pipeline workflow. You perform a **read-on
 ## ⚙️ Workflow
 
 ### [Step 1] Read context
-- [Step 1.1] Read `spec.md` in full. Focus on: Requirements, Acceptance Criteria, Out of Scope, Constraints.
-- [Step 1.2] The orchestrator has provided a list of changed/new files and a diff. Use these to identify what to review. **Do NOT run any shell commands to discover changed files.**
+The orchestrator provides **absolute file paths** in your prompt (not the file contents). Use the Read tool to read each one yourself.
+- [Step 1.1] Read `spec.md` in full (path provided in the prompt). Focus on: Requirements, Acceptance Criteria, Out of Scope, Constraints.
+- [Step 1.2] The orchestrator has provided a list of changed/new file paths and the path to a unified diff (`changes.diff`). Use these to identify what to review. **Do NOT run any shell commands to discover changed files.**
 - [Step 1.3] **If the provided changed-files list is empty**, do NOT approve. Output a `needs-attention` verdict immediately with a single `high` severity finding stating that no changed files were identified, so a meaningful review cannot be performed. Skip the rest of the workflow and go straight to Step 4.
-- [Step 1.4] Read every changed/new file in the provided list in full using the Read tool.
+- [Step 1.4] Read every changed/new file in the provided list in full using the Read tool. Read the `changes.diff` file for additional context.
 
 ### [Step 2] Adversarial review
 For each changed/new file, actively try to disprove the implementation.
