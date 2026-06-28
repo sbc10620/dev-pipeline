@@ -126,6 +126,7 @@ In Claude Code, with your project open:
 ## Reviewer: codex primary, dp-reviewer fallback
 
 The pipeline tries `codex adversarial-review` first (using `--wait --json` for structured output).
+The spec is passed through codex's focus text so it reviews against the spec's Acceptance Criteria.
 Falls back to `dp-reviewer` subagent if:
 - Codex plugin not installed
 - Usage limit reached
@@ -271,4 +272,4 @@ dev-pipeline/
 - **Pluggable runners**: `runners` config is an ordered array of backends; add `bash` runner for other CLIs (e.g., cline)
 - **Oscillation prevention**: `attempts.md` accumulates every failed attempt and is passed to the implementor on retry
 - **Environment vs code failures**: tester classifies failures; environment failures halt immediately instead of retrying
-- **Self-evolution**: when enabled, uses the done-state retrospective to update installed agent `.md` files (source repo not updated)
+- **Self-evolution**: when enabled, uses the done-state retrospective to update the installed agent `.md` files and the skill (`SKILL.md`) (source repo not updated)

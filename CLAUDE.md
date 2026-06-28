@@ -77,7 +77,7 @@ Key transition rules:
 
 ### Codex review integration
 
-Codex is called with `--wait --json`. The `payload.result` field maps 1:1 to the `review-result` schema (including `confidence`). `normalize-review` performs the mapping. Fallback is triggered by: plugin not found, non-zero exit, `payload.parseError` present, or `payload.result` absent.
+Codex is called with `--wait --json`. The spec is passed through codex's focus text (codex has no dedicated spec flag), so it reviews the changes against the spec's Acceptance Criteria. The `payload.result` field maps 1:1 to the `review-result` schema (including `confidence`). `normalize-review` performs the mapping. Fallback is triggered by: plugin not found, non-zero exit, `payload.parseError` present, or `payload.result` absent.
 
 ### Key files
 

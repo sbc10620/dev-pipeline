@@ -9,6 +9,37 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .claude/skills/dev-pipeline/driver.py --version`.
 
+## [1.3.0] - 2026-06-28
+
+### Added
+- Done-state retrospective (SKILL Step 5.3) now reports the model running the
+  orchestrator (main session) and, for each state, the runner/method that
+  actually carried out the work (claude-subagent + agent name, bash command, or
+  codex vs dp-reviewer fallback), making a finished run's execution path
+  traceable from the retrospective alone.
+- The codex reviewer now receives the spec through the focus text (codex has no
+  dedicated spec flag), so it can review changes against the spec's Acceptance
+  Criteria instead of focus text alone.
+
+### Changed
+- `dp-tester.md` / `dp-reviewer.md`: the JSON example in each agent is now the
+  single source of truth for output shape; rules no longer re-list keys or tell
+  the tester to read `test-result.schema.json`. Field-level constraints and
+  enum meanings (per-stage `status`, `severity`) are defined once, reducing the
+  risk of emitting placeholder strings like `"pass or fail"`.
+- SKILL Step 3 no longer passes a schema path to the tester — the driver still
+  enforces the shape via `validate-result`.
+- SKILL Step 4.4 reviewer instruction references only the spec (the reviewer
+  reads spec.md, never the plan).
+- SKILL Step 5.4 spells out exactly which installed files self-evolution may
+  edit and commit (`.claude/agents/dp-*.md`, `.claude/skills/dev-pipeline/SKILL.md`).
+- `README.md` and `CLAUDE.md` updated to note that the spec is passed to the
+  codex reviewer and that self-evolution may also update `SKILL.md`.
+
+### Removed
+- `dp-reviewer.md`: dropped the redundant "fallback reviewer" sentence (no
+  behavioral effect; already stated in the frontmatter description).
+
 ## [1.2.0] - 2026-06-28
 
 ### Added
