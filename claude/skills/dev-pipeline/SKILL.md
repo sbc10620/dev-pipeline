@@ -366,25 +366,31 @@ No other arguments are accepted. If any unknown argument is present, report an e
 
 - [Step 5.2] **Update CLAUDE.md** — Only if there is genuinely new context worth adding. Be conservative.
 
-- [Step 5.3] **Workflow Retrospective Feedback** — Review `state.json` history and evaluate each state's execution against the workflow rules. Output to the user:
+- [Step 5.3] **Workflow Retrospective Feedback** — Review `state.json` history and evaluate each state's execution against the workflow rules. Report the **model running this orchestrator (main session)** by name, and for each state report **which runner/method actually carried out the work** (sourced from the config snapshot's `runners.*` and what you actually dispatched — in particular whether review used codex or fell back to dp-reviewer). Output to the user:
 
   ```markdown
   ## Workflow Retrospective Feedback
 
+  _Orchestrator (main session) model: <the model currently executing this skill, e.g. claude-opus-4-8>._
+
   ### init state
+  - Runner/method: main session (driver init + spec.md authored directly)
   - <issues with init procedure, or "No issues">
 
   ### implementation state
+  - Runner/method: <e.g. claude-subagent (dp-implementor) | bash (<command>)>
   - <issues with implementation procedure across all iterations, or "No issues">
 
   ### test state
+  - Runner/method: <e.g. claude-subagent (dp-tester) | bash (<command>)>
   - <issues with test procedure, or "No issues">
 
   ### review state
+  - Runner/method: <e.g. codex-adversarial-review | claude-subagent (dp-reviewer) fallback — note if a fallback occurred>
   - <issues with review procedure, or "No issues">
   ```
 
-  Be honest. If the workflow was not followed precisely (e.g., an advance was called out of order, a validation was skipped), note it.
+  Fill the orchestrator model with the name of the model currently executing this skill, and each `Runner/method` with the concrete agent name, bash command, or codex path actually used; if a state ran across multiple iterations, note that too. Be honest. If the workflow was not followed precisely (e.g., an advance was called out of order, a validation was skipped), note it.
 
 - [Step 5.4] **Self-evolution** — Only if `run_self_evolution: true` in config snapshot.
   - Use the retrospective findings from Step 5.3 as input.
@@ -406,7 +412,7 @@ No other arguments are accepted. If any unknown argument is present, report an e
 **Step 5 checklist:**
 - [ ] Commit done (or skip with user notification)
 - [ ] plan file, spec.md, .dev-pipeline/ are NOT in the commit
-- [ ] Retrospective feedback output with all 4 state sections
+- [ ] Retrospective feedback output with all 4 state sections, each noting its runner/method, plus the orchestrator model name
 - [ ] Self-evolution skipped or performed conservatively (and changes committed separately if any were made)
 - [ ] Next-step recommendations provided
 
