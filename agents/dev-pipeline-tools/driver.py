@@ -272,7 +272,7 @@ def get_iter_path(run_dir: pathlib.Path, state: dict) -> pathlib.Path:
     state.json resumed under a newer driver — see the upgrade contract).
     """
     iters = state["iterations"]
-    n = iters.get("test_implementation", 0) + iters["test"] + iters["review"]
+    n = iters.get("test_implementation", 0) + iters.get("test", 0) + iters.get("review", 0)
     return run_dir / "iterations" / str(n)
 
 
@@ -416,7 +416,7 @@ def cmd_init(args) -> None:
         "max": {
             "test": cfg["driver"]["max_test_iteration"],
             "review": cfg["driver"]["max_review_iteration"],
-            "test_implementation": cfg["driver"].get("max_test_implementation_iteration", 3),
+            "test_implementation": cfg["driver"].get("max_test_implementation_iteration", 2),
         },
         "halt_reason": None,
         "history": [{"state": "init", "ts": ts, "outcome": "started", "failure_type": None}],
