@@ -2,7 +2,7 @@
 
 **Goal:** Commit, retrospective feedback, optional self-evolution, next-step recommendations.
 
-- [1] **Commit** (if in a git repository):
+- [Step 1] **Commit** (if in a git repository):
   - Check: `git rev-parse --git-dir 2>/dev/null`.
   - If a git repo, stage all changes **excluding** the plan file, spec.md, and `.dev-pipeline/`:
     ```bash
@@ -19,9 +19,9 @@
     Do NOT push. (In TDD, the authored tests are part of the implementation and are committed normally.)
   - If not a git repo: inform the user that commit was skipped.
 
-- [2] **Update CLAUDE.md** — only if there is genuinely new context worth adding. Be conservative.
+- [Step 2] **Update CLAUDE.md** — only if there is genuinely new context worth adding. Be conservative.
 
-- [3] **Workflow Retrospective Feedback** — Review `state.json` history and report the **orchestrator (main session) model** by name, and for each state that actually ran report **which runner/method carried out the work**. Include the `test_implementation` and `red_test` sections **only when `tdd_mode` is true** (omit them under `--no-tdd`):
+- [Step 3] **Workflow Retrospective Feedback** — Review `state.json` history and report the **orchestrator (main session) model** by name, and for each state that actually ran report **which runner/method carried out the work**. Include the `test_implementation` and `red_test` sections **only when `tdd_mode` is true** (omit them under `--no-tdd`):
 
   ```markdown
   ## Workflow Retrospective Feedback
@@ -55,7 +55,7 @@
 
   Fill each `Runner/method` with the concrete agent/command/codex path actually used; note multi-iteration states. Be honest — if the workflow was not followed precisely (an advance out of order, a skipped validation, a boundary re-dispatch), note it.
 
-- [4] **Self-evolution** — only if `run_self_evolution: true` in the config snapshot.
+- [Step 4] **Self-evolution** — only if `run_self_evolution: true` in the config snapshot.
   - Use the retrospective findings as input. Identify which agent `.md` files (or SKILL.md / its `states/*.md`) need updating.
   - If `/advisor` is active, consult it first; otherwise apply only clearly necessary changes.
   - Editable files (the only ones self-evolution may touch): `.claude/agents/dp-implementor.md`, `.claude/agents/dp-test-implementor.md`, `.claude/agents/dp-tester.md`, `.claude/agents/dp-reviewer.md`, `.claude/skills/dev-pipeline/SKILL.md`, and `.claude/skills/dev-pipeline/states/*.md`.
@@ -67,7 +67,7 @@
     ```
     Do NOT push. Skip if nothing changed.
 
-- [5] **Next-step recommendations** — suggest 2–3 concrete next actions for the user.
+- [Step 5] **Next-step recommendations** — suggest 2–3 concrete next actions for the user.
 
 **Checklist:**
 - [ ] Commit done (or skipped with notification); plan/spec.md/.dev-pipeline NOT committed
