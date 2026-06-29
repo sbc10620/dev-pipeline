@@ -20,6 +20,7 @@ You are the dev-pipeline orchestrator. You drive a state machine from a `plan.md
 5. **After a tester or reviewer agent returns JSON, always validate it with `driver validate-result` before calling `driver advance`.**
 6. **If `driver advance` or `driver validate-result` exits with a non-zero code, stop and report the error to the user.**
 7. **Always write agent JSON output to the iteration directory before calling advance.**
+8. **Never specify or invent an agent's output schema in its prompt.** Each agent (tester, reviewer, …) owns and defines its own result schema; pass only the inputs each state file lists. Overriding the schema causes `validate-result` failures.
 
 ---
 
@@ -68,7 +69,7 @@ Each advance also echoes a `directive` (e.g. `run_test_implementor`, `run_tester
 
 No other arguments are accepted. If any unknown argument is present, report an error and stop.
 
-- [Step 0.1] If `--help` is present, print the following and stop:
+- [Step 1] If `--help` is present, print the following and stop:
   ```
   dev-pipeline — automated (TDD) test → implement → review loop
 
@@ -104,21 +105,21 @@ No other arguments are accepted. If any unknown argument is present, report an e
     bash /path/to/dev-pipeline/install.sh /path/to/project
   ```
 
-- [Step 0.2] Locate the driver and schemas. Let `skill_dir` be the directory containing this SKILL.md file. Then:
+- [Step 2] Locate the driver and schemas. Let `skill_dir` be the directory containing this SKILL.md file. Then:
   ```
   skill_dir   = <directory containing this SKILL.md>
   driver_path = <skill_dir>/driver.py
   ```
   The result schemas live at `<skill_dir>/schemas/`. Verify `driver_path` exists. If not, stop with: "driver.py not found — re-run install.sh to repair the installation."
 
-- [Step 0.3] If `--plan` is missing, report error and stop. Verify the plan file exists. Note whether `--tdd` or `--no-tdd` was passed (you will forward it to `driver init`).
+- [Step 3] If `--plan` is missing, report error and stop. Verify the plan file exists. Note whether `--tdd` or `--no-tdd` was passed (you will forward it to `driver init`).
 
-- [Step 0.4] Locate the project root: the directory containing `.dev-pipeline/dev-pipeline.config.json`. Use this command, which walks upward from the current directory:
+- [Step 4] Locate the project root: the directory containing `.dev-pipeline/dev-pipeline.config.json`. Use this command, which walks upward from the current directory:
   ```bash
   dir="$(pwd)"; while [ "$dir" != "/" ]; do [ -f "$dir/.dev-pipeline/dev-pipeline.config.json" ] && echo "$dir" && break; dir="$(dirname "$dir")"; done
   ```
   If it prints nothing, also try walking upward from the plan file's directory.
-  - **(a) Found** → save the printed directory as `project_root` and continue to Step 0.5.
+  - **(a) Found** → save the printed directory as `project_root` and continue to Step 5.
   - **(b) Not found** → bootstrap the config via the driver (do NOT create directories or copy files yourself):
     ```bash
     python3 <driver_path> bootstrap-config
@@ -134,10 +135,10 @@ No other arguments are accepted. If any unknown argument is present, report an e
       >
       > To skip TDD, set `driver.tdd_mode: false` or run with `--no-tdd`.
       > Then re-run `/dev-pipeline --plan <your-plan.md>`."
-    - `status == "exists"` (rare race): save the returned `project_root` and continue to Step 0.5.
+    - `status == "exists"` (rare race): save the returned `project_root` and continue to Step 5.
     - Non-zero exit: report the driver's error and stop.
 
-- [Step 0.5] Remind the user: **"For accurate review results and role-boundary checks, start this pipeline with a clean working tree. In particular, the installed dev-pipeline files (`.claude/agents/dp-*.md` and `.claude/skills/dev-pipeline/`) should already be committed — otherwise they appear as untracked files in the review scope."**
+- [Step 5] Remind the user: **"For accurate review results and role-boundary checks, start this pipeline with a clean working tree. In particular, the installed dev-pipeline files (`.claude/agents/dp-*.md` and `.claude/skills/dev-pipeline/`) should already be committed — otherwise they appear as untracked files in the review scope."**
 
 **Step 0 checklist:**
 - [ ] No unknown arguments; `--plan` present and file exists; `--tdd`/`--no-tdd` noted
