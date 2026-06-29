@@ -49,7 +49,7 @@ plan.md
 bash /path/to/dev-pipeline/install.sh /path/to/your/project
 ```
 
-This copies agents, the skill, `driver.py`, and schemas into `<project>/.claude/` (local only) and seeds `dev-pipeline.config.json` inside the gitignored `<project>/.dev-pipeline/` directory (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
+This copies agents, the skill (incl. `states/`), `driver.py`, schemas, and the config template into `<project>/.claude/` (local only). It does NOT create the config — the skill bootstraps `dev-pipeline.config.json` from the template (via `driver bootstrap-config`) into the gitignored `<project>/.dev-pipeline/` directory on the first run (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
 
 ---
 
@@ -106,7 +106,7 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
 |---|---|---|
 | `driver.max_test_iteration` | Yes | Max implementation retries after test failure |
 | `driver.max_review_iteration` | Yes | Max implementation retries after review failure |
-| `driver.max_test_implementation_iteration` | No | Max test re-authoring when RED is not confirmed (default: 3 if omitted; template seeds 2) |
+| `driver.max_test_implementation_iteration` | No | Max test re-authoring when RED is not confirmed (default: 2) |
 | `driver.tdd_mode` | No | Author tests first (RED→GREEN). Default `true`. Override per run with `--tdd`/`--no-tdd` |
 | `driver.run_self_evolution` | Yes | Update installed agent .md files after done (default: false) |
 | `driver.review_block_severity` | No | Severities that block review pass (default: `["critical","high"]`). Null = use verdict gate |
@@ -174,7 +174,7 @@ Created at `<project>/.dev-pipeline/` (gitignored automatically).
 
 ```
 .dev-pipeline/
-├── dev-pipeline.config.json # your config — seeded by install.sh, lives here (gitignored)
+├── dev-pipeline.config.json # your config — bootstrapped by the skill on first run (gitignored)
 ├── latest -> runs/<run-id>
 └── runs/<run-id>/
     ├── state.json           # driver state (single source of truth)
@@ -251,11 +251,13 @@ dev-pipeline/
 ├── claude/
 │   ├── agents/
 │   │   ├── dp-implementor.md
+│   │   ├── dp-test-implementor.md
 │   │   ├── dp-tester.md
 │   │   └── dp-reviewer.md
 │   └── skills/
 │       └── dev-pipeline/
-│           └── SKILL.md
+│           ├── SKILL.md
+│           └── states/            ← per-state procedure files (init, red_test, …)
 └── agents/
     └── dev-pipeline-tools/
         ├── driver.py
@@ -277,12 +279,15 @@ dev-pipeline/
 └── .claude/
     ├── agents/
     │   ├── dp-implementor.md
+    │   ├── dp-test-implementor.md
     │   ├── dp-tester.md
     │   └── dp-reviewer.md
     └── skills/
         └── dev-pipeline/
             ├── SKILL.md
+            ├── states/             ← per-state procedure files (read on demand)
             ├── driver.py           ← installed for standalone operation
+            ├── config.example.json ← template for driver bootstrap-config
             └── schemas/
                 ├── config.schema.json
                 ├── test-result.schema.json

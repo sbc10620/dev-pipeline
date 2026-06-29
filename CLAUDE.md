@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Driver CLI
 
-The driver is the only executable component. No build step required — pure Python 3 standard library.
+The driver is the only executable component. No build step required — Python 3 standard library only (Python ≥ 3.9, for `argparse.BooleanOptionalAction` used by the `--tdd/--no-tdd` flags).
 
 ```bash
 # Validate a project's config before running
