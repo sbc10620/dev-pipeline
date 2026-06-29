@@ -13,9 +13,11 @@ Installs dev-pipeline into <project-dir>/.claude/ (local only, not user-global).
 
 What gets installed:
   .claude/agents/dp-implementor.md
+  .claude/agents/dp-test-implementor.md
   .claude/agents/dp-tester.md
   .claude/agents/dp-reviewer.md
   .claude/skills/dev-pipeline/SKILL.md
+  .claude/skills/dev-pipeline/states/  (per-state orchestration files)
   .claude/skills/dev-pipeline/driver.py
   .claude/skills/dev-pipeline/schemas/  (JSON schemas)
   .claude/skills/dev-pipeline/config.example.json  (config template)
@@ -61,10 +63,10 @@ DP_VERSION="${DP_VERSION:-unknown}"
 echo "[dev-pipeline] Installing version ${DP_VERSION} into: ${PROJECT_DIR}"
 
 # Create destination directories
-mkdir -p "${AGENTS_DST}" "${SKILLS_DST}/schemas"
+mkdir -p "${AGENTS_DST}" "${SKILLS_DST}/schemas" "${SKILLS_DST}/states"
 
 # Copy agent files
-for f in dp-implementor.md dp-tester.md dp-reviewer.md; do
+for f in dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md; do
   src="${SOURCE_AGENTS}/${f}"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Source file not found: ${src}"
@@ -77,6 +79,17 @@ done
 # Copy skill
 cp "${SOURCE_SKILL}/SKILL.md" "${SKILLS_DST}/SKILL.md"
 echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/SKILL.md"
+
+# Copy per-state orchestration files (the SKILL reads states/<state>.md per transition)
+for f in init test_implementation red_test implementation test review done failed; do
+  src="${SOURCE_SKILL}/states/${f}.md"
+  if [[ ! -f "$src" ]]; then
+    echo "[dev-pipeline] ERROR: Source file not found: ${src}"
+    exit 1
+  fi
+  cp "${src}" "${SKILLS_DST}/states/${f}.md"
+done
+echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/states/ (8 files)"
 
 # Copy driver script (must be co-located with schemas for standalone operation)
 cp "${SOURCE_TOOLS}/driver.py" "${SKILLS_DST}/driver.py"

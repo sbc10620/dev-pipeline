@@ -4,13 +4,14 @@ dev-pipeline driver — deterministic state machine for the implement→test→r
 
 Usage:
   python3 driver.py bootstrap-config [--project <dir>]
-  python3 driver.py init             --plan <path> [--config <path>] [--project <dir>]
+  python3 driver.py init             --plan <path> [--config <path>] [--project <dir>] [--tdd|--no-tdd]
   python3 driver.py advance          --run <run_dir>
   python3 driver.py status           --run <run_dir>
-  python3 driver.py validate-config  --config <path>
+  python3 driver.py validate-config  --config <path> [--tdd|--no-tdd]
   python3 driver.py validate-result  --type test|review --file <path>
   python3 driver.py normalize-review --source codex --in <file> --out <file>
-  python3 driver.py append-attempt   --run <run_dir> --state <test|review> --outcome <text-or-file>
+  python3 driver.py append-attempt   --run <run_dir> --state <test_implementation|red_test|test|review> --outcome <text-or-file>
+  python3 driver.py check-boundary   --run <run_dir> --role <test_implementation|implementation> --changed <file...>
   python3 driver.py --version
   python3 driver.py --help
 """
@@ -33,7 +34,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "1.3.0"
+__version__ = "2.0.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -185,7 +186,19 @@ def validate_against_schema(data: dict, schema_name: str) -> list[str]:
 
 INSTRUCTION_KEYS = ["build_instruction", "install_instruction", "test_instruction"]
 
-def validate_config_data(cfg: dict) -> list[str]:
+
+def effective_tdd_mode(cfg: dict, tdd_override=None) -> bool:
+    """Resolve TDD mode: per-run override beats config, config beats default(true)."""
+    if tdd_override is not None:
+        return bool(tdd_override)
+    return bool(cfg.get("driver", {}).get("tdd_mode", True))
+
+
+def _is_placeholder(val) -> bool:
+    return isinstance(val, str) and val.strip().startswith("<") and val.strip().endswith(">")
+
+
+def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
     errors = validate_against_schema(cfg, "config.schema.json")
     if errors:
         return errors
@@ -195,7 +208,7 @@ def validate_config_data(cfg: dict) -> list[str]:
         val = tester.get(key, "")
         if not isinstance(val, str) or not val.strip():
             errors.append(f"llm.tester.{key}: must be a non-empty string (use 'no build step' etc. if not needed)")
-        elif val.strip().startswith("<") and val.strip().endswith(">"):
+        elif _is_placeholder(val):
             errors.append(f"llm.tester.{key}: still contains a placeholder value — replace it with a real command")
 
     rbs = cfg.get("driver", {}).get("review_block_severity")
@@ -203,6 +216,33 @@ def validate_config_data(cfg: dict) -> list[str]:
         for s in rbs:
             if s not in VALID_SEVERITIES:
                 errors.append(f"driver.review_block_severity: unknown severity {s!r}")
+
+    # TDD is opt-out-able. When effectively enabled, the test_implementor block
+    # and its runner are mandatory and must not contain placeholders.
+    if effective_tdd_mode(cfg, tdd_override):
+        ti = cfg.get("llm", {}).get("test_implementor")
+        if not ti:
+            errors.append(
+                "llm.test_implementor: required when tdd_mode is enabled — add it (focus, "
+                "framework_instruction, test_paths) or run with --no-tdd / set driver.tdd_mode=false"
+            )
+        else:
+            for key in ("focus", "framework_instruction"):
+                val = ti.get(key, "")
+                if not isinstance(val, str) or not val.strip():
+                    errors.append(f"llm.test_implementor.{key}: must be a non-empty string")
+                elif _is_placeholder(val):
+                    errors.append(f"llm.test_implementor.{key}: still contains a placeholder value — replace it")
+            tp = ti.get("test_paths", [])
+            if not isinstance(tp, list) or not tp:
+                errors.append("llm.test_implementor.test_paths: must be a non-empty array of globs")
+            elif any(_is_placeholder(p) for p in tp):
+                errors.append("llm.test_implementor.test_paths: still contains a placeholder value — replace it")
+        if not cfg.get("runners", {}).get("test_implementor"):
+            errors.append(
+                "runners.test_implementor: required when tdd_mode is enabled — add it "
+                "or run with --no-tdd / set driver.tdd_mode=false"
+            )
 
     return errors
 
@@ -225,10 +265,14 @@ def save_state(run_dir: pathlib.Path, state: dict) -> None:
 
 
 def get_iter_path(run_dir: pathlib.Path, state: dict) -> pathlib.Path:
-    """Compute the current iteration directory path WITHOUT creating it (pure)."""
-    test_n = state["iterations"]["test"]
-    review_n = state["iterations"]["review"]
-    n = test_n + review_n
+    """Compute the current iteration directory path WITHOUT creating it (pure).
+
+    The number is the sum of every retry counter. `.get(..., 0)` keeps this safe
+    for runs created before the test_implementation counter existed (legacy
+    state.json resumed under a newer driver — see the upgrade contract).
+    """
+    iters = state["iterations"]
+    n = iters.get("test_implementation", 0) + iters["test"] + iters["review"]
     return run_dir / "iterations" / str(n)
 
 
@@ -253,6 +297,64 @@ def review_passes(review_result: dict, review_block_severity) -> bool:
     return len(blocking) == 0
 
 
+def blocking_findings(review_result: dict, review_block_severity) -> list:
+    """Return the findings that block the review under the configured gate.
+
+    With verdict-based gating (review_block_severity is None) the whole finding
+    set is considered "blocking" when the verdict is not approve, since there is
+    no per-finding severity to filter on.
+    """
+    findings = review_result.get("findings", [])
+    if review_block_severity is None:
+        return [] if review_result.get("verdict") == "approve" else list(findings)
+    block_set = set(review_block_severity)
+    return [f for f in findings if f.get("severity") in block_set]
+
+
+# ---------------------------------------------------------------------------
+# Role-boundary glob matching (TDD: keep test author and implementor in lane)
+# ---------------------------------------------------------------------------
+
+def glob_to_regex(glob: str) -> str:
+    """Translate a path glob into an anchored regex with explicit semantics:
+
+      **  → zero or more path segments (matches '/')
+      *   → any run of characters except '/'
+      ?   → a single character except '/'
+
+    This is deliberately NOT fnmatch (whose '*' also matches '/'), so that
+    'tests/**' matches 'tests/a/b_test.py' and '**/*_test.go' matches both
+    'foo_test.go' and 'pkg/foo_test.go' the way a developer expects.
+    """
+    out = []
+    i, n = 0, len(glob)
+    while i < n:
+        c = glob[i]
+        if c == "*":
+            if i + 1 < n and glob[i + 1] == "*":
+                i += 2
+                if i < n and glob[i] == "/":
+                    out.append("(?:.*/)?")  # '**/' = zero or more leading segments
+                    i += 1
+                else:
+                    out.append(".*")        # trailing '**' = anything incl. '/'
+            else:
+                out.append("[^/]*")
+                i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return "^" + "".join(out) + "$"
+
+
+def matches_test_paths(path: str, test_paths: list) -> bool:
+    """True if `path` matches any of the configured test_paths globs."""
+    return any(re.match(glob_to_regex(g), path) for g in test_paths)
+
+
 # ---------------------------------------------------------------------------
 # Subcommand: init
 # ---------------------------------------------------------------------------
@@ -269,7 +371,8 @@ def cmd_init(args) -> None:
         die(f"Config file not found: {config_path}\n  Run /dev-pipeline once — it bootstraps .dev-pipeline/dev-pipeline.config.json from the template on first run — then fill in the tester instructions and re-run.")
 
     cfg = load_json(config_path)
-    errors = validate_config_data(cfg)
+    tdd_mode = effective_tdd_mode(cfg, getattr(args, "tdd", None))
+    errors = validate_config_data(cfg, tdd_override=getattr(args, "tdd", None))
     if errors:
         sys.stderr.write("[dev-pipeline] Config validation failed:\n")
         for e in errors:
@@ -304,10 +407,16 @@ def cmd_init(args) -> None:
         "config_path": str(config_path),
         "spec_path": str(spec_path),
         "project_dir": str(project_dir),
-        "iterations": {"test": 0, "review": 0},
+        "tdd_mode": tdd_mode,
+        # red_phase is true only while the very first RED verification is pending.
+        # It flips to false once red_test confirms RED, so later test fixes
+        # (driven by review findings) do not re-impose the failing-test gate.
+        "red_phase": tdd_mode,
+        "iterations": {"test": 0, "review": 0, "test_implementation": 0},
         "max": {
             "test": cfg["driver"]["max_test_iteration"],
             "review": cfg["driver"]["max_review_iteration"],
+            "test_implementation": cfg["driver"].get("max_test_implementation_iteration", 3),
         },
         "halt_reason": None,
         "history": [{"state": "init", "ts": ts, "outcome": "started", "failure_type": None}],
@@ -330,6 +439,7 @@ def cmd_init(args) -> None:
         "run_dir": str(run_dir),
         "spec_path": str(spec_path),
         "plan_path": str(plan_path),
+        "tdd_mode": tdd_mode,
         "next_action": "write_spec",
         "message": "Init successful. Write spec.md at spec_path, then call `driver advance --run <run_dir>`.",
     })
@@ -370,16 +480,106 @@ def cmd_advance(args) -> None:
             result.update(extra)
         emit(result)
 
+    attempts_path = str(run_dir / "attempts.md")
+
     # --- init ---
     if current == "init":
         spec_path = pathlib.Path(state["spec_path"])
         if not spec_path.exists():
             die("spec.md has not been written yet. Write it first, then call advance.")
-        transition("implementation", "spec_ready",
-                   extra={"directive": "run_implementor",
-                          "spec_path": str(spec_path),
-                          "plan_path": state["plan_path"],
-                          "attempts_path": str(run_dir / "attempts.md")})
+        if state.get("tdd_mode", False):
+            transition("test_implementation", "spec_ready",
+                       extra={"directive": "run_test_implementor",
+                              "spec_path": str(spec_path),
+                              "plan_path": state["plan_path"],
+                              "attempts_path": attempts_path,
+                              "test_implementor_config": cfg["llm"].get("test_implementor", {})})
+        else:
+            transition("implementation", "spec_ready",
+                       extra={"directive": "run_implementor",
+                              "spec_path": str(spec_path),
+                              "plan_path": state["plan_path"],
+                              "attempts_path": attempts_path})
+
+    # --- test_implementation (TDD: author tests, no result file needed) ---
+    elif current == "test_implementation":
+        iter_dir = ensure_iter_dir(run_dir, state)
+        if state.get("red_phase", False):
+            # First authoring pass: prove the tests FAIL (RED) before any code.
+            transition("red_test", "tests_authored",
+                       extra={"directive": "run_tester",
+                              "iter_dir": str(iter_dir),
+                              "red_test": True,
+                              "result_filename": "red-test-result.json",
+                              "build_instruction":   cfg["llm"]["tester"]["build_instruction"],
+                              "install_instruction": cfg["llm"]["tester"]["install_instruction"],
+                              "test_instruction":    cfg["llm"]["tester"]["test_instruction"]})
+        else:
+            # Repair pass (driven by a review finding about tests): code already
+            # exists, so skip RED and re-run the GREEN tester against the fixed
+            # tests. If the implementation no longer satisfies the tightened
+            # tests, the normal test→implementation retry takes over from there.
+            transition("test", "tests_repaired",
+                       extra={"directive": "run_tester",
+                              "iter_dir": str(iter_dir),
+                              "build_instruction":   cfg["llm"]["tester"]["build_instruction"],
+                              "install_instruction": cfg["llm"]["tester"]["install_instruction"],
+                              "test_instruction":    cfg["llm"]["tester"]["test_instruction"]})
+
+    # --- red_test (TDD: verify the freshly authored tests FAIL) ---
+    elif current == "red_test":
+        result_file = get_iter_path(run_dir, state) / "red-test-result.json"
+        if not result_file.exists():
+            die(f"red-test-result.json not found at {result_file}. Write the tester result first.")
+        result = load_json(result_file)
+        errors = validate_against_schema(result, "test-result.schema.json")
+        if errors:
+            die("red-test-result.json schema violation:\n" + "\n".join(f"  - {e}" for e in errors))
+
+        status = result.get("status")
+        failure_type = result.get("failure_type")
+
+        if failure_type == "environment":
+            transition("failed", "red_test_environment", failure_type="environment",
+                       halt_reason="environment",
+                       extra={"directive": "halt_and_ask",
+                              "phase": "red_test",
+                              "failure_details": "Environment failure during RED verification "
+                                                 "(toolchain/framework). " + result.get("failure_details", ""),
+                              "log_excerpt": result.get("log_excerpt", "")})
+        elif status == "fail":
+            # RED confirmed: tests fail because the feature is not implemented yet.
+            # Leave the red phase so future test fixes don't re-impose RED.
+            state["red_phase"] = False
+            iter_dir = ensure_iter_dir(run_dir, state)
+            transition("implementation", "red_confirmed",
+                       extra={"directive": "run_implementor",
+                              "iter_dir": str(iter_dir),
+                              "spec_path": state["spec_path"],
+                              "plan_path": state["plan_path"],
+                              "attempts_path": attempts_path})
+        else:  # status == "pass" → RED not confirmed (vacuous tests or feature exists)
+            state["iterations"]["test_implementation"] += 1
+            if state["iterations"]["test_implementation"] > state["max"]["test_implementation"]:
+                transition("failed", "red_not_confirmed_exhausted",
+                           halt_reason="iteration-exhausted",
+                           extra={"directive": "report_failure",
+                                  "phase": "red_test",
+                                  "failure_details": "Authored tests passed without an implementation "
+                                                     "(RED never confirmed). Tests are likely vacuous."})
+            else:
+                iter_dir = ensure_iter_dir(run_dir, state)
+                transition("test_implementation", "red_not_confirmed",
+                           extra={"directive": "run_test_implementor",
+                                  "test_implementation_iter": state["iterations"]["test_implementation"],
+                                  "iter_dir": str(iter_dir),
+                                  "spec_path": state["spec_path"],
+                                  "plan_path": state["plan_path"],
+                                  "attempts_path": attempts_path,
+                                  "test_implementor_config": cfg["llm"].get("test_implementor", {}),
+                                  "note": "The authored tests PASSED with no implementation present. "
+                                          "They are vacuous — strengthen them so they fail until the "
+                                          "feature exists."})
 
     # --- implementation → test (automatic, no result file needed) ---
     elif current == "implementation":
@@ -457,25 +657,44 @@ def cmd_advance(args) -> None:
         else:
             state["iterations"]["review"] += 1
             if state["iterations"]["review"] > state["max"]["review"]:
+                extra = {"directive": "report_failure",
+                         "verdict": result.get("verdict"),
+                         "summary": result.get("summary", ""),
+                         "findings": result.get("findings", [])}
+                # In TDD a tightened-but-unsatisfiable test can drain the budget;
+                # surface that so the failure is not mistaken for a code defect.
+                if state.get("tdd_mode", False):
+                    extra["hint"] = ("If the implementation could not satisfy the reviewer, the "
+                                     "blocking findings may point at tests that contradict the spec "
+                                     "— inspect the test findings, not just the production code.")
                 transition("failed", "review_fail_exhausted",
-                           halt_reason="iteration-exhausted",
-                           extra={"directive": "report_failure",
-                                  "verdict": result.get("verdict"),
-                                  "summary": result.get("summary", ""),
-                                  "findings": result.get("findings", [])})
+                           halt_reason="iteration-exhausted", extra=extra)
             else:
                 iter_dir = ensure_iter_dir(run_dir, state)
-                transition("implementation", "review_fail_retry",
-                           extra={"directive": "run_implementor",
-                                  "review_iter": state["iterations"]["review"],
-                                  "iter_dir": str(iter_dir),
-                                  "spec_path": state["spec_path"],
-                                  "plan_path": state["plan_path"],
-                                  "attempts_path": str(run_dir / "attempts.md"),
-                                  "verdict": result.get("verdict"),
-                                  "summary": result.get("summary", ""),
-                                  "findings": result.get("findings", []),
-                                  "next_steps": result.get("next_steps", [])})
+                # Route by where the blocking findings point. The implementor is
+                # walled off from test files (boundary guard), so a finding about
+                # a test must go to the test author. Pure production findings skip
+                # the test_implementation detour.
+                blocking = blocking_findings(result, rbs)
+                test_paths = cfg.get("llm", {}).get("test_implementor", {}).get("test_paths", [])
+                touches_tests = state.get("tdd_mode", False) and any(
+                    f.get("file") and matches_test_paths(f["file"], test_paths) for f in blocking
+                )
+                target = "test_implementation" if touches_tests else "implementation"
+                directive = "run_test_implementor" if touches_tests else "run_implementor"
+                extra = {"directive": directive,
+                         "review_iter": state["iterations"]["review"],
+                         "iter_dir": str(iter_dir),
+                         "spec_path": state["spec_path"],
+                         "plan_path": state["plan_path"],
+                         "attempts_path": attempts_path,
+                         "verdict": result.get("verdict"),
+                         "summary": result.get("summary", ""),
+                         "findings": result.get("findings", []),
+                         "next_steps": result.get("next_steps", [])}
+                if touches_tests:
+                    extra["test_implementor_config"] = cfg["llm"].get("test_implementor", {})
+                transition(target, "review_fail_retry", extra=extra)
 
     elif current in ("done", "failed"):
         emit({"next_state": current, "message": f"Pipeline already in terminal state: {current}"})
@@ -585,8 +804,13 @@ def cmd_bootstrap_config(args) -> None:
             "llm.tester.build_instruction",
             "llm.tester.install_instruction",
             "llm.tester.test_instruction",
+            "llm.test_implementor.framework_instruction",
+            "llm.test_implementor.test_paths",
         ],
-        "next_action": "Fill in the three tester instructions (placeholder <...> values are rejected), then re-run /dev-pipeline --plan <path>.",
+        "next_action": "Fill in the tester instructions and (TDD is on by default) the "
+                       "test_implementor framework_instruction + test_paths. Placeholder <...> "
+                       "values are rejected. To skip TDD, set driver.tdd_mode=false or run with "
+                       "--no-tdd. Then re-run /dev-pipeline --plan <path>.",
     })
 
 
@@ -597,7 +821,7 @@ def cmd_bootstrap_config(args) -> None:
 def cmd_validate_config(args) -> None:
     config_path = pathlib.Path(args.config).resolve()
     cfg = load_json(config_path)
-    errors = validate_config_data(cfg)
+    errors = validate_config_data(cfg, tdd_override=getattr(args, "tdd", None))
     if errors:
         sys.stderr.write("[dev-pipeline] Config validation FAILED:\n")
         for e in errors:
@@ -705,8 +929,10 @@ def cmd_append_attempt(args) -> None:
     run_dir = pathlib.Path(args.run).resolve()
     attempts_path = run_dir / "attempts.md"
     state = load_state(run_dir)
-    test_n = state["iterations"]["test"]
-    review_n = state["iterations"]["review"]
+    iters = state["iterations"]
+    test_n = iters["test"]
+    review_n = iters["review"]
+    ti_n = iters.get("test_implementation", 0)
 
     if args.outcome_file:
         outcome_path = pathlib.Path(args.outcome_file).resolve()
@@ -720,7 +946,8 @@ def cmd_append_attempt(args) -> None:
         die("append-attempt requires non-empty content via --outcome or --outcome-file")
 
     ts = now_iso()
-    label = f"### Attempt — state={args.state}, test_iter={test_n}, review_iter={review_n} ({ts})"
+    label = (f"### Attempt — state={args.state}, test_implementation_iter={ti_n}, "
+             f"test_iter={test_n}, review_iter={review_n} ({ts})")
     entry = f"\n{label}\n\n{outcome_text.strip()}\n"
 
     current_content = attempts_path.read_text(encoding="utf-8") if attempts_path.exists() else ""
@@ -729,6 +956,53 @@ def cmd_append_attempt(args) -> None:
     attempts_path.write_text(current_content + entry + "\n", encoding="utf-8")
 
     emit({"appended": True, "attempts_path": str(attempts_path)})
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: check-boundary (TDD role isolation)
+# ---------------------------------------------------------------------------
+
+def cmd_check_boundary(args) -> None:
+    """Deterministically check that a role only touched files it is allowed to.
+
+    role=test_implementation : every changed file must be inside test_paths
+                               (and at least one must match — a zero-match with
+                               real changes signals a misconfigured test_paths).
+    role=implementation      : no changed file may be inside test_paths.
+
+    The driver owns the glob match so the decision is reproducible and unit
+    tested, instead of leaving it to LLM prose in the SKILL. Nothing is deleted
+    here — the SKILL decides how to react to a violation.
+    """
+    run_dir = pathlib.Path(args.run).resolve()
+    cfg = load_json(run_dir / "config.snapshot.json")
+    test_paths = cfg.get("llm", {}).get("test_implementor", {}).get("test_paths", [])
+    if not test_paths:
+        die("llm.test_implementor.test_paths is empty — cannot enforce the role boundary.")
+
+    changed = [c for c in (args.changed or []) if c.strip()]
+    in_tests = [c for c in changed if matches_test_paths(c, test_paths)]
+    out_tests = [c for c in changed if not matches_test_paths(c, test_paths)]
+
+    if args.role == "test_implementation":
+        if changed and not in_tests:
+            emit({"ok": False, "reason": "no_match", "role": args.role, "violating": out_tests,
+                  "message": "No changed file matched test_paths. test_paths is likely misconfigured "
+                             "for this project's layout — fix it before continuing (do not loop)."})
+            return
+        ok = len(out_tests) == 0
+        emit({"ok": ok, "reason": None if ok else "out_of_bounds", "role": args.role,
+              "violating": out_tests,
+              "message": "" if ok else "The test author modified non-test (production) files; "
+                                       "those changes must be reverted."})
+    elif args.role == "implementation":
+        ok = len(in_tests) == 0
+        emit({"ok": ok, "reason": None if ok else "touched_tests", "role": args.role,
+              "violating": in_tests,
+              "message": "" if ok else "The implementor modified test files; tests are the test "
+                                       "author's domain and those changes must be reverted."})
+    else:
+        die(f"Unknown role: {args.role}")
 
 
 # ---------------------------------------------------------------------------
@@ -751,31 +1025,47 @@ WORKFLOW OVERVIEW
 
 STATES
 ------
-  init           → validate config, generate spec.md
-  implementation → implementor agent writes code
-  test           → tester agent runs build/install/test
-  review         → codex adversarial-review (fallback: dp-reviewer agent)
-  done           → commit, retrospective, (optional) self-evolution
-  failed         → stopped due to exhausted iterations or environment error
+  init                → validate config, generate spec.md
+  test_implementation → (TDD) test author writes tests from the spec
+  red_test            → (TDD) tester proves the tests FAIL before any code exists
+  implementation      → implementor agent writes code
+  test                → tester agent runs build/install/test
+  review              → codex adversarial-review (fallback: dp-reviewer agent)
+  done                → commit, retrospective, (optional) self-evolution
+  failed              → stopped due to exhausted iterations or environment error
+
+  TDD flow (default; disable with --no-tdd or driver.tdd_mode=false):
+    init → test_implementation → red_test → implementation → test → review → done
+  Legacy flow (tdd off):
+    init → implementation → test → review → done
 
 DRIVER CLI
 ----------
   bootstrap-config Seed .dev-pipeline/dev-pipeline.config.json from the template
-  init             Create a new run from a plan + config
+  init             Create a new run from a plan + config  [--tdd/--no-tdd]
   advance          Compute and apply the next state transition
   status           Print current run state
-  validate-config  Check config completeness and schema
+  validate-config  Check config completeness and schema   [--tdd/--no-tdd]
   validate-result  Check a test-result or review-result file
   normalize-review Convert codex --json payload → canonical review-result JSON
   append-attempt   Log a failed attempt to attempts.md for implementor context
+  check-boundary   (TDD) verify a role only touched files it is allowed to
   --version        Print the dev-pipeline version and exit
   --help           Show this message
 
 ITERATION LIMITS
 ----------------
-  max_test_iteration    — how many times to re-run implementation after test failure
-  max_review_iteration  — how many times to re-run implementation after review failure
+  max_test_iteration                 — re-runs of implementation after a test failure
+  max_review_iteration               — re-runs after a review failure
+  max_test_implementation_iteration  — (TDD) re-authoring after RED is not confirmed
   Counters are independent and never reset within a run.
+
+TDD MODE
+--------
+  tdd_mode (config, default true) — author tests first and prove they fail (RED)
+  before writing code, then make them pass (GREEN). Override per run with
+  --tdd / --no-tdd. When enabled, llm.test_implementor (focus,
+  framework_instruction, test_paths) and runners.test_implementor are required.
 
 REVIEW GATE
 -----------
@@ -814,6 +1104,8 @@ def main() -> None:
     p_init.add_argument("--plan", required=True)
     p_init.add_argument("--config")
     p_init.add_argument("--project")
+    # --tdd / --no-tdd: per-run override (None = fall back to config / default true)
+    p_init.add_argument("--tdd", dest="tdd", default=None, action=argparse.BooleanOptionalAction)
 
     p_adv = sub.add_parser("advance")
     p_adv.add_argument("--run", required=True)
@@ -823,6 +1115,7 @@ def main() -> None:
 
     p_vc = sub.add_parser("validate-config")
     p_vc.add_argument("--config", required=True)
+    p_vc.add_argument("--tdd", dest="tdd", default=None, action=argparse.BooleanOptionalAction)
 
     p_vr = sub.add_parser("validate-result")
     p_vr.add_argument("--type", required=True, choices=["test", "review"])
@@ -835,9 +1128,15 @@ def main() -> None:
 
     p_aa = sub.add_parser("append-attempt")
     p_aa.add_argument("--run", required=True)
-    p_aa.add_argument("--state", required=True, choices=["test", "review"])
+    p_aa.add_argument("--state", required=True,
+                      choices=["test_implementation", "red_test", "test", "review"])
     p_aa.add_argument("--outcome", default="")
     p_aa.add_argument("--outcome-file", dest="outcome_file", default="")
+
+    p_cb = sub.add_parser("check-boundary")
+    p_cb.add_argument("--run", required=True)
+    p_cb.add_argument("--role", required=True, choices=["test_implementation", "implementation"])
+    p_cb.add_argument("--changed", nargs="*", default=[])
 
     args = parser.parse_args()
 
@@ -850,6 +1149,7 @@ def main() -> None:
         "validate-result":  cmd_validate_result,
         "normalize-review": cmd_normalize_review,
         "append-attempt":   cmd_append_attempt,
+        "check-boundary":   cmd_check_boundary,
     }
 
     if args.cmd not in dispatch:

@@ -8,19 +8,22 @@
     "dev_pipeline_version":  { "type": "string" },
     "state": {
       "type": "string",
-      "enum": ["init", "implementation", "test", "review", "done", "failed"]
+      "enum": ["init", "test_implementation", "red_test", "implementation", "test", "review", "done", "failed"]
     },
     "plan_path":    { "type": "string" },
     "config_path":  { "type": "string" },
     "spec_path":    { "type": "string" },
     "project_dir":  { "type": "string" },
+    "tdd_mode":     { "type": "boolean" },
+    "red_phase":    { "type": "boolean" },
     "iterations": {
       "type": "object",
       "additionalProperties": false,
       "required": ["test", "review"],
       "properties": {
-        "test":   { "type": "integer", "minimum": 0 },
-        "review": { "type": "integer", "minimum": 0 }
+        "test":                { "type": "integer", "minimum": 0 },
+        "review":              { "type": "integer", "minimum": 0 },
+        "test_implementation": { "type": "integer", "minimum": 0 }
       }
     },
     "max": {
@@ -28,8 +31,9 @@
       "additionalProperties": false,
       "required": ["test", "review"],
       "properties": {
-        "test":   { "type": "integer", "minimum": 1 },
-        "review": { "type": "integer", "minimum": 1 }
+        "test":                { "type": "integer", "minimum": 1 },
+        "review":              { "type": "integer", "minimum": 1 },
+        "test_implementation": { "type": "integer", "minimum": 1 }
       }
     },
     "halt_reason": {
