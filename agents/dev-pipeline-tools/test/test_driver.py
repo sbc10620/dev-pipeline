@@ -899,6 +899,32 @@ class TestTDD(PipelineTestCase):
         self.assertEqual(r2.json["next_state"], "test")
         self.assertEqual(r2.json["directive"], "run_tester")
 
+    def test_review_test_finding_repair_converges_to_implementation(self):
+        # review test-finding → test_implementation → test; if the green test then
+        # fails (code), the normal test→implementation retry takes over.
+        p = self.started_tdd()
+        self._to_review(p)
+        p.write_review_result(verdict="needs-attention",
+                              findings=[finding(severity="critical",
+                                                file="tests/test_foo.py")])
+        self.assertEqual(p.advance().json["next_state"], "test_implementation")
+        self.assertEqual(p.advance().json["next_state"], "test")  # repair: re-run GREEN
+        # The tightened test now fails against the existing implementation.
+        p.write_test_result(status="fail", failure_type="code")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "implementation")
+        self.assertEqual(r.json["directive"], "run_implementor")
+
+    def test_default_max_test_implementation_iteration_is_two(self):
+        # When the key is omitted from config, the driver default applies.
+        cfg = valid_config(tdd_mode=True)
+        cfg["driver"].pop("max_test_implementation_iteration", None)
+        p = Pipeline(cfg)
+        self._pipelines.append(p)
+        p.init()
+        state = json.loads((p.run_dir / "state.json").read_text())
+        self.assertEqual(state["max"]["test_implementation"], 2)
+
     def test_review_prod_finding_routes_to_implementation(self):
         p = self.started_tdd()
         self._to_review(p)
