@@ -9,6 +9,56 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .claude/skills/dev-pipeline/driver.py --version`.
 
+## [2.0.0] - 2026-06-29
+
+Test-Driven Development support. The pipeline can now author tests from the spec
+and prove they fail (RED) before writing code, then make them pass (GREEN).
+
+### Added
+- **TDD flow** (default): `init → test_implementation → red_test → implementation
+  → test → review → done`. New states `test_implementation` (a new
+  `dp-test-implementor` agent writes tests from the spec) and `red_test` (the
+  existing `dp-tester` proves those tests fail; a failing run is the success
+  condition). Disable per run with `--no-tdd` or `driver.tdd_mode: false`.
+- `driver.tdd_mode` (config, default true) and `--tdd` / `--no-tdd` flags on
+  `init` and `validate-config` (precedence: flag > config > default). The
+  resolved value is frozen into `state.tdd_mode`; `state.red_phase` tracks the
+  one-time RED gate.
+- `llm.test_implementor` config (`focus`, `framework_instruction`, `test_paths`)
+  and `runners.test_implementor`; `driver.max_test_implementation_iteration`
+  (default 2) bounds re-authoring when RED is not confirmed.
+- New `check-boundary` subcommand + role guard: the test author may only touch
+  `test_paths`, the implementor may never touch them. The driver owns a
+  deterministic glob matcher (`**` = any depth, `*` = within a segment).
+- Review-failure routing is finding-aware under TDD: a blocking finding in a
+  test file routes back to `test_implementation`; production findings route to
+  `implementation`.
+- `spec.md` gains a `Test Targets / Interface` section under TDD, and the init
+  state requires Acceptance Criteria concrete enough to test (it stops and asks
+  rather than fabricating tests for a too-vague plan).
+- New `dp-test-implementor.md` agent; `TestTDD`, `TestUpgradeSafety`, and
+  `TestCheckBoundary` suites in `test_driver.py`.
+
+### Changed
+- **BREAKING:** TDD is on by default. Upgrading a 1.x install: the new config
+  keys are optional in the schema (code-level defaults), but because `tdd_mode`
+  defaults to true a config without `llm.test_implementor` is rejected at
+  `validate-config`/`init` — add the `test_implementor` block, or set
+  `tdd_mode: false` / run `--no-tdd` to keep the legacy flow. Refresh the
+  installed schema by re-running `install.sh`.
+- SKILL.md is now a thin orchestrator (Global Rules, Step 0, Run Context,
+  state→file index); each state's procedure lives in
+  `claude/skills/dev-pipeline/states/<state>.md` and is read on demand. The
+  driver echoes the per-step `iter_dir` so each state file is self-contained.
+- `dp-reviewer.md` clarifies that read-only means "never *run* tests" — test
+  source code is in review scope, and a test that contradicts the spec is a
+  legitimate high-severity finding (test style/coverage nitpicks stay ≤ medium).
+  This guidance is also in the default `reviewer.focus` so the codex path sees it.
+- `dp-implementor.md` must not create/modify `test_paths` files under TDD.
+- `install.sh` installs `dp-test-implementor.md` and the `states/` directory.
+- All new state/iteration keys are read with `.get(default)`, so a run created
+  by an older driver resumes on the legacy path without crashing.
+
 ## [1.3.0] - 2026-06-28
 
 ### Added

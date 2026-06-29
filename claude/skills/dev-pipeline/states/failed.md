@@ -1,0 +1,22 @@
+# STATE: failed
+
+Read `halt_reason` (and any echoed context) from the `driver advance` output.
+
+**`halt_reason: "environment"`**
+Stop immediately. Report:
+- Which stage failed (build/install/test) and, if the advance echoed `phase: "red_test"`, that it happened during **RED verification** (so it is a toolchain/framework setup problem, not a code defect).
+- The `failure_details` and `log_excerpt`.
+- Ask the user:
+  > "This failure appears to be an environment or configuration issue, not a code defect. Please check:
+  > - Are all dependencies (including the test framework) installed?
+  > - Is the toolchain (compiler, runtime, etc.) available?
+  > - Are `build_instruction` / `install_instruction` / `test_instruction` in `.dev-pipeline/dev-pipeline.config.json` correct?
+  > After fixing, restart the pipeline."
+
+**`halt_reason: "iteration-exhausted"`**
+Report:
+- Which budget was exhausted. The `outcome` in `state.json` history distinguishes them: `test_fail_exhausted` (green test), `review_fail_exhausted` (review), or `red_not_confirmed_exhausted` (the authored tests kept passing with no implementation — the tests are likely vacuous; point the user at the test author output).
+- The last failure details / review findings, and a summary of all attempts from `attempts.md`.
+- If the advance echoed a `hint` (TDD review exhaustion), surface it: the blocking findings may point at tests that contradict the spec, not at a production defect — inspect the test findings before assuming the code is wrong.
+
+There is no further automatic action from a `failed` state. Stop after reporting.

@@ -19,6 +19,9 @@ python3 agents/dev-pipeline-tools/driver.py advance --run <run_dir>
 # Convert codex --json payload to canonical review-result JSON
 python3 agents/dev-pipeline-tools/driver.py normalize-review --source codex --in codex-raw.json --out review-result.json
 
+# (TDD) deterministically check a role only touched files it is allowed to
+python3 agents/dev-pipeline-tools/driver.py check-boundary --run <run_dir> --role implementation --changed src/a.py tests/t.py
+
 # Print version
 python3 agents/dev-pipeline-tools/driver.py --version
 
@@ -32,7 +35,7 @@ python3 agents/dev-pipeline-tools/driver.py --help
 - `install.sh` and `state.json` (`dev_pipeline_version`) **read** this value — never hardcode the version elsewhere.
 - To cut a release: bump `__version__`, add a `CHANGELOG.md` section, commit, then `git tag -a <version>`.
 - An installed copy self-reports with `python3 .claude/skills/dev-pipeline/driver.py --version` (the install is a copy, so this is how you tell a stale install from the current source).
-- MAJOR bump when an existing install would break (e.g. the 1.1.0 config relocation from project root into `.dev-pipeline/`).
+- MAJOR bump when an existing install would break (e.g. the 1.1.0 config relocation from project root into `.dev-pipeline/`, or the 2.0.0 TDD-by-default flow change).
 
 ## Architecture
 
@@ -41,32 +44,42 @@ This repo is a **Claude Code plugin** — it installs agents and a skill into a 
 ### Execution model
 
 ```
-User: /dev-pipeline --plan plan.md
+User: /dev-pipeline --plan plan.md  [--tdd | --no-tdd]
          │
          ▼
-  SKILL.md (orchestrator, runs in the main Claude session)
+  SKILL.md (thin orchestrator, main session) — reads states/<state>.md per transition
          │
-         ├─ python3 driver.py init / advance / validate-result / normalize-review
+         ├─ python3 driver.py init / advance / validate-result / normalize-review / check-boundary
          │    └─ All state transitions are decided HERE, never by the LLM
          │
-         ├─ Agent: dp-implementor  (writes code)
-         ├─ Agent: dp-tester       (runs build/install/test, returns JSON)
+         ├─ Agent: dp-test-implementor  (TDD: writes tests from the spec)
+         ├─ Agent: dp-implementor       (writes production code)
+         ├─ Agent: dp-tester            (runs build/install/test, returns JSON; used by both red_test and test)
          └─ codex-companion.mjs adversarial-review --wait --json
               └─ fallback: Agent dp-reviewer  (returns JSON)
 ```
 
 ### State machine (`driver.py`)
 
-States: `init → implementation → test → review → done | failed`
+TDD flow (default, `driver.tdd_mode: true`):
+`init → test_implementation → red_test → implementation → test → review → done | failed`
+
+Legacy flow (`tdd_mode: false` or `--no-tdd`):
+`init → implementation → test → review → done | failed`
+
+TDD is opt-out: `driver.tdd_mode` (config, default true) is overridable per run with `--tdd` / `--no-tdd` (flag > config > default). The chosen value is frozen once into `state.tdd_mode` at init; `state.red_phase` tracks whether the one-time RED gate is still pending.
 
 Key transition rules:
+- `init` → `test_implementation` when tdd_mode, else → `implementation`
+- `test_implementation` → `red_test` while `red_phase` (first authoring), else → `test` (a test-repair pass)
+- `red_test` reuses `dp-tester` but inverts the meaning: a **failing** run = RED confirmed → `implementation` (and `red_phase` flips to false). A **passing** run = RED not confirmed (vacuous tests) → re-author, incrementing `iterations.test_implementation`; `failure_type: environment` halts.
 - `implementation` always moves directly to `test` (no result JSON needed)
-- `test` fail with `failure_type: environment` → `failed(halt_reason=environment)` immediately (no retry)
-- `test` fail with `failure_type: code` → back to `implementation`, increments `test` counter
-- `review` gate is controlled by `driver.review_block_severity` (default: critical+high findings block); set to `null` for verdict-based gating
-- Both counters (`iterations.test`, `iterations.review`) are independent and never reset within a run
+- `test` fail with `failure_type: environment` → `failed(halt_reason=environment)` immediately (no retry); `failure_type: code` → back to `implementation`, increments `test` counter
+- `review` gate is controlled by `driver.review_block_severity` (default: critical+high findings block; `null` for verdict-based). On failure under TDD the driver routes by where the **blocking findings** point: a finding in a `test_paths` file → `test_implementation` (the implementor cannot edit tests); otherwise → `implementation`.
+- Counters (`iterations.test`, `iterations.review`, `iterations.test_implementation`) are independent and never reset within a run. The off-by-one is intentional and unchanged: `max_X_iteration = N` permits N+1 attempts (`> max` check).
+- Role boundary: `driver check-boundary --role <test_implementation|implementation> --changed <files>` deterministically verifies the test author only touched `test_paths` and the implementor never did (glob matcher owned by the driver; `**` = any depth, `*` = within a segment).
 
-`driver.py` outputs a single JSON object on stdout for every subcommand. All state is stored in `<run_dir>/state.json`.
+All new keys are read with `.get(default)` so a run/config created by an older driver resumes on the legacy path without crashing. `driver.py` outputs a single JSON object on stdout for every subcommand. All state is stored in `<run_dir>/state.json`.
 
 ### Runner abstraction
 
@@ -87,11 +100,13 @@ Codex is called with `--wait --json`. The spec is passed through codex's focus t
 | `agents/dev-pipeline-tools/test/test_driver.py` | Deterministic black-box tests for the driver (CLI subprocess; no LLM) |
 | `agents/dev-pipeline-tools/schemas/` | JSON schemas for config, test-result, review-result, state |
 | `agents/dev-pipeline-tools/config.example.json` | Seed config (English defaults, placeholders for tester instructions) |
-| `claude/agents/dp-implementor.md` | Implementor subagent — reads attempts.md to avoid repeating failed approaches |
-| `claude/agents/dp-tester.md` | Tester subagent — exit-code-only pass/fail, classifies `failure_type` |
-| `claude/agents/dp-reviewer.md` | Reviewer subagent — fully read-only, codex fallback |
-| `claude/skills/dev-pipeline/SKILL.md` | Orchestrator skill — step-by-step workflow with checklists per state |
-| `install.sh` | Copies agents+skill (+ `config.example.json` template) into `<project>/.claude/`, updates .gitignore. Does NOT seed the config — the skill bootstraps it on first run. |
+| `claude/agents/dp-implementor.md` | Implementor subagent — production code only; in TDD must not touch `test_paths` |
+| `claude/agents/dp-test-implementor.md` | Test author subagent (TDD) — writes tests from the spec, tests only (no Bash), stays within `test_paths` |
+| `claude/agents/dp-tester.md` | Tester subagent — exit-code-only pass/fail, classifies `failure_type`; used by both `red_test` and `test` |
+| `claude/agents/dp-reviewer.md` | Reviewer subagent — fully read-only (reviews test code too, never runs it), codex fallback |
+| `claude/skills/dev-pipeline/SKILL.md` | Thin orchestrator — Global Rules, Step 0, Run Context, state→file index |
+| `claude/skills/dev-pipeline/states/<state>.md` | Per-state procedure (progressive disclosure); SKILL reads `states/<next_state>.md` after each `advance` |
+| `install.sh` | Copies agents + skill (incl. `states/`) + `config.example.json` into `<project>/.claude/`, updates .gitignore. Does NOT seed the config — the skill bootstraps it on first run. |
 
 ### Runtime layout (inside target project, not this repo)
 
@@ -101,10 +116,11 @@ Codex is called with `--wait --json`. The spec is passed through codex's focus t
 ├── latest -> runs/<run-id>
 └── runs/<YYYYMMDD-HHMMSS>/
 ├── state.json           # driver owns this
-├── spec.md              # generated from plan at init; shared by implementor + reviewer
-├── attempts.md          # failure log appended on every test/review failure; passed to implementor on retry
+├── spec.md              # generated from plan at init; shared by test author, implementor + reviewer (TDD: + Test Targets/Interface)
+├── attempts.md          # failure log appended on every test_implementation/test/review failure; passed to authors on retry
 ├── config.snapshot.json
 └── iterations/<n>/
+    ├── red-test-result.json   # TDD red_test result (validated against the test-result schema)
     ├── test-result.json
     ├── review-result.json
     └── codex-raw.json
@@ -122,7 +138,17 @@ Codex is called with `--wait --json`. The spec is passed through codex's focus t
 }
 ```
 
-`driver validate-config` enforces this and rejects placeholder values.
+When TDD is enabled (default), `llm.test_implementor` and `runners.test_implementor` are also **required** (placeholders rejected):
+
+```json
+"test_implementor": {
+  "focus": "...",
+  "framework_instruction": "...",        // framework + where/how tests are written
+  "test_paths": ["tests/**"]             // globs matching test files only — the role boundary
+}
+```
+
+`driver validate-config` enforces all of this (and rejects placeholders). The new config keys are **optional in the schema** with code defaults, so a 1.x config still parses — but because `tdd_mode` defaults to true, a config lacking `test_implementor` is rejected unless you add it or set `tdd_mode: false` / pass `--no-tdd`. Use `validate-config --tdd|--no-tdd` to check a config under either mode.
 
 ## Testing
 

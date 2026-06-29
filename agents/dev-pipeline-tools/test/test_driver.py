@@ -50,14 +50,25 @@ def run_driver(*args, cwd=None):
 
 
 def valid_config(**driver_overrides):
-    """Return a schema-valid config dict with real (non-placeholder) tester
-    instructions. `driver_overrides` patch the `driver` block per test."""
+    """Return a schema-valid config dict with real (non-placeholder) instructions.
+
+    Defaults to tdd_mode=False so the legacy-flow suites read unchanged; TDD
+    tests opt in with valid_config(tdd_mode=True). The test_implementor block is
+    filled with real values so it validates whenever TDD is enabled.
+    `driver_overrides` patch the `driver` block per test.
+    """
     cfg = json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
     cfg["llm"]["tester"] = {
         "build_instruction": "no build step",
         "install_instruction": "no install step",
         "test_instruction": "no test step",
     }
+    cfg["llm"]["test_implementor"] = {
+        "focus": "one meaningful test per acceptance criterion",
+        "framework_instruction": "pytest under tests/, one test per AC",
+        "test_paths": ["tests/**"],
+    }
+    cfg["driver"]["tdd_mode"] = False
     cfg["driver"].update(driver_overrides)
     return cfg
 
@@ -96,13 +107,13 @@ def review_result(verdict="approve", findings=None, **extra):
     return obj
 
 
-def finding(severity="critical", title="Stub finding"):
+def finding(severity="critical", title="Stub finding", file="src/foo.py"):
     """Build a schema-valid review finding."""
     return {
         "severity": severity,
         "title": title,
         "body": "stub body",
-        "file": "src/foo.py",
+        "file": file,
         "line_start": 1,
         "line_end": 2,
         "confidence": 0.9,
@@ -129,7 +140,7 @@ class Pipeline:
 
     # -- setup -------------------------------------------------------------
 
-    def init(self):
+    def init(self, tdd=None):
         plan = self.project / "plan.md"
         plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
         cfg_dir = self.project / ".dev-pipeline"
@@ -137,11 +148,17 @@ class Pipeline:
         cfg_path = cfg_dir / "dev-pipeline.config.json"
         cfg_path.write_text(json.dumps(self._config), encoding="utf-8")
 
+        extra = []
+        if tdd is True:
+            extra = ["--tdd"]
+        elif tdd is False:
+            extra = ["--no-tdd"]
         proc = run_driver(
             "init",
             "--plan", str(plan),
             "--config", str(cfg_path),
             "--project", str(self.project),
+            *extra,
         )
         assert proc.returncode == 0, f"init failed: {proc.stderr}"
         self.run_dir = pathlib.Path(proc.json["run_dir"])
@@ -163,15 +180,24 @@ class Pipeline:
         return proc.json
 
     def _current_iter_dir(self):
-        # Mirrors driver.get_iter_path: n = test counter + review counter.
+        # Mirrors driver.get_iter_path: n = test_implementation + test + review.
         st = self.status()
-        n = st["iterations"]["test"] + st["iterations"]["review"]
+        it = st["iterations"]
+        n = it.get("test_implementation", 0) + it["test"] + it["review"]
         return self.run_dir / "iterations" / str(n)
 
     def write_test_result(self, **kwargs):
         d = self._current_iter_dir()
         d.mkdir(parents=True, exist_ok=True)
         (d / "test-result.json").write_text(
+            json.dumps(test_result(**kwargs)), encoding="utf-8"
+        )
+
+    def write_red_test_result(self, **kwargs):
+        """Write the red-test-result.json the red_test state consumes."""
+        d = self._current_iter_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "red-test-result.json").write_text(
             json.dumps(test_result(**kwargs)), encoding="utf-8"
         )
 
@@ -243,7 +269,7 @@ class TestHappyPath(PipelineTestCase):
         r = p.advance()
         self.assertEqual(r.json["next_state"], "review")
         self.assertEqual(r.json["directive"], "run_reviewer")
-        self.assertEqual(r.json["iterations"], {"test": 0, "review": 0})
+        self.assertEqual(r.json["iterations"], {"test": 0, "review": 0, "test_implementation": 0})
         self.assertEqual(
             r.json["iter_dir"], test_iter_dir,
             "review must reuse the same iteration dir as a passing test",
@@ -254,7 +280,7 @@ class TestHappyPath(PipelineTestCase):
         r = p.advance()
         self.assertEqual(r.json["next_state"], "done")
         self.assertEqual(r.json["directive"], "finalize")
-        self.assertEqual(r.json["iterations"], {"test": 0, "review": 0})
+        self.assertEqual(r.json["iterations"], {"test": 0, "review": 0, "test_implementation": 0})
 
 
 class TestTestFailures(PipelineTestCase):
@@ -479,7 +505,7 @@ class TestInit(PipelineTestCase):
 
         state = json.loads((run_dir / "state.json").read_text())
         self.assertEqual(state["state"], "init")
-        self.assertEqual(state["iterations"], {"test": 0, "review": 0})
+        self.assertEqual(state["iterations"], {"test": 0, "review": 0, "test_implementation": 0})
         self.assertIn("dev_pipeline_version", state)
         # max is populated from config.
         self.assertEqual(state["max"]["test"], 3)
@@ -711,7 +737,9 @@ class TestBootstrapConfig(unittest.TestCase):
             r.json["required_fields"],
             ["llm.tester.build_instruction",
              "llm.tester.install_instruction",
-             "llm.tester.test_instruction"],
+             "llm.tester.test_instruction",
+             "llm.test_implementor.framework_instruction",
+             "llm.test_implementor.test_paths"],
         )
 
     def test_existing_config_not_overwritten(self):
@@ -762,11 +790,232 @@ class TestBootstrapConfig(unittest.TestCase):
         cfg["llm"]["tester"]["build_instruction"] = "no build step"
         cfg["llm"]["tester"]["install_instruction"] = "no install step"
         cfg["llm"]["tester"]["test_instruction"] = "pytest"
+        # TDD ships on by default, so the test_implementor block must be filled too.
+        cfg["llm"]["test_implementor"]["framework_instruction"] = "pytest under tests/"
+        cfg["llm"]["test_implementor"]["test_paths"] = ["tests/**"]
         config.write_text(json.dumps(cfg), encoding="utf-8")
 
         r_after = run_driver("validate-config", "--config", str(config))
         self.assertEqual(r_after.returncode, 0)
         self.assertTrue(r_after.json["valid"])
+
+
+class TestTDD(PipelineTestCase):
+    """TDD flow: init → test_implementation → red_test → implementation → test → review."""
+
+    def started_tdd(self, **driver_overrides):
+        driver_overrides.setdefault("tdd_mode", True)
+        p = self.make_pipeline(**driver_overrides)
+        p.init()
+        p.write_spec()
+        return p
+
+    def _to_red_test(self, p):
+        r1 = p.advance()  # init -> test_implementation
+        self.assertEqual(r1.json["next_state"], "test_implementation")
+        self.assertEqual(r1.json["directive"], "run_test_implementor")
+        r2 = p.advance()  # test_implementation -> red_test
+        self.assertEqual(r2.json["next_state"], "red_test")
+        self.assertEqual(r2.json["directive"], "run_tester")
+        self.assertEqual(r2.json["result_filename"], "red-test-result.json")
+        return r2
+
+    def _to_review(self, p):
+        self._to_red_test(p)
+        p.write_red_test_result(status="fail", failure_type="code")
+        self.assertEqual(p.advance().json["next_state"], "implementation")  # RED confirmed
+        self.assertEqual(p.advance().json["next_state"], "test")
+        p.write_test_result(status="pass")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "review")
+        return r
+
+    def test_full_tdd_run_to_done(self):
+        p = self.started_tdd()
+        self._to_review(p)
+        p.write_review_result(verdict="approve")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "done")
+        self.assertEqual(r.json["directive"], "finalize")
+
+    def test_red_confirmed_clears_red_phase(self):
+        p = self.started_tdd()
+        self._to_red_test(p)
+        p.write_red_test_result(status="fail", failure_type="code")
+        p.advance()  # red_test -> implementation, red_phase -> false
+        state = json.loads((p.run_dir / "state.json").read_text())
+        self.assertFalse(state["red_phase"])
+
+    def test_red_not_confirmed_retries_then_exhausts(self):
+        p = self.started_tdd(max_test_implementation_iteration=1)
+        self._to_red_test(p)
+
+        # Tests passed with no implementation -> RED not confirmed -> re-author.
+        p.write_red_test_result(status="pass")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "test_implementation")
+        self.assertEqual(r.json["iterations"]["test_implementation"], 1)
+
+        # test_implementation -> red_test again, fail to confirm RED -> exhaust.
+        self.assertEqual(p.advance().json["next_state"], "red_test")
+        p.write_red_test_result(status="pass")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "failed")
+        self.assertEqual(r.json["halt_reason"], "iteration-exhausted")
+        self.assertEqual(r.json["iterations"]["test_implementation"], 2)
+
+    def test_red_test_environment_halts(self):
+        p = self.started_tdd()
+        self._to_red_test(p)
+        p.write_red_test_result(status="fail", failure_type="environment")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "failed")
+        self.assertEqual(r.json["halt_reason"], "environment")
+        self.assertEqual(r.json["directive"], "halt_and_ask")
+
+    def test_iteration_dir_includes_test_implementation_counter(self):
+        p = self.started_tdd()
+        self._to_red_test(p)
+        p.write_red_test_result(status="pass")  # RED not confirmed
+        p.advance()  # -> test_implementation, test_implementation -> 1
+        st = p.status()
+        it = st["iterations"]
+        n = it["test_implementation"] + it["test"] + it["review"]
+        self.assertEqual(n, 1)
+        self.assertTrue((p.run_dir / "iterations" / "1").is_dir())
+
+    def test_review_test_finding_routes_to_test_implementation(self):
+        p = self.started_tdd()
+        self._to_review(p)
+        p.write_review_result(verdict="needs-attention",
+                              findings=[finding(severity="critical",
+                                                file="tests/test_foo.py")])
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "test_implementation")
+        self.assertEqual(r.json["directive"], "run_test_implementor")
+        self.assertEqual(r.json["iterations"]["review"], 1)
+        # repair: test_implementation -> test (green re-run, NOT implementation)
+        r2 = p.advance()
+        self.assertEqual(r2.json["next_state"], "test")
+        self.assertEqual(r2.json["directive"], "run_tester")
+
+    def test_review_prod_finding_routes_to_implementation(self):
+        p = self.started_tdd()
+        self._to_review(p)
+        p.write_review_result(verdict="needs-attention",
+                              findings=[finding(severity="critical",
+                                                file="src/foo.py")])
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "implementation")
+        self.assertEqual(r.json["directive"], "run_implementor")
+
+    def test_no_tdd_flag_overrides_config_to_legacy(self):
+        # Config says tdd_mode true, but --no-tdd forces the legacy flow.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init(tdd=False)
+        p.write_spec()
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "implementation")
+        self.assertEqual(r.json["directive"], "run_implementor")
+
+    def test_tdd_flag_overrides_config_to_tdd(self):
+        # Config says tdd_mode false (valid_config default), but --tdd forces TDD.
+        p = self.make_pipeline()
+        p.init(tdd=True)
+        p.write_spec()
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "test_implementation")
+
+
+class TestUpgradeSafety(PipelineTestCase):
+    """A run created by an older driver (no tdd_mode/red_phase/test_implementation
+    keys) must resume without crashing under the new driver."""
+
+    def test_legacy_state_resume_does_not_crash(self):
+        p = self.started()  # modern init
+        p.advance()  # init -> implementation
+        p.advance()  # implementation -> test
+
+        # Rewrite state.json into the 1.3.0 shape: strip the new keys.
+        sp = p.run_dir / "state.json"
+        st = json.loads(sp.read_text(encoding="utf-8"))
+        st.pop("tdd_mode", None)
+        st.pop("red_phase", None)
+        st["iterations"] = {"test": 0, "review": 0}
+        st["max"] = {"test": st["max"]["test"], "review": st["max"]["review"]}
+        sp.write_text(json.dumps(st), encoding="utf-8")
+
+        # get_iter_path / advance must tolerate the missing test_implementation key.
+        p.write_test_result(status="pass")
+        r = p.advance()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json["next_state"], "review")
+
+    def test_config_missing_test_implementor_rejected_when_tdd_default_on(self):
+        # A bare 1.x config (no tdd_mode, no test_implementor) is NOT silently
+        # accepted: tdd defaults true, so test_implementor is required.
+        cfg = valid_config()  # has test_implementor
+        del cfg["llm"]["test_implementor"]
+        del cfg["runners"]["test_implementor"]
+        cfg["driver"].pop("tdd_mode", None)  # absent -> default true
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json",
+                                          delete=False, encoding="utf-8")
+        json.dump(cfg, tmp); tmp.close()
+        r = run_driver("validate-config", "--config", tmp.name)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("test_implementor", r.stderr)
+        # ...but the same config validates under --no-tdd.
+        r2 = run_driver("validate-config", "--config", tmp.name, "--no-tdd")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+
+
+class TestCheckBoundary(PipelineTestCase):
+    """Deterministic role-boundary subcommand (TDD file isolation)."""
+
+    def _run(self):
+        # A tdd-on init writes config.snapshot.json with test_paths ["tests/**"].
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        return p
+
+    def _check(self, p, role, changed):
+        return run_driver("check-boundary", "--run", str(p.run_dir),
+                          "--role", role, "--changed", *changed)
+
+    def test_test_author_inside_paths_ok(self):
+        p = self._run()
+        r = self._check(p, "test_implementation", ["tests/test_a.py", "tests/sub/test_b.py"])
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+
+    def test_test_author_touching_production_flagged(self):
+        p = self._run()
+        r = self._check(p, "test_implementation", ["tests/test_a.py", "src/app.py"])
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(r.json["ok"])
+        self.assertEqual(r.json["reason"], "out_of_bounds")
+        self.assertEqual(r.json["violating"], ["src/app.py"])
+
+    def test_test_author_zero_match_is_misconfig(self):
+        p = self._run()
+        r = self._check(p, "test_implementation", ["src/app.py"])
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(r.json["ok"])
+        self.assertEqual(r.json["reason"], "no_match")
+
+    def test_implementor_outside_paths_ok(self):
+        p = self._run()
+        r = self._check(p, "implementation", ["src/app.py", "src/util.py"])
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+
+    def test_implementor_touching_tests_flagged(self):
+        p = self._run()
+        r = self._check(p, "implementation", ["src/app.py", "tests/test_a.py"])
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(r.json["ok"])
+        self.assertEqual(r.json["reason"], "touched_tests")
+        self.assertEqual(r.json["violating"], ["tests/test_a.py"])
 
 
 if __name__ == "__main__":
