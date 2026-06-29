@@ -1,6 +1,6 @@
 # dev-pipeline
 
-Automated **implement → test → review** pipeline for Claude Code.
+Automated **test-driven** development pipeline for Claude Code: author tests from the spec, prove they fail (RED), write code, prove they pass (GREEN), then review.
 
 Accepts a `plan.md` written by any LLM (Claude, Codex, etc.) and drives the full development cycle using specialized subagents, with deterministic state transitions handled by a Python driver script.
 
@@ -12,8 +12,14 @@ Accepts a `plan.md` written by any LLM (Claude, Codex, etc.) and drives the full
 plan.md
    │
    ▼
- [init]  →  validate config, generate spec.md
+ [init]  →  validate config, generate spec.md (incl. Test Targets / Interface)
    │
+   ▼
+ [test_implementation]  →  test author writes tests from the spec        ┐ TDD
+   │                                                                      │ (default;
+   ▼                                                                      │  skipped
+ [red_test]  →  tester proves the tests FAIL (no code yet)                ┘  with --no-tdd)
+   │ red confirmed
    ▼
  [implementation]  →  implementor agent writes code
    │
@@ -27,8 +33,11 @@ plan.md
  [done]                   [failed]
 ```
 
+- **TDD is on by default.** Run with `--no-tdd` (or set `driver.tdd_mode: false`) to skip `test_implementation`/`red_test` and use the legacy `implement → test → review` flow.
+- RED not confirmed (authored tests pass with no code) → re-author tests (up to `max_test_implementation_iteration` times)
 - Test failure → retry implementation (up to `max_test_iteration` times)
-- Review failure → retry implementation (up to `max_review_iteration` times)
+- Review failure → retry implementation, or — if the blocking finding is about a test file — re-author tests (up to `max_review_iteration` times)
+- A role boundary keeps the test author and implementor in lane: the implementor never edits test files, the test author never writes production code (enforced by `driver check-boundary`)
 - Exhausted iterations or environment error → `failed` state with user report
 - State transitions are always decided by the driver script, never by the LLM
 
@@ -53,12 +62,19 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
   "driver": {
     "max_test_iteration": 3,
     "max_review_iteration": 3,
+    "max_test_implementation_iteration": 2,
+    "tdd_mode": true,
     "run_self_evolution": false,
     "review_block_severity": ["critical", "high"]
   },
   "llm": {
     "implementor": {
       "design_instruction": "Prefer reusing existing code patterns..."
+    },
+    "test_implementor": {
+      "focus": "One meaningful test per acceptance criterion...",
+      "framework_instruction": "pytest under tests/, one test per acceptance criterion",
+      "test_paths": ["tests/**"]
     },
     "tester": {
       "build_instruction":   "npm run build",
@@ -71,8 +87,9 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
     }
   },
   "runners": {
-    "implementor": [{ "type": "claude-subagent", "agent": "dp-implementor" }],
-    "tester":      [{ "type": "claude-subagent", "agent": "dp-tester" }],
+    "implementor":      [{ "type": "claude-subagent", "agent": "dp-implementor" }],
+    "test_implementor": [{ "type": "claude-subagent", "agent": "dp-test-implementor" }],
+    "tester":           [{ "type": "claude-subagent", "agent": "dp-tester" }],
     "reviewer":    [
       { "type": "codex-adversarial-review" },
       { "type": "claude-subagent", "agent": "dp-reviewer" }
@@ -81,17 +98,23 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
 }
 ```
 
+`llm.test_implementor` and `runners.test_implementor` are required only when TDD is enabled (the default). Set `driver.tdd_mode: false` or run `--no-tdd` to omit them.
+
 ### Config fields
 
 | Field | Required | Description |
 |---|---|---|
 | `driver.max_test_iteration` | Yes | Max implementation retries after test failure |
 | `driver.max_review_iteration` | Yes | Max implementation retries after review failure |
+| `driver.max_test_implementation_iteration` | No | Max test re-authoring when RED is not confirmed (default: 3 if omitted; template seeds 2) |
+| `driver.tdd_mode` | No | Author tests first (RED→GREEN). Default `true`. Override per run with `--tdd`/`--no-tdd` |
 | `driver.run_self_evolution` | Yes | Update installed agent .md files after done (default: false) |
 | `driver.review_block_severity` | No | Severities that block review pass (default: `["critical","high"]`). Null = use verdict gate |
 | `llm.tester.build_instruction` | **Yes** | Exact build command. Use `"no build step"` if not needed |
 | `llm.tester.install_instruction` | **Yes** | Exact install command. Use `"no install step"` if not needed |
 | `llm.tester.test_instruction` | **Yes** | Exact test command. Use `"no test step"` if not needed |
+| `llm.test_implementor.framework_instruction` | TDD | Test framework + where/how tests are written |
+| `llm.test_implementor.test_paths` | TDD | Globs matching test files only — the role boundary (e.g. `["tests/**"]`) |
 | `llm.reviewer.scope` | No | Codex review scope: `working-tree` (default), `branch`, `auto` |
 
 ---
@@ -101,7 +124,8 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
 In Claude Code, with your project open:
 
 ```
-/dev-pipeline --plan plan.md
+/dev-pipeline --plan plan.md            # TDD by default
+/dev-pipeline --plan plan.md --no-tdd   # legacy implement → test → review
 /dev-pipeline --help
 ```
 
@@ -117,9 +141,10 @@ In Claude Code, with your project open:
 
 | Agent | Model | Role | Permissions |
 |---|---|---|---|
-| `dp-implementor` | sonnet | Writes code based on plan + spec | Read, Write, Edit, Bash, Grep, Glob |
-| `dp-tester` | sonnet | Runs build/install/test — **no code inference** | Bash, Read only |
-| `dp-reviewer` | sonnet | Adversarial code review (codex fallback) | Read, Grep, Glob only (read-only) |
+| `dp-test-implementor` | sonnet | (TDD) Writes tests from the spec — tests only, no production code | Read, Write, Edit, Grep, Glob |
+| `dp-implementor` | sonnet | Writes code based on plan + spec; never edits tests under TDD | Read, Write, Edit, Bash, Grep, Glob |
+| `dp-tester` | sonnet | Runs build/install/test — **no code inference** (used by `red_test` and `test`) | Bash, Read only |
+| `dp-reviewer` | sonnet | Adversarial code review, incl. test code; never runs it (codex fallback) | Read, Grep, Glob only (read-only) |
 
 ---
 
@@ -153,10 +178,11 @@ Created at `<project>/.dev-pipeline/` (gitignored automatically).
 ├── latest -> runs/<run-id>
 └── runs/<run-id>/
     ├── state.json           # driver state (single source of truth)
-    ├── spec.md              # generated from plan — shared by implementor and reviewer
-    ├── attempts.md          # accumulated failure history — passed to implementor on retry
+    ├── spec.md              # generated from plan — shared by test author, implementor and reviewer
+    ├── attempts.md          # accumulated failure history — passed to authors on retry
     ├── config.snapshot.json
     └── iterations/<n>/
+        ├── red-test-result.json   # TDD: the red_test (RED verification) result
         ├── test-result.json
         ├── review-result.json
         └── codex-raw.json
