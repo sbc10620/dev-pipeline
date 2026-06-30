@@ -66,7 +66,7 @@ echo "[dev-pipeline] Installing version ${DP_VERSION} into: ${PROJECT_DIR}"
 mkdir -p "${AGENTS_DST}" "${SKILLS_DST}/schemas" "${SKILLS_DST}/states"
 
 # Copy agent files
-for f in dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md; do
+for f in dp-spec-author.md dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md; do
   src="${SOURCE_AGENTS}/${f}"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Source file not found: ${src}"

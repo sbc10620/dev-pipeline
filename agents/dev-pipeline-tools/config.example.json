@@ -27,18 +27,21 @@
     }
   },
   "runners": {
+    "spec_author": [
+      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Write" }
+    ],
     "implementor": [
-      { "type": "claude-subagent", "agent": "dp-implementor" }
+      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Edit Write Bash" }
     ],
     "test_implementor": [
-      { "type": "claude-subagent", "agent": "dp-test-implementor" }
+      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Edit Write" }
     ],
     "tester": [
-      { "type": "claude-subagent", "agent": "dp-tester" }
+      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Bash Write", "normalizer": "claude-cli" }
     ],
     "reviewer": [
-      { "type": "codex-adversarial-review" },
-      { "type": "claude-subagent", "agent": "dp-reviewer" }
+      { "type": "bash", "command": "codex exec -s read-only \"$(cat {system_file}; printf '\\n\\n'; cat {user_file})\" > {output_file}", "normalizer": "codex-cli" },
+      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Grep Glob Write", "normalizer": "claude-cli" }
     ]
   }
 }
