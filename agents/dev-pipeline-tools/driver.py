@@ -12,6 +12,7 @@ Usage:
   python3 driver.py normalize-review --source codex --in <file> --out <file>
   python3 driver.py append-attempt   --run <run_dir> --state <test_implementation|red_test|test|review> --outcome <text-or-file>
   python3 driver.py check-boundary   --run <run_dir> --role <test_implementation|implementation> --changed <file...>
+  python3 driver.py record-changes   --run <run_dir> --changed <file...>
   python3 driver.py --version
   python3 driver.py --help
 """
@@ -34,7 +35,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -459,6 +460,35 @@ def cmd_advance(args) -> None:
     current = state["state"]
     ts = now_iso()
 
+    tdd = state.get("tdd_mode", False)
+    runners = cfg.get("runners", {})
+
+    def dest_echoes(new_state: str) -> dict:
+        """Config-derived values each destination state needs to drive itself.
+
+        Echoing these on the advance that lands in a state makes the driver the
+        single source: the SKILL never reads config.snapshot.json for control
+        flow. All reads use .get(default) so a run created by an older driver
+        (whose snapshot predates a key) resumes without a KeyError.
+        """
+        llm = cfg.get("llm", {})
+        e = {}
+        if new_state == "implementation":
+            e["design_instruction"] = llm.get("implementor", {}).get("design_instruction", "")
+            e["implementor_runners"] = runners.get("implementor", [])
+            if tdd:
+                # The implementor must know which paths are off-limits (test author's).
+                e["test_paths"] = llm.get("test_implementor", {}).get("test_paths", [])
+        elif new_state == "test_implementation":
+            e["test_implementor_runners"] = runners.get("test_implementor", [])
+        elif new_state in ("red_test", "test"):
+            e["tester_runners"] = runners.get("tester", [])
+        elif new_state == "done":
+            e["run_self_evolution"] = cfg.get("driver", {}).get("run_self_evolution", False)
+        # Note: reviewer has no echo — review.md hardcodes the codex→dp-reviewer
+        # order and never consults config.runners.reviewer.
+        return e
+
     def transition(new_state: str, outcome: str, failure_type=None, halt_reason=None, extra: dict = None):
         state["history"].append({
             "state": current,
@@ -475,7 +505,12 @@ def cmd_advance(args) -> None:
             "next_state": new_state,
             "iterations": state["iterations"],
             "halt_reason": state.get("halt_reason"),
+            # tdd_mode is the frozen, authoritative run flag (state.json). Echo it on
+            # every advance so a resuming session never recovers it from
+            # config.snapshot.json's driver.tdd_mode (wrong under --tdd/--no-tdd).
+            "tdd_mode": tdd,
         }
+        result.update(dest_echoes(new_state))
         if extra:
             result.update(extra)
         emit(result)
@@ -1006,6 +1041,56 @@ def cmd_check_boundary(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: record-changes (commit/review manifest)
+# ---------------------------------------------------------------------------
+
+# A path is a pipeline run artifact (spec.md, config snapshot, state, …) when it
+# lives under a .dev-pipeline/ directory at any depth. Such paths are gitignored
+# and must never enter the commit/review manifest.
+_DEV_PIPELINE_RE = re.compile(r"(^|/)\.dev-pipeline/")
+
+
+def cmd_record_changes(args) -> None:
+    """Accumulate the set of files the pipeline's agents actually produced.
+
+    The SKILL passes each authoring step's delta (the same project_root-relative
+    paths it hands to check-boundary). They are merged, de-duplicated and stored
+    in <run_dir>/changed-manifest.txt so the commit (done) and the dp-reviewer
+    fallback (review) operate on an allowlist of pipeline-produced files instead
+    of `git add -A` / `git ls-files --others`, which would sweep in untracked
+    junk (cscope, ctags, build caches) the user never asked to commit.
+    """
+    run_dir = pathlib.Path(args.run).resolve()
+    if not run_dir.exists():
+        die(f"Run directory not found: {run_dir}")
+    manifest_path = run_dir / "changed-manifest.txt"
+
+    incoming = []
+    skipped = []
+    for raw in (args.changed or []):
+        p = raw.strip()
+        if not p:
+            continue
+        # Normalise a leading ./ so the exclusion match is stable.
+        if p.startswith("./"):
+            p = p[2:]
+        if _DEV_PIPELINE_RE.search(p):
+            skipped.append(p)
+        else:
+            incoming.append(p)
+
+    existing = []
+    if manifest_path.exists():
+        existing = [ln for ln in manifest_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    merged = sorted(set(existing) | set(incoming))
+    manifest_path.write_text("".join(f"{p}\n" for p in merged), encoding="utf-8")
+
+    emit({"recorded": incoming, "skipped": skipped,
+          "manifest_path": str(manifest_path), "total": len(merged)})
+
+
+# ---------------------------------------------------------------------------
 # Help text
 # ---------------------------------------------------------------------------
 
@@ -1050,6 +1135,7 @@ DRIVER CLI
   normalize-review Convert codex --json payload → canonical review-result JSON
   append-attempt   Log a failed attempt to attempts.md for implementor context
   check-boundary   (TDD) verify a role only touched files it is allowed to
+  record-changes   Accumulate pipeline-produced files into changed-manifest.txt
   --version        Print the dev-pipeline version and exit
   --help           Show this message
 
@@ -1138,6 +1224,10 @@ def main() -> None:
     p_cb.add_argument("--role", required=True, choices=["test_implementation", "implementation"])
     p_cb.add_argument("--changed", nargs="*", default=[])
 
+    p_rc = sub.add_parser("record-changes")
+    p_rc.add_argument("--run", required=True)
+    p_rc.add_argument("--changed", nargs="*", default=[])
+
     args = parser.parse_args()
 
     dispatch = {
@@ -1150,6 +1240,7 @@ def main() -> None:
         "normalize-review": cmd_normalize_review,
         "append-attempt":   cmd_append_attempt,
         "check-boundary":   cmd_check_boundary,
+        "record-changes":   cmd_record_changes,
     }
 
     if args.cmd not in dispatch:

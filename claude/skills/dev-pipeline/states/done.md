@@ -2,19 +2,42 @@
 
 **Goal:** Commit, retrospective feedback, optional self-evolution, next-step recommendations.
 
-- [Step 1] **Commit** (if in a git repository):
+- [Step 1] **Commit** (if in a git repository). The advance that landed here echoed `tdd_mode` and `run_self_evolution` — use them; do not read `config.snapshot.json`.
   - Check: `git rev-parse --git-dir 2>/dev/null`.
-  - If a git repo, stage all changes **excluding** the plan file, spec.md, and `.dev-pipeline/`:
+  - **Manifest-based staging** (commit only files the pipeline produced, so untracked junk — cscope/ctags/build caches — never gets committed). The manifest is `<run_dir>/changed-manifest.txt`, written by `record-changes` during the authoring states.
+    - **If the manifest exists:**
+      ```bash
+      # 1. Clear the index (drops the baseline `git add -A` junk staged during the run).
+      if git -C <project_root> rev-parse --verify -q HEAD >/dev/null; then
+        git -C <project_root> reset -q
+      else
+        # Fresh repo, no HEAD. Scoped to project_root; if project_root is a strict
+        # subdir of a larger repo, files the baseline staged OUTSIDE project_root
+        # stay staged — a narrow no-HEAD+subdir edge. The clean-tree precondition
+        # (Step 0) makes this a non-issue in practice.
+        git -C <project_root> rm -r --cached -q -- . 2>/dev/null || true
+      fi
+      # 2. Stage ONLY manifest paths. `add -A` also stages deletions; a path that was
+      #    created and later reverted (never tracked, now absent) is silently skipped.
+      while IFS= read -r p; do [ -n "$p" ] || continue
+        git -C <project_root> add -A -- "$p" 2>/dev/null || true
+      done < <run_dir>/changed-manifest.txt
+      # 3. Defensive excludes (plan / spec.md / .dev-pipeline must never be committed).
+      git -C <project_root> reset -q HEAD -- <plan_path> 2>/dev/null || true
+      git -C <project_root> check-ignore -q .dev-pipeline || \
+        git -C <project_root> reset -q HEAD -- <spec_path> <project_root>/.dev-pipeline 2>/dev/null || true
+      ```
+    - **If the manifest does NOT exist** (e.g. a run started by an older driver before `record-changes`): fall back to the legacy `git add -A` flow and **warn the user**: "No change manifest found — committing with `git add -A`, so untracked files are NOT filtered. Review the staged set before this commits."
+      ```bash
+      git -C <project_root> add -A
+      git -C <project_root> reset HEAD -- <plan_path>
+      git -C <project_root> check-ignore -q .dev-pipeline || git -C <project_root> reset HEAD -- <spec_path> <project_root>/.dev-pipeline
+      ```
+  - **Commit only if something is staged**, with a one-line summary and a Co-Authored-By footer naming the model executing this skill:
     ```bash
-    git add -A
-    git reset HEAD -- <plan_path>
-    git check-ignore -q .dev-pipeline || git reset HEAD -- <spec_path> <project_root>/.dev-pipeline
-    ```
-    Commit with a one-line summary of what was implemented and a Co-Authored-By footer naming the model executing this skill:
-    ```
-    <one-line summary of what was implemented>
+    git -C <project_root> diff --cached --quiet || git -C <project_root> commit -m "<summary>
 
-    Co-Authored-By: Claude <noreply@anthropic.com>
+    Co-Authored-By: Claude <noreply@anthropic.com>"
     ```
     Do NOT push. (In TDD, the authored tests are part of the implementation and are committed normally.)
   - If not a git repo: inform the user that commit was skipped.
@@ -55,7 +78,7 @@
 
   Fill each `Runner/method` with the concrete agent/command/codex path actually used; note multi-iteration states. Be honest — if the workflow was not followed precisely (an advance out of order, a skipped validation, a boundary re-dispatch), note it.
 
-- [Step 4] **Self-evolution** — only if `run_self_evolution: true` in the config snapshot.
+- [Step 4] **Self-evolution** — only if the echoed `run_self_evolution` is true.
   - Use the retrospective findings as input. Identify which agent `.md` files (or SKILL.md / its `states/*.md`) need updating.
   - If `/advisor` is active, consult it first; otherwise apply only clearly necessary changes.
   - Editable files (the only ones self-evolution may touch): `.claude/agents/dp-implementor.md`, `.claude/agents/dp-test-implementor.md`, `.claude/agents/dp-tester.md`, `.claude/agents/dp-reviewer.md`, `.claude/skills/dev-pipeline/SKILL.md`, and `.claude/skills/dev-pipeline/states/*.md`.

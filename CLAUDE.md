@@ -22,6 +22,9 @@ python3 agents/dev-pipeline-tools/driver.py normalize-review --source codex --in
 # (TDD) deterministically check a role only touched files it is allowed to
 python3 agents/dev-pipeline-tools/driver.py check-boundary --run <run_dir> --role implementation --changed src/a.py tests/t.py
 
+# Accumulate pipeline-produced files into the commit/review manifest (dedup, excludes .dev-pipeline/)
+python3 agents/dev-pipeline-tools/driver.py record-changes --run <run_dir> --changed src/a.py src/b.py
+
 # Print version
 python3 agents/dev-pipeline-tools/driver.py --version
 
@@ -92,6 +95,14 @@ All new keys are read with `.get(default)` so a run/config created by an older d
 
 Codex is called with `--wait --json`. The spec is passed through codex's focus text (codex has no dedicated spec flag), so it reviews the changes against the spec's Acceptance Criteria. The `payload.result` field maps 1:1 to the `review-result` schema (including `confidence`). `normalize-review` performs the mapping. Fallback is triggered by: plugin not found, non-zero exit, `payload.parseError` present, or `payload.result` absent.
 
+### Change manifest (commit/review scope)
+
+Each authoring state (`test_implementation`, `implementation`) computes its agent's delta `project_root`-relative (`git -C <project_root> diff --name-only --relative` + `ls-files --others`) and passes it to `driver record-changes`, which appends it (deduped, `.dev-pipeline/` excluded) to `<run_dir>/changed-manifest.txt`. The `done` commit stages **only** manifest paths (`git add -A -- <path>`, so deletions commit too) instead of `git add -A`; the `review` dp-reviewer fallback scopes to the same set. This keeps untracked junk *not produced by the authoring agents themselves* out of both without per-run `.gitignore` upkeep — build/test caches are generated in the separate `test` state (after the delta snapshot, before the next baseline), so they are absorbed and excluded; an artifact an authoring agent writes during its own turn would still be recorded. If the manifest is absent (run started by an older driver), `done` falls back to `git add -A` and warns. Note: the codex reviewer discovers changes from the worktree itself and is **not** constrained by the manifest.
+
+### Determinism: the advance echo is the single channel
+
+State files (`states/*.md`) must **not** read `config.snapshot.json` for control flow (SKILL Global Rule 9). Every value a destination state needs is echoed by the `driver advance` (or `driver init`) that lands there: `tdd_mode` (always), the tester `*_instruction`s, `reviewer_config`, `test_implementor_config`, `design_instruction`, `test_paths`, the per-role runner arrays (`implementor_runners`/`test_implementor_runners`/`tester_runners`), and `run_self_evolution`. These are injected centrally in `cmd_advance`'s `transition()` helper (`dest_echoes(new_state)` + the always-on `tdd_mode`), all read with `.get(default)` for old-snapshot safety. The reviewer has no runner echo because `review.md` hardcodes the codex→dp-reviewer order. Echoing `tdd_mode` on every transition fixes a resume bug: the frozen authoritative value is `state.tdd_mode`, and `config.snapshot.json`'s `driver.tdd_mode` is wrong under a `--tdd`/`--no-tdd` override.
+
 ### Key files
 
 | Path | Role |
@@ -118,6 +129,7 @@ Codex is called with `--wait --json`. The spec is passed through codex's focus t
 ├── state.json           # driver owns this
 ├── spec.md              # generated from plan at init; shared by test author, implementor + reviewer (TDD: + Test Targets/Interface)
 ├── attempts.md          # failure log appended on every test_implementation/test/review failure; passed to authors on retry
+├── changed-manifest.txt # files the authoring agents produced (record-changes); commit + review fallback stage only these
 ├── config.snapshot.json
 └── iterations/<n>/
     ├── red-test-result.json   # TDD red_test result (validated against the test-result schema)

@@ -1044,5 +1044,125 @@ class TestCheckBoundary(PipelineTestCase):
         self.assertEqual(r.json["violating"], ["tests/test_a.py"])
 
 
+class TestRecordChanges(PipelineTestCase):
+    """The commit/review manifest accumulator (record-changes)."""
+
+    def _init(self, tdd_mode=False):
+        p = self.make_pipeline(tdd_mode=tdd_mode)
+        p.init()
+        return p
+
+    def _record(self, p, changed):
+        return run_driver("record-changes", "--run", str(p.run_dir),
+                          "--changed", *changed)
+
+    def _manifest(self, p):
+        m = p.run_dir / "changed-manifest.txt"
+        return m.read_text(encoding="utf-8").splitlines() if m.exists() else []
+
+    def test_records_and_sorts(self):
+        p = self._init()
+        r = self._record(p, ["src/b.py", "src/a.py"])
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self._manifest(p), ["src/a.py", "src/b.py"])
+
+    def test_accumulates_and_dedupes(self):
+        p = self._init()
+        self._record(p, ["src/a.py", "src/b.py"])
+        self._record(p, ["src/b.py", "src/c.py"])  # b.py is a duplicate
+        self.assertEqual(self._manifest(p), ["src/a.py", "src/b.py", "src/c.py"])
+
+    def test_excludes_dev_pipeline_paths(self):
+        p = self._init()
+        r = self._record(p, ["src/a.py", ".dev-pipeline/runs/x/spec.md",
+                             "sub/.dev-pipeline/state.json"])
+        self.assertEqual(r.json["skipped"],
+                         [".dev-pipeline/runs/x/spec.md", "sub/.dev-pipeline/state.json"])
+        self.assertEqual(self._manifest(p), ["src/a.py"])
+
+    def test_normalizes_leading_dot_slash(self):
+        p = self._init()
+        self._record(p, ["./src/a.py"])
+        self.assertEqual(self._manifest(p), ["src/a.py"])
+
+    def test_empty_and_blank_input(self):
+        p = self._init()
+        r = self._record(p, ["", "   "])
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.json["recorded"], [])
+        self.assertEqual(self._manifest(p), [])
+
+    def test_missing_run_dir_errors(self):
+        r = run_driver("record-changes", "--run", "/nonexistent/run-dir",
+                       "--changed", "a.py")
+        self.assertNotEqual(r.returncode, 0)
+
+
+class TestAdvanceEchoes(PipelineTestCase):
+    """advance must echo every config-derived value a destination state needs,
+    so the SKILL never reads config.snapshot.json for control flow."""
+
+    def test_legacy_flow_echoes(self):
+        p = self.started(tdd_mode=False, run_self_evolution=True)
+        r1 = p.advance()  # init -> implementation
+        j = r1.json
+        self.assertEqual(j["next_state"], "implementation")
+        self.assertFalse(j["tdd_mode"])
+        self.assertTrue(j["design_instruction"])
+        self.assertEqual(j["implementor_runners"][0]["agent"], "dp-implementor")
+        self.assertNotIn("test_paths", j)  # legacy: no test boundary
+
+        r2 = p.advance()  # implementation -> test
+        self.assertEqual(r2.json["next_state"], "test")
+        self.assertFalse(r2.json["tdd_mode"])
+        self.assertEqual(r2.json["tester_runners"][0]["agent"], "dp-tester")
+
+        p.write_test_result(status="pass")
+        r3 = p.advance()  # test -> review
+        self.assertEqual(r3.json["next_state"], "review")
+        self.assertFalse(r3.json["tdd_mode"])
+
+        p.write_review_result(verdict="approve")
+        r4 = p.advance()  # review -> done
+        self.assertEqual(r4.json["next_state"], "done")
+        self.assertFalse(r4.json["tdd_mode"])
+        self.assertTrue(r4.json["run_self_evolution"])
+
+    def test_tdd_flow_echoes(self):
+        p = self.started(tdd_mode=True)
+        r1 = p.advance()  # init -> test_implementation
+        self.assertEqual(r1.json["next_state"], "test_implementation")
+        self.assertTrue(r1.json["tdd_mode"])
+        self.assertEqual(r1.json["test_implementor_runners"][0]["agent"],
+                         "dp-test-implementor")
+
+        r2 = p.advance()  # test_implementation -> red_test (red phase)
+        self.assertEqual(r2.json["next_state"], "red_test")
+        self.assertTrue(r2.json["tdd_mode"])
+        self.assertEqual(r2.json["tester_runners"][0]["agent"], "dp-tester")
+
+        p.write_red_test_result(status="fail", failure_type="code")
+        r3 = p.advance()  # red confirmed -> implementation
+        self.assertEqual(r3.json["next_state"], "implementation")
+        self.assertTrue(r3.json["tdd_mode"])
+        self.assertTrue(r3.json["design_instruction"])
+        self.assertEqual(r3.json["implementor_runners"][0]["agent"], "dp-implementor")
+        self.assertEqual(r3.json["test_paths"], ["tests/**"])  # tdd echoes the boundary
+
+    def test_no_tdd_override_echoes_frozen_false(self):
+        # config says tdd_mode=True, but --no-tdd freezes state.tdd_mode=False.
+        # The echo must reflect the frozen value, never config.driver.tdd_mode.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init(tdd=False)
+        p.write_spec()
+        # Make the divergence explicit: the snapshot still says tdd_mode=true,
+        # but the frozen state (and therefore the echo) must be false.
+        snap = json.loads((p.run_dir / "config.snapshot.json").read_text(encoding="utf-8"))
+        self.assertTrue(snap["driver"]["tdd_mode"])
+        r1 = p.advance()
+        self.assertEqual(r1.json["next_state"], "implementation")  # legacy path
+        self.assertFalse(r1.json["tdd_mode"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

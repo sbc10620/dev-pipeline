@@ -6,20 +6,29 @@ The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `spec
 
 - [Step 1] Use the echoed `iter_dir` for this step.
 
-- [Step 2] Collect changed/new files (for the dp-reviewer fallback). **Run from `project_root`.** First check for an initial commit: `cd <project_root> && git rev-parse --verify HEAD 2>/dev/null`.
-  - **If HEAD exists:**
-    ```bash
-    cd <project_root> && git diff --name-only HEAD 2>/dev/null
-    cd <project_root> && git ls-files --others --exclude-standard 2>/dev/null
-    cd <project_root> && git diff HEAD > "<iter_dir>/changes.diff" 2>/dev/null
-    ```
-  - **If HEAD does NOT exist** (fresh repo):
-    ```bash
-    cd <project_root> && git ls-files --others --exclude-standard 2>/dev/null
-    cd <project_root> && git diff --name-only --cached 2>/dev/null
-    cd <project_root> && git diff --cached > "<iter_dir>/changes.diff" 2>/dev/null
-    ```
-  - `changed_files` = the deduplicated union. In TDD the diff includes both the authored tests and the production code — both are in review scope (the reviewer reads them; it never runs them).
+- [Step 2] Collect changed/new files (for the dp-reviewer fallback only — codex in [Step 3] discovers changes itself from the worktree and does not use this list). **Run from `project_root`.**
+  - **Preferred — manifest scope** (when `<run_dir>/changed-manifest.txt` exists): restrict the review to the files the pipeline actually produced, so untracked junk (cscope/ctags/build caches) is not reviewed.
+    - `changed_files` = the manifest paths that still exist on disk.
+    - `changes.diff`:
+      ```bash
+      git -C <project_root> diff HEAD -- <manifest paths> > "<iter_dir>/changes.diff" 2>/dev/null
+      ```
+      (New files are not in a diff-vs-HEAD; they are still passed via the `changed_files` list for the reviewer to Read.)
+  - **Fallback — no manifest** (run started by an older driver): use the git working-tree scan. First check for an initial commit: `cd <project_root> && git rev-parse --verify HEAD 2>/dev/null`.
+    - **If HEAD exists:**
+      ```bash
+      cd <project_root> && git diff --name-only HEAD 2>/dev/null
+      cd <project_root> && git ls-files --others --exclude-standard 2>/dev/null
+      cd <project_root> && git diff HEAD > "<iter_dir>/changes.diff" 2>/dev/null
+      ```
+    - **If HEAD does NOT exist** (fresh repo):
+      ```bash
+      cd <project_root> && git ls-files --others --exclude-standard 2>/dev/null
+      cd <project_root> && git diff --name-only --cached 2>/dev/null
+      cd <project_root> && git diff --cached > "<iter_dir>/changes.diff" 2>/dev/null
+      ```
+    - `changed_files` = the deduplicated union.
+  - In TDD the scope includes both the authored tests and the production code — both are in review scope (the reviewer reads them; it never runs them).
 
 - [Step 3] Try codex adversarial-review (primary):
   - Find the companion: `ls ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs 2>/dev/null | tail -1`
