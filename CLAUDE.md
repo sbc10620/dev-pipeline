@@ -103,6 +103,18 @@ Each authoring state (`test_implementation`, `implementation`) computes its agen
 
 State files (`states/*.md`) must **not** read `config.snapshot.json` for control flow (SKILL Global Rule 9). Every value a destination state needs is echoed by the `driver advance` (or `driver init`) that lands there: `tdd_mode` (always), the tester `*_instruction`s, `reviewer_config`, `test_implementor_config`, `design_instruction`, `test_paths`, the per-role runner arrays (`implementor_runners`/`test_implementor_runners`/`tester_runners`), and `run_self_evolution`. These are injected centrally in `cmd_advance`'s `transition()` helper (`dest_echoes(new_state)` + the always-on `tdd_mode`), all read with `.get(default)` for old-snapshot safety. The reviewer has no runner echo because `review.md` hardcodes the codex→dp-reviewer order. Echoing `tdd_mode` on every transition fixes a resume bug: the frozen authoritative value is `state.tdd_mode`, and `config.snapshot.json`'s `driver.tdd_mode` is wrong under a `--tdd`/`--no-tdd` override.
 
+### Editing the skill/agent Markdown (style consistency)
+
+`SKILL.md`, `states/*.md`, and `claude/agents/dp-*.md` are **prose instructions an LLM orchestrator executes** — their format *is* their interface. When editing them, match the existing conventions rather than introducing your own; an inconsistent file is harder for the model to follow reliably. Before editing a file, read its neighbours and mirror them:
+
+- **Document structure.** Keep each file's established skeleton. State files open with `# STATE: <name>` (plus `(TDD only)` where applicable), then `**Goal:** …`, then a sentence naming what the landing `advance` echoed, then the steps, then a `**Checklist:**`. Do not drop or reorder these sections.
+- **Workflow numbering.** Steps are `- [Step N]` in execution order; sub-points are nested bullets. Keep the numbering contiguous and sequential — if you insert a step, renumber the rest (see git history: "unify step numbering"). Reference other states as `states/<name>.md` and never hard-code a transition the driver decides.
+- **Sentence style.** Terse, imperative ("Dispatch the tester…", "Pass paths, not contents"), present tense. **Bold** the load-bearing rule in a step; use inline `code` for paths, keys, commands, and JSON fields. Match the surrounding density — don't expand a one-line step into a paragraph.
+- **Cross-file consistency.** A value's name and source must read the same everywhere (e.g. echoed-field names, the "use the echoed X — do not read `config.snapshot.json`" phrasing, checklist items that restate each step). When you change one state's contract, update the SKILL Run Context / echo list and any sibling state that mentions it.
+- **Checklists** restate the step's success conditions as `- [ ]` items, one per meaningful step, in step order. Keep them in sync when you add or change a step.
+
+After editing, skim a sibling file side-by-side and confirm headings, step format, and tone match.
+
 ### Key files
 
 | Path | Role |
