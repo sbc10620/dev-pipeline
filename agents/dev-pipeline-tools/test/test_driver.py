@@ -1182,6 +1182,29 @@ class TestAdvanceEchoes(PipelineTestCase):
         self.assertFalse(r1.json["tdd_mode"])
 
 
+class TestStageInputWiring(PipelineTestCase):
+    """init/advance persist a stage-input.json so `driver run-stage` can consume
+    the same context the SKILL echo carries (additive; legacy flow unaffected)."""
+
+    def test_init_writes_spec_stage_input(self):
+        p = self.started(tdd_mode=False)
+        si = json.loads((p.run_dir / "stage-input.json").read_text(encoding="utf-8"))
+        self.assertEqual(si["role"], "spec_author")
+        self.assertTrue(si["output_file"].endswith("spec.md"))
+        self.assertIn("## Requirements", si["required_sections"])
+        self.assertEqual(si["inputs"]["tdd_mode"], False)
+
+    def test_advance_writes_tester_stage_input(self):
+        p = self.started(tdd_mode=False)
+        p.advance()  # init -> implementation (no iter_dir echoed yet)
+        p.advance()  # implementation -> test  (tester; iter_dir echoed)
+        si = json.loads((p.run_dir / "iterations" / "0" / "stage-input.json").read_text(encoding="utf-8"))
+        self.assertEqual(si["role"], "tester")
+        self.assertTrue(si["output_file"].endswith("test-result.json"))
+        self.assertIn("build_instruction", si["inputs"])
+        self.assertNotIn("directive", si["inputs"])  # control keys excluded
+
+
 class TestRunStage(unittest.TestCase):
     """run-stage: prompt assembly + bash-runner execution + per-category checks.
     Uses dummy shell runners (no LLM) so the behavior is deterministic."""
