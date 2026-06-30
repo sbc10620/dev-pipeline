@@ -33,7 +33,7 @@
     },
     "source": {
       "type": "string",
-      "enum": ["codex-adversarial-review", "claude-subagent"]
+      "enum": ["bash-runner", "codex-adversarial-review", "claude-subagent"]
     }
   }
 }
