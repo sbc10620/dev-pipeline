@@ -1103,13 +1103,20 @@ class TestAdvanceEchoes(PipelineTestCase):
     so the SKILL never reads config.snapshot.json for control flow."""
 
     def test_legacy_flow_echoes(self):
-        p = self.started(tdd_mode=False, run_self_evolution=True)
+        p = self.make_pipeline(tdd_mode=False, run_self_evolution=True)
+        # A distinctive build command proves the echo reads config verbatim,
+        # not just the "no build step" fallback default.
+        p._config["llm"]["tester"]["build_instruction"] = "make build"
+        p.init()
+        p.write_spec()
         r1 = p.advance()  # init -> implementation
         j = r1.json
         self.assertEqual(j["next_state"], "implementation")
         self.assertFalse(j["tdd_mode"])
         self.assertTrue(j["design_instruction"])
         self.assertEqual(j["implementor_runners"][0]["agent"], "dp-implementor")
+        # The implementor build-checks before handoff → it gets the tester's build cmd.
+        self.assertEqual(j["build_instruction"], "make build")
         self.assertNotIn("test_paths", j)  # legacy: no test boundary
 
         r2 = p.advance()  # implementation -> test
@@ -1147,6 +1154,7 @@ class TestAdvanceEchoes(PipelineTestCase):
         self.assertTrue(r3.json["tdd_mode"])
         self.assertTrue(r3.json["design_instruction"])
         self.assertEqual(r3.json["implementor_runners"][0]["agent"], "dp-implementor")
+        self.assertEqual(r3.json["build_instruction"], "no build step")
         self.assertEqual(r3.json["test_paths"], ["tests/**"])  # tdd echoes the boundary
 
     def test_no_tdd_override_echoes_frozen_false(self):
