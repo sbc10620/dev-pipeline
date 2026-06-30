@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -476,6 +476,9 @@ def cmd_advance(args) -> None:
         if new_state == "implementation":
             e["design_instruction"] = llm.get("implementor", {}).get("design_instruction", "")
             e["implementor_runners"] = runners.get("implementor", [])
+            # The implementor build-checks its code before handoff (catches compile
+            # errors early); it reuses the tester's build command.
+            e["build_instruction"] = llm.get("tester", {}).get("build_instruction", "no build step")
             if tdd:
                 # The implementor must know which paths are off-limits (test author's).
                 e["test_paths"] = llm.get("test_implementor", {}).get("test_paths", [])

@@ -9,6 +9,29 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .claude/skills/dev-pipeline/driver.py --version`.
 
+## [2.3.0] - 2026-06-30
+
+The implementor build-checks its code before handing off, so compile errors are
+caught early instead of bouncing through the tester.
+
+### Changed
+- `dp-implementor` now runs the project's `build_instruction` after implementing
+  (skipped for "no build step"), fixes compile errors within its turn (soft cap of
+  2–3 rebuilds), and only then hands off. It still must not run the separate
+  install/test stages — the tester remains the authoritative build/install/test
+  gate. `build_instruction` is now echoed on every transition into `implementation`.
+
+### Notes / limitations
+- The implementor's build is a best-effort early check, not a replacement for the
+  tester's build (which may run in a cleaner/different environment) — it reduces
+  bounces from obvious compile errors but adds a second build per iteration.
+- **Keep build output gitignored and outside `test_paths`.** Build artifacts the
+  implementor produces are part of its git delta: gitignored untracked files are
+  excluded automatically (`--exclude-standard`), but a non-gitignored artifact
+  under `test_paths` can trip the role-boundary check, and a build that rewrites a
+  *tracked* file (e.g. a lockfile) can land that change in the commit. Gitignore
+  build output and do not let `test_paths` overlap the build directory.
+
 ## [2.2.0] - 2026-06-30
 
 Harden RED-phase failure classification so an unimplemented feature is not
