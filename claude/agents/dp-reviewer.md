@@ -61,7 +61,7 @@ Note: If `review_block_severity` is configured in the pipeline, the driver deter
 **Test code (TDD runs).** The gate subject is the production code's compliance with the spec. For findings about the *test* files: pure style/coverage nitpicks are at most `medium`. But a test that **asserts behavior contradicting the spec** (a wrong or misleading test) is a legitimate `high` finding — a green suite built on a wrong test is worse than no test. Report those at the severity their impact deserves.
 
 ### [Step 4] Output the result
-Write **only** the following JSON to the output file path your prompt gives (the file content is exactly this JSON, no other text):
+Output **only** the following JSON, placed exactly where your prompt's output instruction directs (the result is exactly this JSON, nothing else):
 
 ```json
 {

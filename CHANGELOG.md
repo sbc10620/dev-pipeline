@@ -51,6 +51,11 @@ must be migrated.
   <project>/.dev-pipeline/dev-pipeline.config.json`, then review the generated
   runner commands. Update the driver and the installed skill **in lockstep**.
 - Requires the `claude` and/or `codex` CLI on PATH for the default runners.
+- **Security:** default `claude` runners run headless with pre-approved tools and
+  no OS sandbox; `plan.md`/`spec.md`/code are untrusted. Run dev-pipeline in a
+  sandboxed/throwaway environment and keep each role's `--allowedTools` minimal
+  (read-only roles use a stdout-redirect command with no `Write`). See AGENTS.md
+  "Security / trust model".
 
 ## [2.3.1] - 2026-07-01
 
