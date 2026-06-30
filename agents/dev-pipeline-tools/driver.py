@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "2.3.1"
+__version__ = "3.0.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -599,6 +599,13 @@ def cmd_advance(args) -> None:
                               "iter_dir": str(iter_dir),
                               "red_test": True,
                               "result_filename": "red-test-result.json",
+                              "red_phase_context": (
+                                  "RED phase: production code for the feature under test is "
+                                  "intentionally not implemented yet. A failure caused by the feature "
+                                  "being absent (missing module/function/symbol, import error, or compile "
+                                  "error referencing the spec's intended interface) MUST be classified "
+                                  "failure_type=code (the expected RED). Reserve environment for failures "
+                                  "unrelated to the missing feature (toolchain/framework/network/permissions)."),
                               "build_instruction":   cfg["llm"]["tester"]["build_instruction"],
                               "install_instruction": cfg["llm"]["tester"]["install_instruction"],
                               "test_instruction":    cfg["llm"]["tester"]["test_instruction"]})
@@ -699,6 +706,7 @@ def cmd_advance(args) -> None:
                        extra={"directive": "run_reviewer",
                               "iter_dir": str(iter_dir),
                               "spec_path": state["spec_path"],
+                              "changes_diff": str(iter_dir / "changes.diff"),
                               "reviewer_config": cfg["llm"]["reviewer"]})
         elif failure_type == "environment":
             transition("failed", "test_fail_environment", failure_type="environment",

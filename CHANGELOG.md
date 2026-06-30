@@ -9,6 +9,49 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .claude/skills/dev-pipeline/driver.py --version`.
 
+## [3.0.0] - 2026-06-30
+
+Run every LLM role through a single **bash runner** so the pipeline is
+host-agnostic: any LLM can drive the loop, and each stage can use a different
+LLM. The Claude-Code subagent path is removed. **Breaking** — existing configs
+must be migrated.
+
+### Added
+- **`driver run-stage --role <role>`**: the driver deterministically assembles a
+  role's prompt from its LLM-agnostic `dp-*.md` (frontmatter stripped → system) +
+  the persisted `stage-input.json` (inputs), runs the configured bash runner(s)
+  front-to-back, and validates by category — file roles (exit 0), JSON roles
+  (result written to `{output_file}` → normalizer → schema), named roles
+  (spec_author: required sections / `INSUFFICIENT:` marker). One error-fed retry
+  before fallback. Normalizers: `passthrough` / `claude-cli` / `codex-cli`.
+- **`dp-spec-author`** role + runner: the spec is now authored by a runner, not
+  the orchestrator, so the whole creative path is LLM-agnostic.
+- **`driver migrate-config`**: converts a pre-3.0.0 config (claude-subagent /
+  codex-adversarial-review runners) to the bash defaults (incl. `spec_author`).
+- First principle, documented and enforced: **role `.md` files are LLM-agnostic**
+  (no model/tool/CLI references); the LLM, flags, and per-role tool envelope live
+  only in `config.runners.<role>`. Swapping/adding an LLM is a config-only change.
+
+### Changed / Breaking
+- `config.runners.<role>` items are now `{type:"bash", command, normalizer?,
+  timeout?}` only; `claude-subagent` and `codex-adversarial-review` are removed
+  from the schema. `runners.spec_author` is now required. `validate-config`
+  detects the removed types and points at `migrate-config`.
+- `config.example.json` ships per-role bash runners with minimal tool envelopes
+  (claude `--allowedTools` by role; codex `exec -s read-only` reviewer + claude
+  fallback), validated by a real-CLI spike.
+- The SKILL and every state file call `driver run-stage` instead of dispatching a
+  subagent / assembling prompts inline; `SKILL.md` drops the `Agent` tool. The git
+  baseline/boundary/manifest bookkeeping and the `done` commit are unchanged.
+- `review-result.source` gains `bash-runner`; the reviewer no longer claims a
+  specific backend (it does not know which LLM runs it).
+
+### Migration
+- Run `python3 .claude/skills/dev-pipeline/driver.py migrate-config --config
+  <project>/.dev-pipeline/dev-pipeline.config.json`, then review the generated
+  runner commands. Update the driver and the installed skill **in lockstep**.
+- Requires the `claude` and/or `codex` CLI on PATH for the default runners.
+
 ## [2.3.1] - 2026-07-01
 
 ### Fixed
