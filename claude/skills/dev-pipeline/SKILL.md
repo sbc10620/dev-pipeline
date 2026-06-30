@@ -90,7 +90,7 @@ No other arguments are accepted. If any unknown argument is present, report an e
     3. red_test             Tester proves the tests FAIL before any code exists
     4. implementation       Implementor agent writes code
     5. test                 Tester runs build / install / test (exact commands from config)
-    6. review               Codex adversarial-review (fallback: dp-reviewer agent)
+    6. review               Reviewer runner (config.runners.reviewer; e.g. codex then claude)
     7. done                 Commit, retrospective feedback, optional self-evolution
     failed                  Stops on exhausted iterations or environment error
   With --no-tdd the test_implementation and red_test states are skipped.
