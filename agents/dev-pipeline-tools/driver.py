@@ -275,7 +275,7 @@ def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
     for role, arr in (cfg.get("runners") or {}).items():
         for i, r in enumerate(arr if isinstance(arr, list) else []):
             cmd = r.get("command", "") if isinstance(r, dict) else ""
-            unknown = sorted(set(re.findall(r"\{(\w+)\}", cmd)) - known)
+            unknown = sorted(set(re.findall(r"(?<!\$)\{(\w+)\}", cmd)) - known)
             if unknown:
                 errors.append(f"runners.{role}[{i}].command references unknown placeholder(s) "
                               f"{{{', '.join(unknown)}}}; allowed: {sorted(known)}")
@@ -541,8 +541,9 @@ def cmd_advance(args) -> None:
             e["tester_runners"] = runners.get("tester", [])
         elif new_state == "done":
             e["run_self_evolution"] = cfg.get("driver", {}).get("run_self_evolution", False)
-        # Note: reviewer has no echo — review.md hardcodes the codex→dp-reviewer
-        # order and never consults config.runners.reviewer.
+        # Note: no reviewer-runner echo here — the reviewer (like every role in
+        # 3.0.0) is run by `driver run-stage`, which reads config.runners.reviewer
+        # itself; the SKILL never needs the runner array.
         return e
 
     def transition(new_state: str, outcome: str, failure_type=None, halt_reason=None, extra: dict = None):
@@ -1409,6 +1410,8 @@ def cmd_run_stage(args) -> None:
                 problem, exit_code = None, retry_exit
 
         if problem == INSUFFICIENT:
+            # An "input too vague" verdict is not LLM-specific — do NOT try a
+            # fallback runner; surface it to the user.
             if output_file.exists():
                 output_file.unlink()  # don't leave an INSUFFICIENT marker where a spec is expected
             emit({"ok": False, "role": role, "category": "named", "reason": "insufficient",

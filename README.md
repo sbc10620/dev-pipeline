@@ -2,7 +2,7 @@
 
 Automated **test-driven** development pipeline for Claude Code: author tests from the spec, prove they fail (RED), write code, prove they pass (GREEN), then review.
 
-Accepts a `plan.md` written by any LLM (Claude, Codex, etc.) and drives the full development cycle using specialized subagents, with deterministic state transitions handled by a Python driver script.
+Accepts a `plan.md` written by any LLM (Claude, Codex, etc.) and drives the full development cycle using per-stage LLM runners (claude, codex, …; chosen in config), with deterministic state transitions handled by a Python driver script.
 
 ---
 
@@ -87,18 +87,21 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
     }
   },
   "runners": {
-    "implementor":      [{ "type": "claude-subagent", "agent": "dp-implementor" }],
-    "test_implementor": [{ "type": "claude-subagent", "agent": "dp-test-implementor" }],
-    "tester":           [{ "type": "claude-subagent", "agent": "dp-tester" }],
+    "spec_author":      [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Write" }],
+    "implementor":      [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Edit Write Bash" }],
+    "test_implementor": [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Edit Write" }],
+    "tester":           [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Bash > {output_file}", "normalizer": "claude-cli" }],
     "reviewer":    [
-      { "type": "codex-adversarial-review" },
-      { "type": "claude-subagent", "agent": "dp-reviewer" }
+      { "type": "bash", "command": "codex exec -s read-only \"$(cat {system_file}; printf '\\n\\n'; cat {user_file})\" > {output_file}", "normalizer": "codex-cli" },
+      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Grep Glob > {output_file}", "normalizer": "claude-cli" }
     ]
   }
 }
 ```
 
-`llm.test_implementor` and `runners.test_implementor` are required only when TDD is enabled (the default). Set `driver.tdd_mode: false` or run `--no-tdd` to omit them.
+**Runners (3.0.0).** Each role runs through `driver run-stage`, which assembles the prompt from the LLM-agnostic `dp-<role>.md` + the stage's inputs and runs `config.runners.<role>` — an ordered array of `{ "type": "bash", "command": …, "normalizer"?: "passthrough|claude-cli|codex-cli" }`. **The command is the only place an LLM is named**; swap/add an LLM by editing config alone. Placeholders the driver substitutes: `{system_file}` `{user_file}` `{output_file}` `{project_root}` `{run_dir}` `{work_dir}`. JSON roles either write `{output_file}` (tool) or print to stdout (when the command redirects `> {output_file}`). `runners.spec_author` is required; `llm.test_implementor` + `runners.test_implementor` are required only under TDD (the default — `--no-tdd` / `tdd_mode:false` to omit).
+
+> **Security:** the default `claude` runners run headless with pre-approved tools and **no sandbox**; `plan.md`/`spec.md`/code are untrusted input. Run dev-pipeline in a sandboxed/throwaway environment and keep each role's `--allowedTools` minimal (read-only roles use a stdout-redirect command with no `Write`). A pre-3.0.0 config is rejected with a hint — run `driver migrate-config --config <path>` to convert.
 
 ### Config fields
 
@@ -137,27 +140,23 @@ In Claude Code, with your project open:
 
 ---
 
-## Agents
+## Roles
 
-| Agent | Model | Role | Permissions |
-|---|---|---|---|
-| `dp-test-implementor` | sonnet | (TDD) Writes tests from the spec — tests only, no production code | Read, Write, Edit, Grep, Glob |
-| `dp-implementor` | sonnet | Writes code based on plan + spec; never edits tests under TDD | Read, Write, Edit, Bash, Grep, Glob |
-| `dp-tester` | sonnet | Runs build/install/test — **no code inference** (used by `red_test` and `test`) | Bash, Read only |
-| `dp-reviewer` | sonnet | Adversarial code review, incl. test code; never runs it (codex fallback) | Read, Grep, Glob only (read-only) |
+Each role is an LLM-agnostic prose file (`claude/agents/dp-<role>.md`) run by `driver run-stage` through its `config.runners.<role>` command. The **tool envelope** below is whatever that command's flags grant (e.g. claude `--allowedTools`) — set in config, not in the role file.
+
+| Role | Does | Tool envelope (set in config) |
+|---|---|---|
+| `dp-spec-author` | Turns the plan into a structured, testable spec (or an `INSUFFICIENT:` marker) | Read, Write (spec only) |
+| `dp-test-implementor` | (TDD) Writes tests from the spec — tests only, no production code | Read, Write, Edit (no Bash) |
+| `dp-implementor` | Writes + build-checks code from plan + spec; never edits tests under TDD | Read, Edit, Write, Bash |
+| `dp-tester` | Runs build/install/test — **no code inference** (used by `red_test` and `test`) | Read, Bash (read-only; no Write) |
+| `dp-reviewer` | Adversarial review against the spec; reads the diff, never edits | Read, Grep, Glob (read-only) |
 
 ---
 
-## Reviewer: codex primary, dp-reviewer fallback
+## Reviewer: codex primary, claude fallback
 
-The pipeline tries `codex adversarial-review` first (using `--wait --json` for structured output).
-The spec is passed through codex's focus text so it reviews against the spec's Acceptance Criteria.
-Falls back to `dp-reviewer` subagent if:
-- Codex plugin not installed
-- Usage limit reached
-- Output parsing fails
-
-Fallback is reported to the user when it occurs.
+`config.runners.reviewer` is an ordered array tried front-to-back. The default ships **codex** (`codex exec -s read-only`) first and **claude** (`claude -p`, read-only tools) as the fallback; the next runner is used only if one fails to produce a valid `review-result.json`. Both review the change diff against the spec's Acceptance Criteria. Customize or reorder by editing the config.
 
 ---
 
@@ -181,11 +180,13 @@ Created at `<project>/.dev-pipeline/` (gitignored automatically).
     ├── spec.md              # generated from plan — shared by test author, implementor and reviewer
     ├── attempts.md          # accumulated failure history — passed to authors on retry
     ├── config.snapshot.json
+    ├── changed-manifest.txt  # files the runners produced (commit/review scope)
+    ├── stage-input.json      # spec-author stage input
     └── iterations/<n>/
         ├── red-test-result.json   # TDD: the red_test (RED verification) result
         ├── test-result.json
         ├── review-result.json
-        └── codex-raw.json
+        └── <role>-system.txt / <role>-user.txt / <role>-output.json  # run-stage prompt+output (audit)
 ```
 
 Each `run-id` is a timestamp (`YYYYMMDD-HHMMSS`). Previous runs are preserved for audit/debug.
@@ -199,8 +200,7 @@ python3 agents/dev-pipeline-tools/driver.py --help
 python3 agents/dev-pipeline-tools/driver.py --version
 python3 agents/dev-pipeline-tools/driver.py validate-config --config .dev-pipeline/dev-pipeline.config.json
 python3 agents/dev-pipeline-tools/driver.py status --run .dev-pipeline/latest
-python3 agents/dev-pipeline-tools/driver.py normalize-review --source codex \
-    --in codex-raw.json --out review-result.json
+python3 agents/dev-pipeline-tools/driver.py migrate-config --config .dev-pipeline/dev-pipeline.config.json
 ```
 
 ---
