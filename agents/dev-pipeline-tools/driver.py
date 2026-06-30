@@ -436,6 +436,21 @@ def cmd_init(args) -> None:
         "# Attempt History\n\n_No attempts recorded yet._\n", encoding="utf-8"
     )
 
+    # Stage-input for the spec author (bash-runner mode). Additive — the legacy
+    # flow still authors spec.md via the init emit below; this only persists the
+    # context so `driver run-stage --role spec_author` can produce spec.md.
+    required = ["## Requirements", "## Acceptance Criteria"]
+    if tdd_mode:
+        required.append("## Test Targets")
+    save_json(run_dir / "stage-input.json", {
+        "role": "spec_author",
+        "project_root": str(project_dir),
+        "work_dir": str(run_dir),
+        "output_file": str(spec_path),
+        "required_sections": required,
+        "inputs": {"plan_path": str(plan_path), "tdd_mode": tdd_mode},
+    })
+
     emit({
         "state": "init",
         "run_id": rid,
@@ -518,6 +533,11 @@ def cmd_advance(args) -> None:
         result.update(dest_echoes(new_state))
         if extra:
             result.update(extra)
+        # Persist a stage-input.json next to the iteration so `driver run-stage`
+        # (bash-runner mode) can consume the same context the SKILL echo carries.
+        si = build_stage_input(result, state.get("project_dir", ""))
+        if si and si.get("work_dir") and si["work_dir"] != ".":
+            save_json(pathlib.Path(si["work_dir"]) / "stage-input.json", si)
         emit(result)
 
     attempts_path = str(run_dir / "attempts.md")
@@ -1112,6 +1132,38 @@ ROLE_META = {
     "tester":           {"category": "json",  "schema": "test-result",   "prompt": "dp-tester"},
     "reviewer":         {"category": "json",  "schema": "review-result", "prompt": "dp-reviewer"},
 }
+
+
+# Maps an advance `directive` to the run-stage role it drives.
+_DIRECTIVE_ROLE = {
+    "run_spec_author":      "spec_author",
+    "run_test_implementor": "test_implementor",
+    "run_tester":           "tester",
+    "run_implementor":      "implementor",
+    "run_reviewer":         "reviewer",
+}
+# Keys in an advance result that are control/echo metadata, not stage inputs.
+_STAGE_INPUT_CONTROL = {
+    "directive", "iter_dir", "previous_state", "next_state", "iterations",
+    "halt_reason", "tdd_mode", "result_filename", "red_test",
+}
+
+
+def build_stage_input(result: dict, project_dir: str) -> "dict | None":
+    """Translate an advance/init result into a run-stage stage-input.json so the
+    bash-runner path consumes exactly the context the echo carries (M-1: retry
+    context lives only in the echo, never in state.json)."""
+    role = _DIRECTIVE_ROLE.get(result.get("directive"))
+    if role is None:
+        return None
+    iter_dir = result.get("iter_dir") or result.get("work_dir")
+    si = {"role": role, "project_root": project_dir, "work_dir": iter_dir or ".",
+          "inputs": {k: v for k, v in result.items() if k not in _STAGE_INPUT_CONTROL}}
+    if role == "tester" and iter_dir:
+        si["output_file"] = str(pathlib.Path(iter_dir) / result.get("result_filename", "test-result.json"))
+    elif role == "reviewer" and iter_dir:
+        si["output_file"] = str(pathlib.Path(iter_dir) / "review-result.json")
+    return si
 
 
 def role_prompt_path(prompt_name: str) -> "pathlib.Path | None":
