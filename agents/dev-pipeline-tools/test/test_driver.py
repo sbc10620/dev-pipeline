@@ -1202,6 +1202,56 @@ class TestStageInputWiring(PipelineTestCase):
         self.assertTrue(si["output_file"].endswith("test-result.json"))
         self.assertIn("build_instruction", si["inputs"])
         self.assertNotIn("directive", si["inputs"])  # control keys excluded
+        self.assertNotIn("tester_runners", si["inputs"])  # M1: runner arrays never reach the prompt
+
+
+class TestRunStageIntegration(PipelineTestCase):
+    """The advance/init → run-stage contract, with dummy runners (no LLM):
+    the stage-input.json the DRIVER writes must be consumable by run-stage."""
+
+    def test_spec_author_from_driver_written_stage_input(self):
+        cfg = valid_config(tdd_mode=False)
+        cfg["runners"]["spec_author"] = [{"type": "bash",
+            "command": "printf '# Spec\\n## Requirements\\n- r\\n## Acceptance Criteria\\n- a\\n' > {output_file}"}]
+        p = Pipeline(cfg)
+        self._pipelines.append(p)
+        init_json = p.init(tdd=False)
+        self.assertEqual(init_json["directive"], "run_spec_author")
+        # run-stage consumes the stage-input.json the driver wrote at run_dir.
+        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "spec_author",
+                       "--stage-input", str(p.run_dir / "stage-input.json"))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        self.assertTrue((p.run_dir / "spec.md").exists())
+        # advance now proceeds because spec.md exists.
+        adv = p.advance()
+        self.assertEqual(adv.json["next_state"], "implementation")
+
+    def test_role_mismatch_guard(self):
+        cfg = valid_config(tdd_mode=False)
+        cfg["runners"]["spec_author"] = [{"type": "bash", "command": "true"}]
+        p = Pipeline(cfg)
+        self._pipelines.append(p)
+        p.init(tdd=False)
+        # stage-input role is spec_author; calling --role implementor must fail loudly.
+        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "implementor",
+                       "--stage-input", str(p.run_dir / "stage-input.json"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("role", r.stderr)
+
+    def test_legacy_snapshot_runner_guard(self):
+        cfg = valid_config(tdd_mode=False)
+        p = Pipeline(cfg)
+        self._pipelines.append(p)
+        p.init(tdd=False)
+        # Simulate a pre-3.0.0 snapshot: a runner with no command.
+        snap = json.loads((p.run_dir / "config.snapshot.json").read_text(encoding="utf-8"))
+        snap["runners"]["spec_author"] = [{"type": "claude-subagent", "agent": "dp-spec-author"}]
+        (p.run_dir / "config.snapshot.json").write_text(json.dumps(snap), encoding="utf-8")
+        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "spec_author",
+                       "--stage-input", str(p.run_dir / "stage-input.json"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("pre-3.0.0", r.stderr)
 
 
 class TestRunStage(unittest.TestCase):
