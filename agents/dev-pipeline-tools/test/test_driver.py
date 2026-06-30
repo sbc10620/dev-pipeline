@@ -1240,6 +1240,23 @@ class TestRunStage(unittest.TestCase):
         self.assertTrue(r.json["ok"])
         self.assertEqual(r.json["runner"], 1)
 
+    def test_json_role_error_fed_retry(self):
+        # Same runner: writes invalid JSON first, then valid once the prompt shows
+        # the REJECTED feedback (the driver's one error-fed retry).
+        good = self.run_dir / "good.json"
+        good.write_text(json.dumps(test_result(status="pass")), encoding="utf-8")
+        self._cfg("tester", [
+            {"type": "bash",
+             "command": f"if grep -q REJECTED {{user_file}}; then cp {good} {{output_file}}; "
+                        "else echo BAD > {output_file}; fi"},
+        ])
+        out = self.run_dir / "tr.json"
+        r = self._run("tester", self._si("tester", output_file=str(out)))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        self.assertEqual(r.json["runner"], 0)   # same runner, recovered on retry
+        self.assertEqual(r.json["attempts"], [])  # no fallback needed
+
     def test_json_role_schema_invalid_fails(self):
         self._cfg("tester", [
             {"type": "bash", "command": "echo '{\"status\":\"bogus\"}' > {output_file}"},
