@@ -1182,5 +1182,114 @@ class TestAdvanceEchoes(PipelineTestCase):
         self.assertFalse(r1.json["tdd_mode"])
 
 
+class TestRunStage(unittest.TestCase):
+    """run-stage: prompt assembly + bash-runner execution + per-category checks.
+    Uses dummy shell runners (no LLM) so the behavior is deterministic."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.run_dir = pathlib.Path(self._tmp.name)
+        self.proj = self.run_dir / "proj"
+        self.proj.mkdir()
+        (self.run_dir / "state.json").write_text(json.dumps({
+            "state": "test", "project_dir": str(self.proj), "tdd_mode": False,
+            "iterations": {"test": 0, "review": 0, "test_implementation": 0},
+        }), encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _cfg(self, role, runners):
+        (self.run_dir / "config.snapshot.json").write_text(
+            json.dumps({"runners": {role: runners}}), encoding="utf-8")
+
+    def _si(self, role, **extra):
+        si = {"role": role, "work_dir": str(self.run_dir / "w"),
+              "project_root": str(self.proj), "inputs": {"design_instruction": "x"}}
+        si.update(extra)
+        p = self.run_dir / "si.json"
+        p.write_text(json.dumps(si), encoding="utf-8")
+        return p
+
+    def _run(self, role, si_path):
+        return run_driver("run-stage", "--run", str(self.run_dir),
+                          "--role", role, "--stage-input", str(si_path))
+
+    def test_file_role_fallback(self):
+        # 1st runner fails (exit 1), 2nd writes a file and succeeds.
+        self._cfg("implementor", [
+            {"type": "bash", "command": "exit 1"},
+            {"type": "bash", "command": "echo x > {project_root}/made.py"},
+        ])
+        r = self._run("implementor", self._si("implementor"))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        self.assertEqual(r.json["runner"], 1)
+        self.assertTrue((self.proj / "made.py").exists())
+
+    def test_json_role_invalid_then_valid(self):
+        good = self.run_dir / "good.json"
+        good.write_text(json.dumps(test_result(status="pass")), encoding="utf-8")
+        self._cfg("tester", [
+            {"type": "bash", "command": "echo NOT_JSON > {output_file}"},
+            {"type": "bash", "command": f"cp {good} " + "{output_file}"},
+        ])
+        out = self.run_dir / "tr.json"
+        r = self._run("tester", self._si("tester", output_file=str(out)))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        self.assertEqual(r.json["runner"], 1)
+
+    def test_json_role_schema_invalid_fails(self):
+        self._cfg("tester", [
+            {"type": "bash", "command": "echo '{\"status\":\"bogus\"}' > {output_file}"},
+        ])
+        out = self.run_dir / "tr.json"
+        r = self._run("tester", self._si("tester", output_file=str(out)))
+        # run-stage emits JSON then exits non-zero on failure (run_driver only
+        # parses .json on a 0 exit), so parse stdout here.
+        self.assertNotEqual(r.returncode, 0)
+        j = json.loads(r.stdout)
+        self.assertFalse(j["ok"])
+        self.assertEqual(j["reason"], "all_runners_failed")
+
+    def test_named_role_sections_present(self):
+        self._cfg("spec_author", [
+            {"type": "bash",
+             "command": "printf '## Requirements\\n## Acceptance Criteria\\n' > {output_file}"},
+        ])
+        out = self.proj / "spec.md"
+        r = self._run("spec_author", self._si(
+            "spec_author", output_file=str(out),
+            required_sections=["## Requirements", "## Acceptance Criteria"]))
+        self.assertTrue(r.json["ok"])
+
+    def test_named_role_missing_section_fails(self):
+        self._cfg("spec_author", [
+            {"type": "bash", "command": "printf '## Requirements\\n' > {output_file}"},
+        ])
+        out = self.proj / "spec.md"
+        r = self._run("spec_author", self._si(
+            "spec_author", output_file=str(out),
+            required_sections=["## Requirements", "## Acceptance Criteria"]))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(json.loads(r.stdout)["ok"])
+
+    def test_named_role_insufficient_marker(self):
+        self._cfg("spec_author", [
+            {"type": "bash", "command": "printf 'INSUFFICIENT: too vague\\n' > {output_file}"},
+        ])
+        out = self.proj / "spec.md"
+        r = self._run("spec_author", self._si(
+            "spec_author", output_file=str(out), required_sections=["## Requirements"]))
+        self.assertFalse(r.json["ok"])
+        self.assertEqual(r.json["reason"], "insufficient")
+
+    def test_empty_runners_errors(self):
+        self._cfg("tester", [])
+        r = self._run("tester", self._si("tester", output_file=str(self.run_dir / "o.json")))
+        self.assertNotEqual(r.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
