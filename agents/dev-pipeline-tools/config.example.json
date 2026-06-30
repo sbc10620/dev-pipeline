@@ -37,11 +37,11 @@
       { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Edit Write" }
     ],
     "tester": [
-      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Bash Write", "normalizer": "claude-cli" }
+      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Bash > {output_file}", "normalizer": "claude-cli" }
     ],
     "reviewer": [
       { "type": "bash", "command": "codex exec -s read-only \"$(cat {system_file}; printf '\\n\\n'; cat {user_file})\" > {output_file}", "normalizer": "codex-cli" },
-      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Grep Glob Write", "normalizer": "claude-cli" }
+      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Grep Glob > {output_file}", "normalizer": "claude-cli" }
     ]
   }
 }

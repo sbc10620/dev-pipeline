@@ -1190,9 +1190,13 @@ _DIRECTIVE_ROLE = {
     "run_reviewer":         "reviewer",
 }
 # Keys in an advance result that are control/echo metadata, not stage inputs.
+# The *_runners arrays are config the driver consumes via config.runners — they
+# must never reach a role's own prompt (first principle: the role does not know
+# which LLM runs it).
 _STAGE_INPUT_CONTROL = {
     "directive", "iter_dir", "previous_state", "next_state", "iterations",
     "halt_reason", "tdd_mode", "result_filename", "red_test",
+    "implementor_runners", "test_implementor_runners", "tester_runners",
 }
 
 
@@ -1305,9 +1309,19 @@ def cmd_run_stage(args) -> None:
     state = load_state(run_dir)
     project_root = pathlib.Path(stage_input.get("project_root") or state.get("project_dir") or ".").resolve()
 
+    # Guard against passing the wrong stage-input (e.g. the default spec-author one
+    # for an iteration role) — the SKILL always passes the matching path.
+    if stage_input.get("role") and stage_input["role"] != role:
+        die(f"stage-input role {stage_input['role']!r} != --role {role!r}; wrong --stage-input path.")
+
     runners = cfg.get("runners", {}).get(role, [])
     if not runners:
         die(f"config.runners.{role} is empty — nothing to run.")
+    # A run created by a pre-3.0.0 driver has subagent runners (no `command`) frozen
+    # in its snapshot; run-stage cannot drive those. Fail with an explicit reason.
+    if any(isinstance(r, dict) and not r.get("command") for r in runners):
+        die(f"config.runners.{role} has a runner with no `command` — this run was likely "
+            "created by a pre-3.0.0 driver. Start a new run (its config snapshot is frozen).")
 
     work = pathlib.Path(stage_input.get("work_dir") or run_dir)
     work.mkdir(parents=True, exist_ok=True)
@@ -1427,14 +1441,20 @@ def cmd_migrate_config(args) -> None:
     sections are preserved; only runners are rewritten."""
     config_path = pathlib.Path(args.config).resolve()
     cfg = load_json(config_path)
-    converted = _legacy_runner_roles(cfg)
+    legacy = _legacy_runner_roles(cfg)
+    replaced = sorted((cfg.get("runners") or {}).keys())  # ALL roles are replaced wholesale
     example = load_json(EXAMPLE_PATH)
-    cfg["runners"] = example["runners"]
     out = pathlib.Path(args.out).resolve() if args.out else config_path
+    # Back up the original (in place only) before overwriting runners wholesale.
+    if not args.out:
+        save_json(out.with_suffix(out.suffix + ".bak"), cfg)
+    cfg["runners"] = example["runners"]
     save_json(out, cfg)
-    emit({"migrated": True, "config": str(out), "converted_roles": converted,
-          "note": "runners replaced with 3.0.0 bash defaults (incl. spec_author); "
-                  "review and customize the commands for your LLM/tooling."})
+    emit({"migrated": True, "config": str(out),
+          "legacy_roles": legacy, "replaced_roles": replaced,
+          "backup": (str(out.with_suffix(out.suffix + ".bak")) if not args.out else None),
+          "warning": "ALL runners were replaced with the 3.0.0 bash defaults (incl. spec_author) — "
+                     "any custom runner commands were dropped (see the .bak). Review and customize."})
 
 
 # ---------------------------------------------------------------------------
