@@ -1314,6 +1314,20 @@ class TestRunStage(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(json.loads(r.stdout)["ok"])
 
+    def test_named_role_word_insufficient_is_not_a_refusal(self):
+        # A valid spec that merely contains the word "insufficient" must NOT be
+        # treated as an INSUFFICIENT refusal (the marker must START the file).
+        self._cfg("spec_author", [
+            {"type": "bash",
+             "command": "printf '# Spec\\n## Requirements\\nCurrent validation is insufficient.\\n"
+                        "## Acceptance Criteria\\n- ok\\n' > {output_file}"},
+        ])
+        out = self.proj / "spec.md"
+        r = self._run("spec_author", self._si(
+            "spec_author", output_file=str(out),
+            required_sections=["## Requirements", "## Acceptance Criteria"]))
+        self.assertTrue(r.json["ok"])
+
     def test_named_role_insufficient_marker(self):
         self._cfg("spec_author", [
             {"type": "bash", "command": "printf 'INSUFFICIENT: too vague\\n' > {output_file}"},
@@ -1347,6 +1361,13 @@ class TestConfigMigration(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("3.0.0", r.stderr)
         self.assertIn("migrate-config", r.stderr)
+
+    def test_validate_rejects_unknown_placeholder(self):
+        cfg = valid_config()
+        cfg["runners"]["tester"] = [{"type": "bash", "command": "claude -p {spec_path}"}]
+        r = run_driver("validate-config", "--config", str(self._write(cfg)))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("spec_path", r.stderr)
 
     def test_migrate_converts_to_bash(self):
         cfg = valid_config()
