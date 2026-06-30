@@ -21,6 +21,7 @@ You are the dev-pipeline orchestrator. You drive a state machine from a `plan.md
 6. **If `driver advance` or `driver validate-result` exits with a non-zero code, stop and report the error to the user.**
 7. **Always write agent JSON output to the iteration directory before calling advance.**
 8. **Never specify or invent an agent's output schema in its prompt.** Each agent (tester, reviewer, …) owns and defines its own result schema; pass only the inputs each state file lists. Overriding the schema causes `validate-result` failures.
+9. **Never read `config.snapshot.json` for control flow or prompt construction.** Every decision value a state needs (instructions, runner arrays, `design_instruction`, `test_paths`, `tdd_mode`, `run_self_evolution`, …) is echoed by `driver init` / `driver advance`. Take it from the most recent advance output. `config.snapshot.json` is an audit record only. In particular, recover `tdd_mode` from the advance echo (or `state.json`'s frozen `state.tdd_mode`) — **never** from `config.snapshot.json`'s `driver.tdd_mode`, which is wrong whenever the run was started with `--tdd`/`--no-tdd`.
 
 ---
 
@@ -39,11 +40,11 @@ State files depend ONLY on (a) the **Run Context** below and (b) the **fields ec
 - `skill_dir` — the directory containing this SKILL.md. `driver_path = <skill_dir>/driver.py`. Schemas at `<skill_dir>/schemas/`.
 - `project_root` — directory containing `.dev-pipeline/dev-pipeline.config.json`.
 - `run_dir`, `spec_path`, `plan_path` — returned by `driver init`.
-- `tdd_mode` — boolean returned by `driver init`.
-- `config_snapshot_path = <run_dir>/config.snapshot.json` — read it for `runners.*` and `llm.*` when an advance output does not already echo what you need.
+- `tdd_mode` — boolean returned by `driver init` **and re-echoed by every `driver advance`** (the frozen run flag). Prefer the latest echo; never recover it from `config.snapshot.json`.
+- `config_snapshot_path = <run_dir>/config.snapshot.json` — **audit record only.** Do not read it for control flow or prompt construction (Global Rule 9); every value a state needs is echoed by the relevant advance.
 - `iter_dir` — **re-read from each advance output that includes it**; the agent/result for that state is written there. Never carry an old `iter_dir` across an advance.
 
-Each advance also echoes a `directive` (e.g. `run_test_implementor`, `run_tester`, `run_implementor`, `run_reviewer`, `finalize`, `halt_and_ask`, `report_failure`) and any context that state needs (instructions, `reviewer_config`, `test_implementor_config`, `findings`, …). Prefer those echoed values.
+Each advance also echoes a `directive` (e.g. `run_test_implementor`, `run_tester`, `run_implementor`, `run_reviewer`, `finalize`, `halt_and_ask`, `report_failure`) and any context that state needs: `tdd_mode` (always), the tester `*_instruction` values, `reviewer_config`, `test_implementor_config`, `design_instruction`, `test_paths`, the per-role runner arrays (`implementor_runners`, `test_implementor_runners`, `tester_runners`), `run_self_evolution`, `findings`, …. Always prefer these echoed values over reading the config snapshot.
 
 ### State → file index
 
@@ -138,7 +139,7 @@ No other arguments are accepted. If any unknown argument is present, report an e
     - `status == "exists"` (rare race): save the returned `project_root` and continue to Step 5.
     - Non-zero exit: report the driver's error and stop.
 
-- [Step 5] Remind the user: **"For accurate review results and role-boundary checks, start this pipeline with a clean working tree. In particular, the installed dev-pipeline files (`.claude/agents/dp-*.md` and `.claude/skills/dev-pipeline/`) should already be committed — otherwise they appear as untracked files in the review scope."**
+- [Step 5] Remind the user: **"For accurate role-boundary checks and review, start this pipeline with a clean working tree. In particular, the installed dev-pipeline files (`.claude/agents/dp-*.md` and `.claude/skills/dev-pipeline/`) should already be committed."** (The commit and the dp-reviewer fallback now scope to a change manifest, so stray untracked files no longer get committed; but the codex reviewer still scans the working tree, so a clean tree keeps its review focused. Note: because the commit stages only files the pipeline produced, any **unrelated edits you already had** in the working tree will NOT be included in the pipeline's commit — commit or stash them first if you want them kept separately.)
 
 **Step 0 checklist:**
 - [ ] No unknown arguments; `--plan` present and file exists; `--tdd`/`--no-tdd` noted

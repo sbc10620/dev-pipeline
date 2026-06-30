@@ -9,6 +9,49 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .claude/skills/dev-pipeline/driver.py --version`.
 
+## [2.1.0] - 2026-06-30
+
+Commit only what the pipeline produced, and make every state decision flow
+through the driver's echoes instead of the config snapshot.
+
+### Added
+- **Change manifest** — a new `driver record-changes` subcommand accumulates the
+  files each authoring agent actually wrote (the same per-step delta already used
+  for the role-boundary check) into `<run_dir>/changed-manifest.txt`, de-duplicated
+  and excluding `.dev-pipeline/` artifacts. The `done` commit now stages **only**
+  manifest paths (with `git add -A -- <path>` so deletions are committed too)
+  instead of `git add -A`, so untracked junk **not produced by the authoring
+  agents themselves** (cscope, ctags, and build/test caches — the latter are
+  generated in the separate `test` state, after the delta snapshot) no longer
+  lands in the commit — no per-run `.gitignore` upkeep required. The `review`
+  state's dp-reviewer fallback scopes to the manifest as well.
+- `tdd_mode` and every config-derived value a destination state needs
+  (`design_instruction`, `test_paths`, the per-role runner arrays,
+  `run_self_evolution`) are now echoed by **every** `driver advance`. State files
+  read these echoes; reading `config.snapshot.json` for control flow is now
+  forbidden (new Global Rule 9). This removes a class of resume/compaction bugs —
+  notably recovering `tdd_mode` from `config.snapshot.driver.tdd_mode`, which is
+  wrong under a `--tdd`/`--no-tdd` override (the authoritative value is the frozen
+  `state.tdd_mode`).
+
+### Changed
+- The per-agent delta is now computed `project_root`-relative
+  (`git -C <project_root> diff --name-only --relative` + `ls-files --others`) so
+  the manifest, boundary check, and commit agree on one path base even when the
+  config lives in a repo subdirectory.
+- In legacy (`--no-tdd`) runs the `implementation` state now also stages a baseline
+  and records the manifest, so non-TDD commits get the same junk filtering.
+
+### Compatibility
+- MINOR bump: no driver API breaks. A run started by an older driver (no manifest)
+  resumes fine — `done` falls back to the legacy `git add -A` flow and warns. All
+  newly echoed values are read with `.get(default)`.
+- **Update the driver and the skill in lockstep.** A partial install (new
+  `states/*.md` against an old `driver.py`) would call `record-changes` on a driver
+  that lacks it; the call fails, no manifest is written, and `done` silently falls
+  back to `git add -A` — re-admitting junk. `install.sh` copies both together, so
+  this only affects manual partial updates.
+
 ## [2.0.0] - 2026-06-29
 
 Test-Driven Development support. The pipeline can now author tests from the spec

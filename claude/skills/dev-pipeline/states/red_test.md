@@ -2,11 +2,11 @@
 
 **Goal:** Prove the freshly authored tests FAIL before any code exists (the RED phase). **A failing test run is the success condition here.**
 
-The advance that landed here echoed `directive: run_tester`, `iter_dir`, `result_filename: "red-test-result.json"`, and the three `*_instruction` values. This is the same tester as the `test` state — only the result filename and the driver's interpretation differ.
+The advance that landed here echoed `directive: run_tester`, `iter_dir`, `result_filename: "red-test-result.json"`, the three `*_instruction` values, and `tester_runners`. This is the same tester as the `test` state — only the result filename and the driver's interpretation differ. **Use the echoed values — do not read `config.snapshot.json`.**
 
 - [Step 1] Use the echoed `iter_dir` for this step.
 
-- [Step 2] Dispatch the tester runner (from config `runners.tester`, default `dp-tester`), passing the echoed `build_instruction`, `install_instruction`, `test_instruction`. The tester returns a JSON object as its final message. Do **not** run the commands yourself. Pass **only** the three instructions: do **NOT** specify or invent an output schema in the prompt — `dp-tester` already defines its result schema, and overriding it causes `validate-result` failures.
+- [Step 2] Dispatch the tester runner — try the echoed `tester_runners` array front-to-back (default `dp-tester`), passing the echoed `build_instruction`, `install_instruction`, `test_instruction`. The tester returns a JSON object as its final message. Do **not** run the commands yourself. Pass **only** the three instructions: do **NOT** specify or invent an output schema in the prompt — `dp-tester` already defines its result schema, and overriding it causes `validate-result` failures.
 
 - [Step 3] Extract the tester JSON and write it to `<iter_dir>/red-test-result.json` (note the `red-` prefix — this must NOT overwrite `test-result.json`).
 
