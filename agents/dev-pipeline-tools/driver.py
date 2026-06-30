@@ -1228,6 +1228,40 @@ def cmd_run_stage(args) -> None:
         "run_dir": str(run_dir), "work_dir": str(work),
     }
 
+    INSUFFICIENT = "__insufficient__"
+
+    def judge(runner: dict, command: str, timeout: int):
+        """Run one command and judge it by category. Returns (problem|None, exit).
+        `problem` is None on success, the sentinel INSUFFICIENT for a spec-author
+        refusal, else a short reason string (also fed back on the retry)."""
+        if meta["category"] in ("json", "named") and output_file.exists():
+            output_file.unlink()  # clean slate so a stale file isn't mistaken for success
+        try:
+            proc = _run_one(command, subst, project_root, timeout)
+        except subprocess.TimeoutExpired:
+            return "timeout", None
+        if meta["category"] == "file":
+            return (None if proc.returncode == 0
+                    else f"exit {proc.returncode}: {proc.stderr[-300:]}"), proc.returncode
+        if not output_file.exists():
+            return "output file not written", proc.returncode
+        if meta["category"] == "json":
+            result = _normalize_output(output_file.read_text(encoding="utf-8"),
+                                       runner.get("normalizer", "passthrough"))
+            if result is None:
+                return "no valid JSON written to output_file", proc.returncode
+            if meta["schema"]:
+                errs = validate_against_schema(result, f"{meta['schema']}.schema.json")
+                if errs:
+                    return "schema: " + "; ".join(errs[:3]), proc.returncode
+            return None, proc.returncode
+        # named (e.g. spec.md): section presence, plus an insufficiency marker
+        text = output_file.read_text(encoding="utf-8")
+        if "INSUFFICIENT" in text[:200].upper():
+            return INSUFFICIENT, proc.returncode
+        missing = [s for s in (stage_input.get("required_sections") or []) if s not in text]
+        return (("missing required sections: " + ", ".join(missing)) if missing else None), proc.returncode
+
     attempts = []
     for idx, runner in enumerate(runners):
         command = runner.get("command")
@@ -1235,54 +1269,29 @@ def cmd_run_stage(args) -> None:
             attempts.append({"runner": idx, "error": "no command"})
             continue
         timeout = int(runner.get("timeout", 600))
-        if meta["category"] in ("json", "named") and output_file.exists():
-            output_file.unlink()  # clean slate so a stale file isn't mistaken for success
-        try:
-            proc = _run_one(command, subst, project_root, timeout)
-        except subprocess.TimeoutExpired:
-            attempts.append({"runner": idx, "error": "timeout"})
-            continue
+        problem, exit_code = judge(runner, command, timeout)
 
-        # --- File role: success is exit 0; the delta is read elsewhere. ---
-        if meta["category"] == "file":
-            if proc.returncode == 0:
-                emit({"ok": True, "role": role, "category": "file", "runner": idx,
-                      "used": command, "attempts": attempts})
-                return
-            attempts.append({"runner": idx, "exit": proc.returncode,
-                             "stderr": proc.stderr[-500:]})
-            continue
+        # One error-fed retry of the SAME runner before falling back: rewrite the
+        # user prompt with the validation problem so the model can self-correct.
+        if problem and problem != INSUFFICIENT and meta["category"] in ("json", "named"):
+            user_file.write_text(
+                user_text + "\n\n## Your previous output was REJECTED\n" + problem +
+                "\nProduce a corrected result written to the same output path.\n",
+                encoding="utf-8")
+            retry_problem, retry_exit = judge(runner, command, timeout)
+            user_file.write_text(user_text, encoding="utf-8")  # restore for the next runner
+            if retry_problem is None:
+                problem, exit_code = None, retry_exit
 
-        # --- JSON / named role: the result is the output FILE (CLIs add banners
-        #     to stdout), validated by category. ---
-        problem = None
-        if not output_file.exists():
-            problem = "output file not written"
-        elif meta["category"] == "json":
-            result = _normalize_output(output_file.read_text(encoding="utf-8"),
-                                       runner.get("normalizer", "passthrough"))
-            if result is None:
-                problem = "no valid JSON written to output_file"
-            elif meta["schema"]:
-                errs = validate_against_schema(result, f"{meta['schema']}.schema.json")
-                if errs:
-                    problem = "schema: " + "; ".join(errs[:3])
-        else:  # named (e.g. spec.md): section presence, plus an insufficiency marker
-            text = output_file.read_text(encoding="utf-8")
-            if "INSUFFICIENT" in text[:200].upper():
-                emit({"ok": False, "role": role, "category": "named", "reason": "insufficient",
-                      "message": "the author reported the input is too vague to proceed",
-                      "runner": idx})
-                return
-            missing = [s for s in (stage_input.get("required_sections") or []) if s not in text]
-            if missing:
-                problem = "missing required sections: " + ", ".join(missing)
-
+        if problem == INSUFFICIENT:
+            emit({"ok": False, "role": role, "category": "named", "reason": "insufficient",
+                  "message": "the author reported the input is too vague to proceed", "runner": idx})
+            return
         if problem is None:
             emit({"ok": True, "role": role, "category": meta["category"], "runner": idx,
                   "used": command, "output_file": str(output_file), "attempts": attempts})
             return
-        attempts.append({"runner": idx, "exit": proc.returncode, "problem": problem})
+        attempts.append({"runner": idx, "exit": exit_code, "problem": problem})
 
     emit({"ok": False, "role": role, "category": meta["category"],
           "reason": "all_runners_failed", "attempts": attempts})
