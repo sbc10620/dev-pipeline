@@ -269,6 +269,17 @@ def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
                 "or run with --no-tdd / set driver.tdd_mode=false"
             )
 
+    # Runner commands may only reference placeholders the driver substitutes, so a
+    # typo fails fast at validate time instead of breaking at the shell.
+    known = {"system_file", "user_file", "output_file", "project_root", "run_dir", "work_dir"}
+    for role, arr in (cfg.get("runners") or {}).items():
+        for i, r in enumerate(arr if isinstance(arr, list) else []):
+            cmd = r.get("command", "") if isinstance(r, dict) else ""
+            unknown = sorted(set(re.findall(r"\{(\w+)\}", cmd)) - known)
+            if unknown:
+                errors.append(f"runners.{role}[{i}].command references unknown placeholder(s) "
+                              f"{{{', '.join(unknown)}}}; allowed: {sorted(known)}")
+
     return errors
 
 
@@ -1240,11 +1251,8 @@ def assemble_prompt(role: str, stage_input: dict) -> "tuple[str, str]":
         if isinstance(v, (dict, list)):
             v = json.dumps(v, ensure_ascii=False)
         lines.append(f"- **{k}**: {v}")
-    out = stage_input.get("output_file")
-    if meta["category"] in ("json", "named") and out:
-        lines += ["", f"When done, write your result to the file at this exact path and nothing else there: `{out}`"]
-        if meta["category"] == "json":
-            lines.append("The file content must be a single valid JSON object (no markdown fences).")
+    # The output directive (write-to-file vs print-to-stdout) is appended per
+    # runner by cmd_run_stage, because it depends on the runner's command.
     return system, "\n".join(lines) + "\n"
 
 
@@ -1318,6 +1326,18 @@ def cmd_run_stage(args) -> None:
 
     INSUFFICIENT = "__insufficient__"
 
+    def output_directive(runner: dict) -> str:
+        """Per-runner output instruction: a runner that redirects stdout to
+        `{output_file}` (e.g. `codex exec … > {output_file}`) must PRINT the result;
+        one that writes via a tool must WRITE the file. Matches the actual mechanism."""
+        if meta["category"] not in ("json", "named"):
+            return ""
+        what = ("a single valid JSON object (no markdown fences, nothing else)"
+                if meta["category"] == "json" else "your result")
+        if re.search(r">\s*\{output_file\}", runner.get("command", "")):
+            return f"\n\nOutput {what} to **stdout** only."
+        return f"\n\nWrite {what} to this exact file path and nothing else there: {output_file}"
+
     def judge(runner: dict, command: str, timeout: int):
         """Run one command and judge it by category. Returns (problem|None, exit).
         `problem` is None on success, the sentinel INSUFFICIENT for a spec-author
@@ -1328,24 +1348,27 @@ def cmd_run_stage(args) -> None:
             proc = _run_one(command, subst, project_root, timeout)
         except subprocess.TimeoutExpired:
             return "timeout", None
+        # On a non-zero exit, keep a stderr tail so a missing CLI / crash is visible
+        # in the reason (file roles already include it; do it for json/named too).
+        err = f" (exit {proc.returncode}: {proc.stderr.strip()[-300:]})" if proc.returncode else ""
         if meta["category"] == "file":
-            return (None if proc.returncode == 0
-                    else f"exit {proc.returncode}: {proc.stderr[-300:]}"), proc.returncode
+            return (None if proc.returncode == 0 else f"exit {proc.returncode}: {proc.stderr[-300:]}"), proc.returncode
         if not output_file.exists():
-            return "output file not written", proc.returncode
+            return "output not produced" + err, proc.returncode
         if meta["category"] == "json":
             result = _normalize_output(output_file.read_text(encoding="utf-8"),
                                        runner.get("normalizer", "passthrough"))
             if result is None:
-                return "no valid JSON written to output_file", proc.returncode
+                return "no valid JSON in output" + err, proc.returncode
             if meta["schema"]:
                 errs = validate_against_schema(result, f"{meta['schema']}.schema.json")
                 if errs:
                     return "schema: " + "; ".join(errs[:3]), proc.returncode
             return None, proc.returncode
-        # named (e.g. spec.md): section presence, plus an insufficiency marker
+        # named (e.g. spec.md): an INSUFFICIENT marker must START the file (the spec
+        # author's contract), then required-section presence.
         text = output_file.read_text(encoding="utf-8")
-        if "INSUFFICIENT" in text[:200].upper():
+        if text.lstrip().upper().startswith("INSUFFICIENT"):
             return INSUFFICIENT, proc.returncode
         missing = [s for s in (stage_input.get("required_sections") or []) if s not in text]
         return (("missing required sections: " + ", ".join(missing)) if missing else None), proc.returncode
@@ -1357,21 +1380,23 @@ def cmd_run_stage(args) -> None:
             attempts.append({"runner": idx, "error": "no command"})
             continue
         timeout = int(runner.get("timeout", 600))
+        runner_user = user_text + output_directive(runner)
+        user_file.write_text(runner_user, encoding="utf-8")
         problem, exit_code = judge(runner, command, timeout)
 
         # One error-fed retry of the SAME runner before falling back: rewrite the
         # user prompt with the validation problem so the model can self-correct.
         if problem and problem != INSUFFICIENT and meta["category"] in ("json", "named"):
             user_file.write_text(
-                user_text + "\n\n## Your previous output was REJECTED\n" + problem +
-                "\nProduce a corrected result written to the same output path.\n",
-                encoding="utf-8")
+                runner_user + "\n\n## Your previous output was REJECTED\n" + problem +
+                "\nProduce a corrected result.\n", encoding="utf-8")
             retry_problem, retry_exit = judge(runner, command, timeout)
-            user_file.write_text(user_text, encoding="utf-8")  # restore for the next runner
             if retry_problem is None:
                 problem, exit_code = None, retry_exit
 
         if problem == INSUFFICIENT:
+            if output_file.exists():
+                output_file.unlink()  # don't leave an INSUFFICIENT marker where a spec is expected
             emit({"ok": False, "role": role, "category": "named", "reason": "insufficient",
                   "message": "the author reported the input is too vague to proceed", "runner": idx})
             return
@@ -1380,6 +1405,11 @@ def cmd_run_stage(args) -> None:
                   "used": command, "output_file": str(output_file), "attempts": attempts})
             return
         attempts.append({"runner": idx, "exit": exit_code, "problem": problem})
+
+    # Every runner failed: for named/json roles, remove any partial output so a
+    # downstream `advance` cannot mistake it for a valid result (n3 hardening).
+    if meta["category"] in ("json", "named") and output_file.exists():
+        output_file.unlink()
 
     emit({"ok": False, "role": role, "category": meta["category"],
           "reason": "all_runners_failed", "attempts": attempts})
