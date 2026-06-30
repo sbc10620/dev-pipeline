@@ -14,6 +14,7 @@ Usage:
   python3 driver.py check-boundary   --run <run_dir> --role <test_implementation|implementation> --changed <file...>
   python3 driver.py record-changes   --run <run_dir> --changed <file...>
   python3 driver.py run-stage        --run <run_dir> --role <role> [--stage-input <file>]
+  python3 driver.py migrate-config   --config <path> [--out <path>]
   python3 driver.py --version
   python3 driver.py --help
 """
@@ -201,7 +202,28 @@ def _is_placeholder(val) -> bool:
     return isinstance(val, str) and val.strip().startswith("<") and val.strip().endswith(">")
 
 
+def _legacy_runner_roles(cfg: dict) -> list:
+    """Roles whose runners use a type removed in 3.0.0 (pre-schema detection)."""
+    legacy = []
+    for role, arr in (cfg.get("runners") or {}).items():
+        if isinstance(arr, list) and any(
+            isinstance(r, dict) and (r.get("type") in ("claude-subagent", "codex-adversarial-review")
+                                     or "agent" in r)
+            for r in arr):
+            legacy.append(role)
+    return sorted(set(legacy))
+
+
 def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
+    # 3.0.0 migration: surface removed runner types with an actionable message
+    # BEFORE the generic schema enum error.
+    legacy = _legacy_runner_roles(cfg)
+    if legacy:
+        return [f"runners.{', '.join(legacy)}: use a runner type removed in 3.0.0 "
+                "(claude-subagent / codex-adversarial-review). Replace each with "
+                '{"type":"bash","command":"..."}, or run `driver migrate-config '
+                "--config <path>` to convert automatically."]
+
     errors = validate_against_schema(cfg, "config.schema.json")
     if errors:
         return errors
@@ -458,8 +480,11 @@ def cmd_init(args) -> None:
         "spec_path": str(spec_path),
         "plan_path": str(plan_path),
         "tdd_mode": tdd_mode,
-        "next_action": "write_spec",
-        "message": "Init successful. Write spec.md at spec_path, then call `driver advance --run <run_dir>`.",
+        "directive": "run_spec_author",
+        "next_action": "run_spec_author",
+        "message": "Init successful. Run `driver run-stage --role spec_author` "
+                   "(stage-input.json is written at run_dir) to author spec.md, "
+                   "then call `driver advance --run <run_dir>`.",
     })
 
 
@@ -547,9 +572,11 @@ def cmd_advance(args) -> None:
         spec_path = pathlib.Path(state["spec_path"])
         if not spec_path.exists():
             die("spec.md has not been written yet. Write it first, then call advance.")
+        iter_dir = ensure_iter_dir(run_dir, state)
         if state.get("tdd_mode", False):
             transition("test_implementation", "spec_ready",
                        extra={"directive": "run_test_implementor",
+                              "iter_dir": str(iter_dir),
                               "spec_path": str(spec_path),
                               "plan_path": state["plan_path"],
                               "attempts_path": attempts_path,
@@ -557,6 +584,7 @@ def cmd_advance(args) -> None:
         else:
             transition("implementation", "spec_ready",
                        extra={"directive": "run_implementor",
+                              "iter_dir": str(iter_dir),
                               "spec_path": str(spec_path),
                               "plan_path": state["plan_path"],
                               "attempts_path": attempts_path})
@@ -1351,6 +1379,27 @@ def cmd_run_stage(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: migrate-config (pre-3.0.0 → bash runners)
+# ---------------------------------------------------------------------------
+
+def cmd_migrate_config(args) -> None:
+    """Convert a pre-3.0.0 config to the bash-runner shape: replace the removed
+    claude-subagent / codex-adversarial-review runners with the canonical bash
+    defaults (and add the now-required spec_author runner). The driver and llm
+    sections are preserved; only runners are rewritten."""
+    config_path = pathlib.Path(args.config).resolve()
+    cfg = load_json(config_path)
+    converted = _legacy_runner_roles(cfg)
+    example = load_json(EXAMPLE_PATH)
+    cfg["runners"] = example["runners"]
+    out = pathlib.Path(args.out).resolve() if args.out else config_path
+    save_json(out, cfg)
+    emit({"migrated": True, "config": str(out), "converted_roles": converted,
+          "note": "runners replaced with 3.0.0 bash defaults (incl. spec_author); "
+                  "review and customize the commands for your LLM/tooling."})
+
+
+# ---------------------------------------------------------------------------
 # Help text
 # ---------------------------------------------------------------------------
 
@@ -1397,6 +1446,7 @@ DRIVER CLI
   check-boundary   (TDD) verify a role only touched files it is allowed to
   record-changes   Accumulate pipeline-produced files into changed-manifest.txt
   run-stage        Execute a role via its configured bash runner (assemble prompt, run, validate)
+  migrate-config   Convert a pre-3.0.0 config (claude-subagent runners) to bash runners
   --version        Print the dev-pipeline version and exit
   --help           Show this message
 
@@ -1495,6 +1545,10 @@ def main() -> None:
                       choices=list(ROLE_META.keys()))
     p_rs.add_argument("--stage-input", dest="stage_input", default="stage-input.json")
 
+    p_mc = sub.add_parser("migrate-config")
+    p_mc.add_argument("--config", required=True)
+    p_mc.add_argument("--out", default="")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -1509,6 +1563,7 @@ def main() -> None:
         "check-boundary":   cmd_check_boundary,
         "record-changes":   cmd_record_changes,
         "run-stage":        cmd_run_stage,
+        "migrate-config":   cmd_migrate_config,
     }
 
     if args.cmd not in dispatch:

@@ -1124,7 +1124,7 @@ class TestAdvanceEchoes(PipelineTestCase):
         self.assertEqual(j["next_state"], "implementation")
         self.assertFalse(j["tdd_mode"])
         self.assertTrue(j["design_instruction"])
-        self.assertEqual(j["implementor_runners"][0]["agent"], "dp-implementor")
+        self.assertIn("claude", j["implementor_runners"][0]["command"])  # bash runner
         # The implementor build-checks before handoff → it gets the tester's build cmd.
         self.assertEqual(j["build_instruction"], "make build")
         self.assertNotIn("test_paths", j)  # legacy: no test boundary
@@ -1132,7 +1132,7 @@ class TestAdvanceEchoes(PipelineTestCase):
         r2 = p.advance()  # implementation -> test
         self.assertEqual(r2.json["next_state"], "test")
         self.assertFalse(r2.json["tdd_mode"])
-        self.assertEqual(r2.json["tester_runners"][0]["agent"], "dp-tester")
+        self.assertIn("claude", r2.json["tester_runners"][0]["command"])
 
         p.write_test_result(status="pass")
         r3 = p.advance()  # test -> review
@@ -1150,20 +1150,19 @@ class TestAdvanceEchoes(PipelineTestCase):
         r1 = p.advance()  # init -> test_implementation
         self.assertEqual(r1.json["next_state"], "test_implementation")
         self.assertTrue(r1.json["tdd_mode"])
-        self.assertEqual(r1.json["test_implementor_runners"][0]["agent"],
-                         "dp-test-implementor")
+        self.assertIn("claude", r1.json["test_implementor_runners"][0]["command"])
 
         r2 = p.advance()  # test_implementation -> red_test (red phase)
         self.assertEqual(r2.json["next_state"], "red_test")
         self.assertTrue(r2.json["tdd_mode"])
-        self.assertEqual(r2.json["tester_runners"][0]["agent"], "dp-tester")
+        self.assertIn("claude", r2.json["tester_runners"][0]["command"])
 
         p.write_red_test_result(status="fail", failure_type="code")
         r3 = p.advance()  # red confirmed -> implementation
         self.assertEqual(r3.json["next_state"], "implementation")
         self.assertTrue(r3.json["tdd_mode"])
         self.assertTrue(r3.json["design_instruction"])
-        self.assertEqual(r3.json["implementor_runners"][0]["agent"], "dp-implementor")
+        self.assertIn("claude", r3.json["implementor_runners"][0]["command"])
         self.assertEqual(r3.json["build_instruction"], "no build step")
         self.assertEqual(r3.json["test_paths"], ["tests/**"])  # tdd echoes the boundary
 
@@ -1329,6 +1328,44 @@ class TestRunStage(unittest.TestCase):
         self._cfg("tester", [])
         r = self._run("tester", self._si("tester", output_file=str(self.run_dir / "o.json")))
         self.assertNotEqual(r.returncode, 0)
+
+
+class TestConfigMigration(unittest.TestCase):
+    """3.0.0: validate-config rejects removed runner types with a migration hint;
+    migrate-config converts a pre-3.0.0 config to bash runners."""
+
+    def _write(self, cfg):
+        self._tmp = tempfile.TemporaryDirectory()
+        p = pathlib.Path(self._tmp.name) / "config.json"
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+        return p
+
+    def test_validate_rejects_legacy_runner(self):
+        cfg = valid_config()
+        cfg["runners"]["implementor"] = [{"type": "claude-subagent", "agent": "dp-implementor"}]
+        r = run_driver("validate-config", "--config", str(self._write(cfg)))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("3.0.0", r.stderr)
+        self.assertIn("migrate-config", r.stderr)
+
+    def test_migrate_converts_to_bash(self):
+        cfg = valid_config()
+        cfg["runners"] = {
+            "implementor": [{"type": "claude-subagent", "agent": "dp-implementor"}],
+            "test_implementor": [{"type": "claude-subagent", "agent": "dp-test-implementor"}],
+            "tester": [{"type": "claude-subagent", "agent": "dp-tester"}],
+            "reviewer": [{"type": "codex-adversarial-review"}],
+        }
+        p = self._write(cfg)
+        r = run_driver("migrate-config", "--config", str(p))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["migrated"])
+        migrated = json.loads(p.read_text(encoding="utf-8"))
+        self.assertIn("spec_author", migrated["runners"])
+        impl = migrated["runners"]["implementor"][0]
+        self.assertEqual(impl["type"], "bash")
+        self.assertNotIn("agent", impl)
+        self.assertIn("claude", impl["command"])
 
 
 if __name__ == "__main__":

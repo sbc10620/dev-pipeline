@@ -96,8 +96,9 @@
     "runners": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["implementor", "tester", "reviewer"],
+      "required": ["spec_author", "implementor", "tester", "reviewer"],
       "properties": {
+        "spec_author":      { "$ref": "#/$defs/runner_array" },
         "implementor":      { "$ref": "#/$defs/runner_array" },
         "tester":           { "$ref": "#/$defs/runner_array" },
         "test_implementor": { "$ref": "#/$defs/runner_array" },
@@ -111,15 +112,13 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["type"],
+        "additionalProperties": false,
+        "required": ["type", "command"],
         "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["claude-subagent", "codex-adversarial-review", "bash"]
-          },
-          "agent":       { "type": "string" },
-          "command":     { "type": "string" },
-          "result_path": { "type": "string" }
+          "type":       { "type": "string", "enum": ["bash"] },
+          "command":    { "type": "string", "minLength": 1 },
+          "normalizer": { "type": "string", "enum": ["passthrough", "claude-cli", "codex-cli"] },
+          "timeout":    { "type": "integer", "minimum": 1 }
         }
       }
     }
