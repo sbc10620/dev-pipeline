@@ -9,6 +9,34 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .claude/skills/dev-pipeline/driver.py --version`.
 
+## [2.2.0] - 2026-06-30
+
+Harden RED-phase failure classification so an unimplemented feature is not
+mistaken for an environment failure, and forbid the orchestrator from silently
+editing the user's config.
+
+### Added
+- **Config guardrail (Global Rule 10).** The orchestrator must never modify
+  `.dev-pipeline/dev-pipeline.config.json` itself, nor let an agent do so. If at
+  any point it judges the config needs changing (validation failure, a wrong
+  tester instruction, an environment halt, a runner change), it must STOP, propose
+  the exact change to the user, and let the user apply/confirm it before
+  continuing — never edit-and-proceed. Reinforced in `init`/`failed` states and in
+  every write-capable agent (`dp-implementor`, `dp-test-implementor`, `dp-tester`).
+
+### Changed
+- `dp-tester` now distinguishes a **missing third-party dependency/toolchain**
+  (`environment`) from a **missing first-party symbol that is part of the feature
+  under test** (`code`). The latter — e.g. `ModuleNotFoundError` for a module the
+  spec defines, or a compile error referencing a not-yet-implemented function — is
+  the expected RED signal, not an environment problem.
+- The `red_test` state now passes the tester an explicit RED-phase context:
+  production is intentionally absent, so import/compile/symbol failures pointing at
+  the spec's interface must be classified `code`. This prevents a misclassification
+  from halting the run (`red_test` treats `environment` as a hard halt). The driver
+  state machine is unchanged — `fail`+`code` still confirms RED → implementation,
+  and genuine `environment` failures still halt.
+
 ## [2.1.0] - 2026-06-30
 
 Commit only what the pipeline produced, and make every state decision flow

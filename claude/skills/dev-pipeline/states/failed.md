@@ -13,6 +13,8 @@ Stop immediately. Report:
   > - Are `build_instruction` / `install_instruction` / `test_instruction` in `.dev-pipeline/dev-pipeline.config.json` correct?
   > After fixing, restart the pipeline."
 
+  Do **not** edit `.dev-pipeline/dev-pipeline.config.json` yourself to "fix" the instructions and retry — surface the proposed change and let the user apply it (Global Rule 10).
+
 **`halt_reason: "iteration-exhausted"`**
 Report:
 - Which budget was exhausted. The `outcome` in `state.json` history distinguishes them: `test_fail_exhausted` (green test), `review_fail_exhausted` (review), or `red_not_confirmed_exhausted` (the authored tests kept passing with no implementation — the tests are likely vacuous; point the user at the test author output).

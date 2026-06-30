@@ -6,7 +6,8 @@ The advance that landed here echoed `directive: run_tester`, `iter_dir`, `result
 
 - [Step 1] Use the echoed `iter_dir` for this step.
 
-- [Step 2] Dispatch the tester runner — try the echoed `tester_runners` array front-to-back (default `dp-tester`), passing the echoed `build_instruction`, `install_instruction`, `test_instruction`. The tester returns a JSON object as its final message. Do **not** run the commands yourself. Pass **only** the three instructions: do **NOT** specify or invent an output schema in the prompt — `dp-tester` already defines its result schema, and overriding it causes `validate-result` failures.
+- [Step 2] Dispatch the tester runner — try the echoed `tester_runners` array front-to-back (default `dp-tester`), passing the echoed `build_instruction`, `install_instruction`, `test_instruction`. The tester returns a JSON object as its final message. Do **not** run the commands yourself. Besides the three instructions, also pass the **RED-phase classification context** below (this is classification guidance, not an output-schema change — do **NOT** specify or invent an output schema in the prompt; `dp-tester` owns its result schema, and overriding it causes `validate-result` failures):
+  > "This is the RED phase: production code for the feature under test is **intentionally not implemented yet**. A failure caused by the feature being absent — a missing module/function/symbol, import error, or compile error referencing the spec's intended interface — MUST be classified `failure_type: code` (this is the expected RED). Reserve `environment` for failures **unrelated** to the missing feature (broken/missing toolchain or test framework, network, permissions, flakiness)."
 
 - [Step 3] Extract the tester JSON and write it to `<iter_dir>/red-test-result.json` (note the `red-` prefix — this must NOT overwrite `test-result.json`).
 
@@ -34,7 +35,7 @@ The advance that landed here echoed `directive: run_tester`, `iter_dir`, `result
 - [Step 7] Follow `states/<next_state>.md`.
 
 **Checklist:**
-- [ ] Tester dispatched; commands run ONLY by the tester
+- [ ] Tester dispatched; commands run ONLY by the tester; RED-phase classification context passed
 - [ ] JSON written to `<iter_dir>/red-test-result.json` (not `test-result.json`)
 - [ ] `driver validate-result --type test` passed
 - [ ] `driver advance` called (before any `append-attempt`); followed the reported `next_state`
