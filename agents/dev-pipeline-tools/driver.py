@@ -13,6 +13,7 @@ Usage:
   python3 driver.py append-attempt   --run <run_dir> --state <test_implementation|red_test|test|review> --outcome <text-or-file>
   python3 driver.py check-boundary   --run <run_dir> --role <test_implementation|implementation> --changed <file...>
   python3 driver.py record-changes   --run <run_dir> --changed <file...>
+  python3 driver.py run-stage        --run <run_dir> --role <role> [--stage-input <file>]
   python3 driver.py --version
   python3 driver.py --help
 """
@@ -22,6 +23,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1094,6 +1096,200 @@ def cmd_record_changes(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: run-stage (execute a role via a configured bash runner)
+# ---------------------------------------------------------------------------
+
+# Role → execution metadata. `category` decides how the driver judges success:
+#   "file"  — the runner edits the repo; success = exit 0 (delta read elsewhere).
+#   "json"  — the runner writes a result JSON to {output_file}; validated against
+#             `schema`, with one error-fed retry then fallback to the next runner.
+#   "named" — the runner writes a named artifact (spec.md) to {output_file}; the
+#             driver checks the required sections are present.
+ROLE_META = {
+    "spec_author":      {"category": "named", "schema": None,            "prompt": "dp-spec-author"},
+    "test_implementor": {"category": "file",  "schema": None,            "prompt": "dp-test-implementor"},
+    "implementor":      {"category": "file",  "schema": None,            "prompt": "dp-implementor"},
+    "tester":           {"category": "json",  "schema": "test-result",   "prompt": "dp-tester"},
+    "reviewer":         {"category": "json",  "schema": "review-result", "prompt": "dp-reviewer"},
+}
+
+
+def role_prompt_path(prompt_name: str) -> "pathlib.Path | None":
+    """Locate a role's prose file (the system prompt), source or installed layout."""
+    here = pathlib.Path(__file__).parent
+    for c in (
+        here / "agents" / f"{prompt_name}.md",                            # co-located (install copies here)
+        here.parent.parent / "agents" / f"{prompt_name}.md",             # installed: .claude/agents
+        here.parent.parent / "claude" / "agents" / f"{prompt_name}.md",  # source repo layout
+    ):
+        if c.exists():
+            return c
+    return None
+
+
+def strip_frontmatter(text: str) -> str:
+    """Drop a leading YAML frontmatter block so dp-*.md reads as a portable system
+    prompt (no host-specific `model:`/`tools:` keys leak into the LLM prompt)."""
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            nl = text.find("\n", end + 1)
+            return text[nl + 1:].lstrip("\n") if nl != -1 else ""
+    return text
+
+
+def assemble_prompt(role: str, stage_input: dict) -> "tuple[str, str]":
+    """Build (system, user) prompt text deterministically from the role prose +
+    the advance-echoed inputs. The role prose is LLM-agnostic; transport-specific
+    directives (where to write output) are appended here, never baked into .md."""
+    meta = ROLE_META[role]
+    sp = role_prompt_path(meta["prompt"])
+    system = strip_frontmatter(sp.read_text(encoding="utf-8")) if sp else f"You are the {role}."
+
+    inputs = stage_input.get("inputs", {})
+    lines = ["## Inputs", ""]
+    for k, v in inputs.items():
+        if isinstance(v, (dict, list)):
+            v = json.dumps(v, ensure_ascii=False)
+        lines.append(f"- **{k}**: {v}")
+    out = stage_input.get("output_file")
+    if meta["category"] in ("json", "named") and out:
+        lines += ["", f"When done, write your result to the file at this exact path and nothing else there: `{out}`"]
+        if meta["category"] == "json":
+            lines.append("The file content must be a single valid JSON object (no markdown fences).")
+    return system, "\n".join(lines) + "\n"
+
+
+def _normalize_output(raw: str, normalizer: str) -> "dict | None":
+    """Map a runner's output-file content to a canonical JSON object.
+    `passthrough` parses it directly; the *-cli variants tolerate a markdown
+    fence or surrounding prose by extracting the outermost JSON object."""
+    raw = raw.strip()
+    if normalizer in ("claude-cli", "codex-cli"):
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+            raw = re.sub(r"\n```\s*$", "", raw).strip()
+        if not raw.startswith("{"):
+            i, j = raw.find("{"), raw.rfind("}")
+            if i != -1 and j != -1 and j > i:
+                raw = raw[i:j + 1]
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int) -> "subprocess.CompletedProcess":
+    """Substitute placeholders (shell-quoted) into a command template and run it
+    in a shell with cwd=project_root."""
+    cmd = command
+    for key, val in subst.items():
+        cmd = cmd.replace("{" + key + "}", shlex.quote(str(val)))
+    return subprocess.run(cmd, shell=True, cwd=str(project_root),
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def cmd_run_stage(args) -> None:
+    """Execute a role's configured runner(s): assemble the prompt, run the LLM CLI
+    (subprocess), and validate by category. The LLM choice/flags live entirely in
+    config.runners.<role>; this driver only assembles, runs, and checks."""
+    run_dir = pathlib.Path(args.run).resolve()
+    role = args.role
+    if role not in ROLE_META:
+        die(f"Unknown role: {role}")
+    meta = ROLE_META[role]
+
+    # stage-input.json is written by cmd_init (spec) or cmd_advance (other roles);
+    # it carries the dynamic, advance-computed context. The static runner array
+    # and project root come from the run's own files (driver-owned, not the SKILL).
+    si_path = run_dir / args.stage_input if pathlib.Path(args.stage_input).name == args.stage_input else pathlib.Path(args.stage_input)
+    stage_input = load_json(si_path)
+    cfg = load_json(run_dir / "config.snapshot.json")
+    state = load_state(run_dir)
+    project_root = pathlib.Path(stage_input.get("project_root") or state.get("project_dir") or ".").resolve()
+
+    runners = cfg.get("runners", {}).get(role, [])
+    if not runners:
+        die(f"config.runners.{role} is empty — nothing to run.")
+
+    work = pathlib.Path(stage_input.get("work_dir") or run_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    system_text, user_text = assemble_prompt(role, stage_input)
+    system_file = work / f"{role}-system.txt"
+    user_file = work / f"{role}-user.txt"
+    system_file.write_text(system_text, encoding="utf-8")
+    user_file.write_text(user_text, encoding="utf-8")
+    output_file = pathlib.Path(stage_input["output_file"]) if stage_input.get("output_file") else (work / f"{role}-output.json")
+
+    subst = {
+        "system_file": str(system_file), "user_file": str(user_file),
+        "output_file": str(output_file), "project_root": str(project_root),
+        "run_dir": str(run_dir), "work_dir": str(work),
+    }
+
+    attempts = []
+    for idx, runner in enumerate(runners):
+        command = runner.get("command")
+        if not command:
+            attempts.append({"runner": idx, "error": "no command"})
+            continue
+        timeout = int(runner.get("timeout", 600))
+        if meta["category"] in ("json", "named") and output_file.exists():
+            output_file.unlink()  # clean slate so a stale file isn't mistaken for success
+        try:
+            proc = _run_one(command, subst, project_root, timeout)
+        except subprocess.TimeoutExpired:
+            attempts.append({"runner": idx, "error": "timeout"})
+            continue
+
+        # --- File role: success is exit 0; the delta is read elsewhere. ---
+        if meta["category"] == "file":
+            if proc.returncode == 0:
+                emit({"ok": True, "role": role, "category": "file", "runner": idx,
+                      "used": command, "attempts": attempts})
+                return
+            attempts.append({"runner": idx, "exit": proc.returncode,
+                             "stderr": proc.stderr[-500:]})
+            continue
+
+        # --- JSON / named role: the result is the output FILE (CLIs add banners
+        #     to stdout), validated by category. ---
+        problem = None
+        if not output_file.exists():
+            problem = "output file not written"
+        elif meta["category"] == "json":
+            result = _normalize_output(output_file.read_text(encoding="utf-8"),
+                                       runner.get("normalizer", "passthrough"))
+            if result is None:
+                problem = "no valid JSON written to output_file"
+            elif meta["schema"]:
+                errs = validate_against_schema(result, f"{meta['schema']}.schema.json")
+                if errs:
+                    problem = "schema: " + "; ".join(errs[:3])
+        else:  # named (e.g. spec.md): section presence, plus an insufficiency marker
+            text = output_file.read_text(encoding="utf-8")
+            if "INSUFFICIENT" in text[:200].upper():
+                emit({"ok": False, "role": role, "category": "named", "reason": "insufficient",
+                      "message": "the author reported the input is too vague to proceed",
+                      "runner": idx})
+                return
+            missing = [s for s in (stage_input.get("required_sections") or []) if s not in text]
+            if missing:
+                problem = "missing required sections: " + ", ".join(missing)
+
+        if problem is None:
+            emit({"ok": True, "role": role, "category": meta["category"], "runner": idx,
+                  "used": command, "output_file": str(output_file), "attempts": attempts})
+            return
+        attempts.append({"runner": idx, "exit": proc.returncode, "problem": problem})
+
+    emit({"ok": False, "role": role, "category": meta["category"],
+          "reason": "all_runners_failed", "attempts": attempts})
+    sys.exit(2)
+
+
+# ---------------------------------------------------------------------------
 # Help text
 # ---------------------------------------------------------------------------
 
@@ -1139,6 +1335,7 @@ DRIVER CLI
   append-attempt   Log a failed attempt to attempts.md for implementor context
   check-boundary   (TDD) verify a role only touched files it is allowed to
   record-changes   Accumulate pipeline-produced files into changed-manifest.txt
+  run-stage        Execute a role via its configured bash runner (assemble prompt, run, validate)
   --version        Print the dev-pipeline version and exit
   --help           Show this message
 
@@ -1231,6 +1428,12 @@ def main() -> None:
     p_rc.add_argument("--run", required=True)
     p_rc.add_argument("--changed", nargs="*", default=[])
 
+    p_rs = sub.add_parser("run-stage")
+    p_rs.add_argument("--run", required=True)
+    p_rs.add_argument("--role", required=True,
+                      choices=list(ROLE_META.keys()))
+    p_rs.add_argument("--stage-input", dest="stage_input", default="stage-input.json")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -1244,6 +1447,7 @@ def main() -> None:
         "append-attempt":   cmd_append_attempt,
         "check-boundary":   cmd_check_boundary,
         "record-changes":   cmd_record_changes,
+        "run-stage":        cmd_run_stage,
     }
 
     if args.cmd not in dispatch:
