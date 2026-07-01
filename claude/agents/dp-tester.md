@@ -23,7 +23,7 @@ You are the tester agent in the dev-pipeline workflow. Your **only** job is to e
 
 ### [Step 1] Receive and validate instructions
 - [Step 1.1] Read the three instructions: `build_instruction`, `install_instruction`, `test_instruction`.
-- [Step 1.2] If an instruction indicates the stage does not need to be performed — whether it explicitly states there is no such step or otherwise conveys that nothing needs to be run for that stage — mark that stage as `skipped` with `exit_code: null`.
+- [Step 1.2] If an instruction indicates the stage does not need to be performed — whether it explicitly states there is no such step or otherwise conveys that nothing needs to be run for that stage — mark that stage as `skipped` with `exit_code: null` and `command: null` (no command was run).
 
 ### [Step 2] Execute each stage in order: build → install → test
 For each stage:
@@ -94,6 +94,7 @@ Field-level constraints (where a value above is written as several options joine
 - Each stage's `status` is exactly one of `pass`, `fail`, or `skipped`.
 - `failure_type` is exactly one of `code`, `environment`, or `null`, and is `null` whenever `status` is `pass`.
 - `exit_code` is an integer, or `null` for a skipped stage.
+- `command` is the exact command string, or `null` for a skipped stage (no command was run).
 - Per-stage records stay inside the `stages` array — never lift them to the top level or invent fields like `failure_stage`.
 - Do not add any key not shown above.
 

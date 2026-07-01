@@ -593,6 +593,16 @@ class TestValidateResult(PipelineTestCase):
         r = run_driver("validate-result", "--type", "test", "--file", path)
         self.assertNotEqual(r.returncode, 0)
 
+    def test_skipped_stage_null_command_passes(self):
+        # A skipped stage genuinely ran no command; the tester emits command:null
+        # (like exit_code:null), which must validate.
+        tr = test_result(status="pass")
+        tr["stages"].append({"name": "build", "command": None, "exit_code": None,
+                             "status": "skipped", "summary": "no build step"})
+        r = run_driver("validate-result", "--type", "test", "--file", self._write(tr))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["valid"])
+
     def test_valid_review_result_passes(self):
         path = self._write(review_result(verdict="approve"))
         r = run_driver("validate-result", "--type", "review", "--file", path)

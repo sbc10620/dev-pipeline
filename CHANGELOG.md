@@ -9,6 +9,15 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .claude/skills/dev-pipeline/driver.py --version`.
 
+## [2.3.1] - 2026-07-01
+
+### Fixed
+- A **skipped** test stage now validates when the tester emits `command: null`.
+  The `test-result` schema required `command` to be a string, so a skipped stage
+  (which runs no command) failed schema validation — forcing a needless retry.
+  `command` is now nullable (like `exit_code`), and `dp-tester` is told to emit
+  `command: null` for skipped stages.
+
 ## [2.3.0] - 2026-06-30
 
 The implementor build-checks its code before handing off, so compile errors are
