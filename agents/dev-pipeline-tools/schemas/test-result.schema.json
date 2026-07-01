@@ -23,7 +23,7 @@
         "required": ["name", "command", "exit_code", "status", "summary"],
         "properties": {
           "name":      { "type": "string", "enum": ["build", "install", "test"] },
-          "command":   { "type": "string" },
+          "command":   { "type": ["string", "null"] },
           "exit_code": { "type": ["integer", "null"] },
           "status":    { "type": "string", "enum": ["pass", "fail", "skipped"] },
           "summary":   { "type": "string" }
