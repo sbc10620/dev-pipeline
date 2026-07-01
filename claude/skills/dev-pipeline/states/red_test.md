@@ -1,41 +1,34 @@
 # STATE: red_test  (TDD only)
 
-**Goal:** Prove the freshly authored tests FAIL before any code exists (the RED phase). **A failing test run is the success condition here.**
+**Goal:** Prove the freshly authored tests FAIL before any code exists (the RED phase). **A failing test run is the success condition the driver checks.** Here, `run-stage` succeeding means the tester produced a *valid result*, not that tests passed — the driver's `advance` interprets pass/fail.
 
-The advance that landed here echoed `directive: run_tester`, `iter_dir`, `result_filename: "red-test-result.json"`, the three `*_instruction` values, and `tester_runners`. This is the same tester as the `test` state — only the result filename and the driver's interpretation differ. **Use the echoed values — do not read `config.snapshot.json`.**
+The advance that landed here echoed `directive: run_tester`, `iter_dir`, and `tdd_mode`. The driver persisted the tester context (the three `*_instruction`s and a RED-phase classification note) to `<iter_dir>/stage-input.json`, with `output_file` set to `<iter_dir>/red-test-result.json`.
 
-- [Step 1] Use the echoed `iter_dir` for this step.
-
-- [Step 2] Dispatch the tester runner — try the echoed `tester_runners` array front-to-back (default `dp-tester`), passing the echoed `build_instruction`, `install_instruction`, `test_instruction`. The tester returns a JSON object as its final message. Do **not** run the commands yourself. Besides the three instructions, also pass the **RED-phase classification context** below (this is classification guidance, not an output-schema change — do **NOT** specify or invent an output schema in the prompt; `dp-tester` owns its result schema, and overriding it causes `validate-result` failures):
-  > "This is the RED phase: production code for the feature under test is **intentionally not implemented yet**. A failure caused by the feature being absent — a missing module/function/symbol, import error, or compile error referencing the spec's intended interface — MUST be classified `failure_type: code` (this is the expected RED). Reserve `environment` for failures **unrelated** to the missing feature (broken/missing toolchain or test framework, network, permissions, flakiness)."
-
-- [Step 3] Extract the tester JSON and write it to `<iter_dir>/red-test-result.json` (note the `red-` prefix — this must NOT overwrite `test-result.json`).
-
-- [Step 4] Validate (it uses the same schema as a normal test result):
+- [Step 1] **Run the tester:**
   ```bash
-  python3 <driver_path> validate-result --type test --file <iter_dir>/red-test-result.json
+  python3 <driver_path> run-stage --run <run_dir> --role tester --stage-input <iter_dir>/stage-input.json
   ```
-  On non-zero exit, re-dispatch the tester **once** with the exact error text and re-validate. If still invalid, report and stop.
+  The runner executes the configured build/install/test and writes a schema-valid `red-test-result.json` to `<iter_dir>`. Read the JSON:
+  - `ok: true` → a valid result was written; proceed (its pass/fail is the driver's to interpret).
+  - `ok: false` → the runner could not produce a valid result (tooling problem). Stop and report the `attempts`.
 
-- [Step 5] Call driver advance:
+- [Step 2] Call driver advance:
   ```bash
   python3 <driver_path> advance --run <run_dir>
   ```
-  The driver interprets the result:
+  The driver interprets `red-test-result.json`:
   - **tests failed (RED confirmed)** → `next_state: implementation`.
-  - **tests passed (RED not confirmed)** → `next_state: test_implementation` (re-author stronger tests), or `failed` if the re-authoring budget is exhausted.
+  - **tests passed (RED not confirmed)** → `next_state: test_implementation` (re-author stronger tests), or `failed` if the budget is exhausted.
   - **environment failure** → `failed` (`halt_reason: environment`).
 
-- [Step 6] If `next_state == "test_implementation"` (RED not confirmed), append the outcome to attempt history **after** advance:
+- [Step 3] If `next_state == "test_implementation"` (RED not confirmed), append the outcome to attempt history **after** advance:
   ```bash
   # Write a short "tests passed with no implementation — vacuous" note to <run_dir>/.attempt-tmp.md, then:
   python3 <driver_path> append-attempt --run <run_dir> --state red_test --outcome-file <run_dir>/.attempt-tmp.md
   ```
 
-- [Step 7] Follow `states/<next_state>.md`.
+- [Step 4] Follow `states/<next_state>.md`.
 
 **Checklist:**
-- [ ] Tester dispatched; commands run ONLY by the tester; RED-phase classification context passed
-- [ ] JSON written to `<iter_dir>/red-test-result.json` (not `test-result.json`)
-- [ ] `driver validate-result --type test` passed
+- [ ] `run-stage --role tester` returned `ok: true` (valid `red-test-result.json` written); else stopped/reported
 - [ ] `driver advance` called (before any `append-attempt`); followed the reported `next_state`

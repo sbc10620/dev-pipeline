@@ -13,6 +13,8 @@ Usage:
   python3 driver.py append-attempt   --run <run_dir> --state <test_implementation|red_test|test|review> --outcome <text-or-file>
   python3 driver.py check-boundary   --run <run_dir> --role <test_implementation|implementation> --changed <file...>
   python3 driver.py record-changes   --run <run_dir> --changed <file...>
+  python3 driver.py run-stage        --run <run_dir> --role <role> [--stage-input <file>]
+  python3 driver.py migrate-config   --config <path> [--out <path>]
   python3 driver.py --version
   python3 driver.py --help
 """
@@ -22,6 +24,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -35,7 +38,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "2.3.1"
+__version__ = "3.0.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -199,7 +202,28 @@ def _is_placeholder(val) -> bool:
     return isinstance(val, str) and val.strip().startswith("<") and val.strip().endswith(">")
 
 
+def _legacy_runner_roles(cfg: dict) -> list:
+    """Roles whose runners use a type removed in 3.0.0 (pre-schema detection)."""
+    legacy = []
+    for role, arr in (cfg.get("runners") or {}).items():
+        if isinstance(arr, list) and any(
+            isinstance(r, dict) and (r.get("type") in ("claude-subagent", "codex-adversarial-review")
+                                     or "agent" in r)
+            for r in arr):
+            legacy.append(role)
+    return sorted(set(legacy))
+
+
 def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
+    # 3.0.0 migration: surface removed runner types with an actionable message
+    # BEFORE the generic schema enum error.
+    legacy = _legacy_runner_roles(cfg)
+    if legacy:
+        return [f"runners.{', '.join(legacy)}: use a runner type removed in 3.0.0 "
+                "(claude-subagent / codex-adversarial-review). Replace each with "
+                '{"type":"bash","command":"..."}, or run `driver migrate-config '
+                "--config <path>` to convert automatically."]
+
     errors = validate_against_schema(cfg, "config.schema.json")
     if errors:
         return errors
@@ -244,6 +268,17 @@ def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
                 "runners.test_implementor: required when tdd_mode is enabled — add it "
                 "or run with --no-tdd / set driver.tdd_mode=false"
             )
+
+    # Runner commands may only reference placeholders the driver substitutes, so a
+    # typo fails fast at validate time instead of breaking at the shell.
+    known = {"system_file", "user_file", "output_file", "project_root", "run_dir", "work_dir"}
+    for role, arr in (cfg.get("runners") or {}).items():
+        for i, r in enumerate(arr if isinstance(arr, list) else []):
+            cmd = r.get("command", "") if isinstance(r, dict) else ""
+            unknown = sorted(set(re.findall(r"(?<!\$)\{(\w+)\}", cmd)) - known)
+            if unknown:
+                errors.append(f"runners.{role}[{i}].command references unknown placeholder(s) "
+                              f"{{{', '.join(unknown)}}}; allowed: {sorted(known)}")
 
     return errors
 
@@ -434,6 +469,21 @@ def cmd_init(args) -> None:
         "# Attempt History\n\n_No attempts recorded yet._\n", encoding="utf-8"
     )
 
+    # Stage-input for the spec author (bash-runner mode). Additive — the legacy
+    # flow still authors spec.md via the init emit below; this only persists the
+    # context so `driver run-stage --role spec_author` can produce spec.md.
+    required = ["## Requirements", "## Acceptance Criteria"]
+    if tdd_mode:
+        required.append("## Test Targets")
+    save_json(run_dir / "stage-input.json", {
+        "role": "spec_author",
+        "project_root": str(project_dir),
+        "work_dir": str(run_dir),
+        "output_file": str(spec_path),
+        "required_sections": required,
+        "inputs": {"plan_path": str(plan_path), "tdd_mode": tdd_mode},
+    })
+
     emit({
         "state": "init",
         "run_id": rid,
@@ -441,8 +491,11 @@ def cmd_init(args) -> None:
         "spec_path": str(spec_path),
         "plan_path": str(plan_path),
         "tdd_mode": tdd_mode,
-        "next_action": "write_spec",
-        "message": "Init successful. Write spec.md at spec_path, then call `driver advance --run <run_dir>`.",
+        "directive": "run_spec_author",
+        "next_action": "run_spec_author",
+        "message": "Init successful. Run `driver run-stage --role spec_author` "
+                   "(stage-input.json is written at run_dir) to author spec.md, "
+                   "then call `driver advance --run <run_dir>`.",
     })
 
 
@@ -488,8 +541,9 @@ def cmd_advance(args) -> None:
             e["tester_runners"] = runners.get("tester", [])
         elif new_state == "done":
             e["run_self_evolution"] = cfg.get("driver", {}).get("run_self_evolution", False)
-        # Note: reviewer has no echo — review.md hardcodes the codex→dp-reviewer
-        # order and never consults config.runners.reviewer.
+        # Note: no reviewer-runner echo here — the reviewer (like every role in
+        # 3.0.0) is run by `driver run-stage`, which reads config.runners.reviewer
+        # itself; the SKILL never needs the runner array.
         return e
 
     def transition(new_state: str, outcome: str, failure_type=None, halt_reason=None, extra: dict = None):
@@ -516,6 +570,11 @@ def cmd_advance(args) -> None:
         result.update(dest_echoes(new_state))
         if extra:
             result.update(extra)
+        # Persist a stage-input.json next to the iteration so `driver run-stage`
+        # (bash-runner mode) can consume the same context the SKILL echo carries.
+        si = build_stage_input(result, state.get("project_dir", ""))
+        if si and si.get("work_dir") and si["work_dir"] != ".":
+            save_json(pathlib.Path(si["work_dir"]) / "stage-input.json", si)
         emit(result)
 
     attempts_path = str(run_dir / "attempts.md")
@@ -525,9 +584,11 @@ def cmd_advance(args) -> None:
         spec_path = pathlib.Path(state["spec_path"])
         if not spec_path.exists():
             die("spec.md has not been written yet. Write it first, then call advance.")
+        iter_dir = ensure_iter_dir(run_dir, state)
         if state.get("tdd_mode", False):
             transition("test_implementation", "spec_ready",
                        extra={"directive": "run_test_implementor",
+                              "iter_dir": str(iter_dir),
                               "spec_path": str(spec_path),
                               "plan_path": state["plan_path"],
                               "attempts_path": attempts_path,
@@ -535,6 +596,7 @@ def cmd_advance(args) -> None:
         else:
             transition("implementation", "spec_ready",
                        extra={"directive": "run_implementor",
+                              "iter_dir": str(iter_dir),
                               "spec_path": str(spec_path),
                               "plan_path": state["plan_path"],
                               "attempts_path": attempts_path})
@@ -549,6 +611,13 @@ def cmd_advance(args) -> None:
                               "iter_dir": str(iter_dir),
                               "red_test": True,
                               "result_filename": "red-test-result.json",
+                              "red_phase_context": (
+                                  "RED phase: production code for the feature under test is "
+                                  "intentionally not implemented yet. A failure caused by the feature "
+                                  "being absent (missing module/function/symbol, import error, or compile "
+                                  "error referencing the spec's intended interface) MUST be classified "
+                                  "failure_type=code (the expected RED). Reserve environment for failures "
+                                  "unrelated to the missing feature (toolchain/framework/network/permissions)."),
                               "build_instruction":   cfg["llm"]["tester"]["build_instruction"],
                               "install_instruction": cfg["llm"]["tester"]["install_instruction"],
                               "test_instruction":    cfg["llm"]["tester"]["test_instruction"]})
@@ -649,6 +718,7 @@ def cmd_advance(args) -> None:
                        extra={"directive": "run_reviewer",
                               "iter_dir": str(iter_dir),
                               "spec_path": state["spec_path"],
+                              "changes_diff": str(iter_dir / "changes.diff"),
                               "reviewer_config": cfg["llm"]["reviewer"]})
         elif failure_type == "environment":
             transition("failed", "test_fail_environment", failure_type="environment",
@@ -1094,6 +1164,303 @@ def cmd_record_changes(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: run-stage (execute a role via a configured bash runner)
+# ---------------------------------------------------------------------------
+
+# Role → execution metadata. `category` decides how the driver judges success:
+#   "file"  — the runner edits the repo; success = exit 0 (delta read elsewhere).
+#   "json"  — the runner writes a result JSON to {output_file}; validated against
+#             `schema`, with one error-fed retry then fallback to the next runner.
+#   "named" — the runner writes a named artifact (spec.md) to {output_file}; the
+#             driver checks the required sections are present.
+ROLE_META = {
+    "spec_author":      {"category": "named", "schema": None,            "prompt": "dp-spec-author"},
+    "test_implementor": {"category": "file",  "schema": None,            "prompt": "dp-test-implementor"},
+    "implementor":      {"category": "file",  "schema": None,            "prompt": "dp-implementor"},
+    "tester":           {"category": "json",  "schema": "test-result",   "prompt": "dp-tester"},
+    "reviewer":         {"category": "json",  "schema": "review-result", "prompt": "dp-reviewer"},
+}
+
+
+# Maps an advance `directive` to the run-stage role it drives.
+_DIRECTIVE_ROLE = {
+    "run_spec_author":      "spec_author",
+    "run_test_implementor": "test_implementor",
+    "run_tester":           "tester",
+    "run_implementor":      "implementor",
+    "run_reviewer":         "reviewer",
+}
+# Keys in an advance result that are control/echo metadata, not stage inputs.
+# The *_runners arrays are config the driver consumes via config.runners — they
+# must never reach a role's own prompt (first principle: the role does not know
+# which LLM runs it).
+_STAGE_INPUT_CONTROL = {
+    "directive", "iter_dir", "previous_state", "next_state", "iterations",
+    "halt_reason", "tdd_mode", "result_filename", "red_test",
+    "implementor_runners", "test_implementor_runners", "tester_runners",
+}
+
+
+def build_stage_input(result: dict, project_dir: str) -> "dict | None":
+    """Translate an advance/init result into a run-stage stage-input.json so the
+    bash-runner path consumes exactly the context the echo carries (M-1: retry
+    context lives only in the echo, never in state.json)."""
+    role = _DIRECTIVE_ROLE.get(result.get("directive"))
+    if role is None:
+        return None
+    iter_dir = result.get("iter_dir") or result.get("work_dir")
+    si = {"role": role, "project_root": project_dir, "work_dir": iter_dir or ".",
+          "inputs": {k: v for k, v in result.items() if k not in _STAGE_INPUT_CONTROL}}
+    if role == "tester" and iter_dir:
+        si["output_file"] = str(pathlib.Path(iter_dir) / result.get("result_filename", "test-result.json"))
+    elif role == "reviewer" and iter_dir:
+        si["output_file"] = str(pathlib.Path(iter_dir) / "review-result.json")
+    return si
+
+
+def role_prompt_path(prompt_name: str) -> "pathlib.Path | None":
+    """Locate a role's prose file (the system prompt), source or installed layout."""
+    here = pathlib.Path(__file__).parent
+    for c in (
+        here / "agents" / f"{prompt_name}.md",                            # co-located (install copies here)
+        here.parent.parent / "agents" / f"{prompt_name}.md",             # installed: .claude/agents
+        here.parent.parent / "claude" / "agents" / f"{prompt_name}.md",  # source repo layout
+    ):
+        if c.exists():
+            return c
+    return None
+
+
+def strip_frontmatter(text: str) -> str:
+    """Drop a leading YAML frontmatter block so dp-*.md reads as a portable system
+    prompt (no host-specific `model:`/`tools:` keys leak into the LLM prompt)."""
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            nl = text.find("\n", end + 1)
+            return text[nl + 1:].lstrip("\n") if nl != -1 else ""
+    return text
+
+
+def assemble_prompt(role: str, stage_input: dict) -> "tuple[str, str]":
+    """Build (system, user) prompt text deterministically from the role prose +
+    the advance-echoed inputs. The role prose is LLM-agnostic; transport-specific
+    directives (where to write output) are appended here, never baked into .md."""
+    meta = ROLE_META[role]
+    sp = role_prompt_path(meta["prompt"])
+    system = strip_frontmatter(sp.read_text(encoding="utf-8")) if sp else f"You are the {role}."
+
+    inputs = stage_input.get("inputs", {})
+    lines = ["## Inputs", ""]
+    for k, v in inputs.items():
+        if isinstance(v, (dict, list)):
+            v = json.dumps(v, ensure_ascii=False)
+        lines.append(f"- **{k}**: {v}")
+    # The output directive (write-to-file vs print-to-stdout) is appended per
+    # runner by cmd_run_stage, because it depends on the runner's command.
+    return system, "\n".join(lines) + "\n"
+
+
+def _normalize_output(raw: str, normalizer: str) -> "dict | None":
+    """Map a runner's output-file content to a canonical JSON object.
+    `passthrough` parses it directly; the *-cli variants tolerate a markdown
+    fence or surrounding prose by extracting the outermost JSON object."""
+    raw = raw.strip()
+    if normalizer in ("claude-cli", "codex-cli"):
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+            raw = re.sub(r"\n```\s*$", "", raw).strip()
+        if not raw.startswith("{"):
+            i, j = raw.find("{"), raw.rfind("}")
+            if i != -1 and j != -1 and j > i:
+                raw = raw[i:j + 1]
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int) -> "subprocess.CompletedProcess":
+    """Substitute placeholders (shell-quoted) into a command template and run it
+    in a shell with cwd=project_root."""
+    cmd = command
+    for key, val in subst.items():
+        cmd = cmd.replace("{" + key + "}", shlex.quote(str(val)))
+    return subprocess.run(cmd, shell=True, cwd=str(project_root),
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def cmd_run_stage(args) -> None:
+    """Execute a role's configured runner(s): assemble the prompt, run the LLM CLI
+    (subprocess), and validate by category. The LLM choice/flags live entirely in
+    config.runners.<role>; this driver only assembles, runs, and checks."""
+    run_dir = pathlib.Path(args.run).resolve()
+    role = args.role
+    if role not in ROLE_META:
+        die(f"Unknown role: {role}")
+    meta = ROLE_META[role]
+
+    # stage-input.json is written by cmd_init (spec) or cmd_advance (other roles);
+    # it carries the dynamic, advance-computed context. The static runner array
+    # and project root come from the run's own files (driver-owned, not the SKILL).
+    si_path = run_dir / args.stage_input if pathlib.Path(args.stage_input).name == args.stage_input else pathlib.Path(args.stage_input)
+    stage_input = load_json(si_path)
+    cfg = load_json(run_dir / "config.snapshot.json")
+    state = load_state(run_dir)
+    project_root = pathlib.Path(stage_input.get("project_root") or state.get("project_dir") or ".").resolve()
+
+    # Guard against passing the wrong stage-input (e.g. the default spec-author one
+    # for an iteration role) — the SKILL always passes the matching path.
+    if stage_input.get("role") and stage_input["role"] != role:
+        die(f"stage-input role {stage_input['role']!r} != --role {role!r}; wrong --stage-input path.")
+
+    runners = cfg.get("runners", {}).get(role, [])
+    if not runners:
+        die(f"config.runners.{role} is empty — nothing to run.")
+    # A run created by a pre-3.0.0 driver has subagent runners (no `command`) frozen
+    # in its snapshot; run-stage cannot drive those. Fail with an explicit reason.
+    if any(isinstance(r, dict) and not r.get("command") for r in runners):
+        die(f"config.runners.{role} has a runner with no `command` — this run was likely "
+            "created by a pre-3.0.0 driver. Start a new run (its config snapshot is frozen).")
+
+    work = pathlib.Path(stage_input.get("work_dir") or run_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    system_text, user_text = assemble_prompt(role, stage_input)
+    system_file = work / f"{role}-system.txt"
+    user_file = work / f"{role}-user.txt"
+    system_file.write_text(system_text, encoding="utf-8")
+    user_file.write_text(user_text, encoding="utf-8")
+    output_file = pathlib.Path(stage_input["output_file"]) if stage_input.get("output_file") else (work / f"{role}-output.json")
+
+    subst = {
+        "system_file": str(system_file), "user_file": str(user_file),
+        "output_file": str(output_file), "project_root": str(project_root),
+        "run_dir": str(run_dir), "work_dir": str(work),
+    }
+
+    INSUFFICIENT = "__insufficient__"
+
+    def output_directive(runner: dict) -> str:
+        """Per-runner output instruction: a runner that redirects stdout to
+        `{output_file}` (e.g. `codex exec … > {output_file}`) must PRINT the result;
+        one that writes via a tool must WRITE the file. Matches the actual mechanism."""
+        if meta["category"] not in ("json", "named"):
+            return ""
+        what = ("a single valid JSON object (no markdown fences, nothing else)"
+                if meta["category"] == "json" else "your result")
+        if re.search(r">\s*\{output_file\}", runner.get("command", "")):
+            return f"\n\nOutput {what} to **stdout** only."
+        return f"\n\nWrite {what} to this exact file path and nothing else there: {output_file}"
+
+    def judge(runner: dict, command: str, timeout: int):
+        """Run one command and judge it by category. Returns (problem|None, exit).
+        `problem` is None on success, the sentinel INSUFFICIENT for a spec-author
+        refusal, else a short reason string (also fed back on the retry)."""
+        if meta["category"] in ("json", "named") and output_file.exists():
+            output_file.unlink()  # clean slate so a stale file isn't mistaken for success
+        try:
+            proc = _run_one(command, subst, project_root, timeout)
+        except subprocess.TimeoutExpired:
+            return "timeout", None
+        # On a non-zero exit, keep a stderr tail so a missing CLI / crash is visible
+        # in the reason (file roles already include it; do it for json/named too).
+        err = f" (exit {proc.returncode}: {proc.stderr.strip()[-300:]})" if proc.returncode else ""
+        if meta["category"] == "file":
+            return (None if proc.returncode == 0 else f"exit {proc.returncode}: {proc.stderr[-300:]}"), proc.returncode
+        if not output_file.exists():
+            return "output not produced" + err, proc.returncode
+        if meta["category"] == "json":
+            result = _normalize_output(output_file.read_text(encoding="utf-8"),
+                                       runner.get("normalizer", "passthrough"))
+            if result is None:
+                return "no valid JSON in output" + err, proc.returncode
+            if meta["schema"]:
+                errs = validate_against_schema(result, f"{meta['schema']}.schema.json")
+                if errs:
+                    return "schema: " + "; ".join(errs[:3]), proc.returncode
+            return None, proc.returncode
+        # named (e.g. spec.md): an INSUFFICIENT marker must START the file (the spec
+        # author's contract), then required-section presence.
+        text = output_file.read_text(encoding="utf-8")
+        if text.lstrip().upper().startswith("INSUFFICIENT"):
+            return INSUFFICIENT, proc.returncode
+        missing = [s for s in (stage_input.get("required_sections") or []) if s not in text]
+        return (("missing required sections: " + ", ".join(missing)) if missing else None), proc.returncode
+
+    attempts = []
+    for idx, runner in enumerate(runners):
+        command = runner.get("command")
+        if not command:
+            attempts.append({"runner": idx, "error": "no command"})
+            continue
+        timeout = int(runner.get("timeout", 600))
+        runner_user = user_text + output_directive(runner)
+        user_file.write_text(runner_user, encoding="utf-8")
+        problem, exit_code = judge(runner, command, timeout)
+
+        # One error-fed retry of the SAME runner before falling back: rewrite the
+        # user prompt with the validation problem so the model can self-correct.
+        if problem and problem != INSUFFICIENT and meta["category"] in ("json", "named"):
+            user_file.write_text(
+                runner_user + "\n\n## Your previous output was REJECTED\n" + problem +
+                "\nProduce a corrected result.\n", encoding="utf-8")
+            retry_problem, retry_exit = judge(runner, command, timeout)
+            if retry_problem is None:
+                problem, exit_code = None, retry_exit
+
+        if problem == INSUFFICIENT:
+            # An "input too vague" verdict is not LLM-specific — do NOT try a
+            # fallback runner; surface it to the user.
+            if output_file.exists():
+                output_file.unlink()  # don't leave an INSUFFICIENT marker where a spec is expected
+            emit({"ok": False, "role": role, "category": "named", "reason": "insufficient",
+                  "message": "the author reported the input is too vague to proceed", "runner": idx})
+            return
+        if problem is None:
+            emit({"ok": True, "role": role, "category": meta["category"], "runner": idx,
+                  "used": command, "output_file": str(output_file), "attempts": attempts})
+            return
+        attempts.append({"runner": idx, "exit": exit_code, "problem": problem})
+
+    # Every runner failed: for named/json roles, remove any partial output so a
+    # downstream `advance` cannot mistake it for a valid result (n3 hardening).
+    if meta["category"] in ("json", "named") and output_file.exists():
+        output_file.unlink()
+
+    emit({"ok": False, "role": role, "category": meta["category"],
+          "reason": "all_runners_failed", "attempts": attempts})
+    sys.exit(2)
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: migrate-config (pre-3.0.0 → bash runners)
+# ---------------------------------------------------------------------------
+
+def cmd_migrate_config(args) -> None:
+    """Convert a pre-3.0.0 config to the bash-runner shape: replace the removed
+    claude-subagent / codex-adversarial-review runners with the canonical bash
+    defaults (and add the now-required spec_author runner). The driver and llm
+    sections are preserved; only runners are rewritten."""
+    config_path = pathlib.Path(args.config).resolve()
+    cfg = load_json(config_path)
+    legacy = _legacy_runner_roles(cfg)
+    replaced = sorted((cfg.get("runners") or {}).keys())  # ALL roles are replaced wholesale
+    example = load_json(EXAMPLE_PATH)
+    out = pathlib.Path(args.out).resolve() if args.out else config_path
+    # Back up the original (in place only) before overwriting runners wholesale.
+    if not args.out:
+        save_json(out.with_suffix(out.suffix + ".bak"), cfg)
+    cfg["runners"] = example["runners"]
+    save_json(out, cfg)
+    emit({"migrated": True, "config": str(out),
+          "legacy_roles": legacy, "replaced_roles": replaced,
+          "backup": (str(out.with_suffix(out.suffix + ".bak")) if not args.out else None),
+          "warning": "ALL runners were replaced with the 3.0.0 bash defaults (incl. spec_author) — "
+                     "any custom runner commands were dropped (see the .bak). Review and customize."})
+
+
+# ---------------------------------------------------------------------------
 # Help text
 # ---------------------------------------------------------------------------
 
@@ -1139,6 +1506,8 @@ DRIVER CLI
   append-attempt   Log a failed attempt to attempts.md for implementor context
   check-boundary   (TDD) verify a role only touched files it is allowed to
   record-changes   Accumulate pipeline-produced files into changed-manifest.txt
+  run-stage        Execute a role via its configured bash runner (assemble prompt, run, validate)
+  migrate-config   Convert a pre-3.0.0 config (claude-subagent runners) to bash runners
   --version        Print the dev-pipeline version and exit
   --help           Show this message
 
@@ -1231,6 +1600,16 @@ def main() -> None:
     p_rc.add_argument("--run", required=True)
     p_rc.add_argument("--changed", nargs="*", default=[])
 
+    p_rs = sub.add_parser("run-stage")
+    p_rs.add_argument("--run", required=True)
+    p_rs.add_argument("--role", required=True,
+                      choices=list(ROLE_META.keys()))
+    p_rs.add_argument("--stage-input", dest="stage_input", default="stage-input.json")
+
+    p_mc = sub.add_parser("migrate-config")
+    p_mc.add_argument("--config", required=True)
+    p_mc.add_argument("--out", default="")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -1244,6 +1623,8 @@ def main() -> None:
         "append-attempt":   cmd_append_attempt,
         "check-boundary":   cmd_check_boundary,
         "record-changes":   cmd_record_changes,
+        "run-stage":        cmd_run_stage,
+        "migrate-config":   cmd_migrate_config,
     }
 
     if args.cmd not in dispatch:

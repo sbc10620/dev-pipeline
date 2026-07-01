@@ -1124,7 +1124,7 @@ class TestAdvanceEchoes(PipelineTestCase):
         self.assertEqual(j["next_state"], "implementation")
         self.assertFalse(j["tdd_mode"])
         self.assertTrue(j["design_instruction"])
-        self.assertEqual(j["implementor_runners"][0]["agent"], "dp-implementor")
+        self.assertIn("claude", j["implementor_runners"][0]["command"])  # bash runner
         # The implementor build-checks before handoff → it gets the tester's build cmd.
         self.assertEqual(j["build_instruction"], "make build")
         self.assertNotIn("test_paths", j)  # legacy: no test boundary
@@ -1132,7 +1132,7 @@ class TestAdvanceEchoes(PipelineTestCase):
         r2 = p.advance()  # implementation -> test
         self.assertEqual(r2.json["next_state"], "test")
         self.assertFalse(r2.json["tdd_mode"])
-        self.assertEqual(r2.json["tester_runners"][0]["agent"], "dp-tester")
+        self.assertIn("claude", r2.json["tester_runners"][0]["command"])
 
         p.write_test_result(status="pass")
         r3 = p.advance()  # test -> review
@@ -1150,20 +1150,19 @@ class TestAdvanceEchoes(PipelineTestCase):
         r1 = p.advance()  # init -> test_implementation
         self.assertEqual(r1.json["next_state"], "test_implementation")
         self.assertTrue(r1.json["tdd_mode"])
-        self.assertEqual(r1.json["test_implementor_runners"][0]["agent"],
-                         "dp-test-implementor")
+        self.assertIn("claude", r1.json["test_implementor_runners"][0]["command"])
 
         r2 = p.advance()  # test_implementation -> red_test (red phase)
         self.assertEqual(r2.json["next_state"], "red_test")
         self.assertTrue(r2.json["tdd_mode"])
-        self.assertEqual(r2.json["tester_runners"][0]["agent"], "dp-tester")
+        self.assertIn("claude", r2.json["tester_runners"][0]["command"])
 
         p.write_red_test_result(status="fail", failure_type="code")
         r3 = p.advance()  # red confirmed -> implementation
         self.assertEqual(r3.json["next_state"], "implementation")
         self.assertTrue(r3.json["tdd_mode"])
         self.assertTrue(r3.json["design_instruction"])
-        self.assertEqual(r3.json["implementor_runners"][0]["agent"], "dp-implementor")
+        self.assertIn("claude", r3.json["implementor_runners"][0]["command"])
         self.assertEqual(r3.json["build_instruction"], "no build step")
         self.assertEqual(r3.json["test_paths"], ["tests/**"])  # tdd echoes the boundary
 
@@ -1180,6 +1179,264 @@ class TestAdvanceEchoes(PipelineTestCase):
         r1 = p.advance()
         self.assertEqual(r1.json["next_state"], "implementation")  # legacy path
         self.assertFalse(r1.json["tdd_mode"])
+
+
+class TestStageInputWiring(PipelineTestCase):
+    """init/advance persist a stage-input.json so `driver run-stage` can consume
+    the same context the SKILL echo carries (additive; legacy flow unaffected)."""
+
+    def test_init_writes_spec_stage_input(self):
+        p = self.started(tdd_mode=False)
+        si = json.loads((p.run_dir / "stage-input.json").read_text(encoding="utf-8"))
+        self.assertEqual(si["role"], "spec_author")
+        self.assertTrue(si["output_file"].endswith("spec.md"))
+        self.assertIn("## Requirements", si["required_sections"])
+        self.assertEqual(si["inputs"]["tdd_mode"], False)
+
+    def test_advance_writes_tester_stage_input(self):
+        p = self.started(tdd_mode=False)
+        p.advance()  # init -> implementation (no iter_dir echoed yet)
+        p.advance()  # implementation -> test  (tester; iter_dir echoed)
+        si = json.loads((p.run_dir / "iterations" / "0" / "stage-input.json").read_text(encoding="utf-8"))
+        self.assertEqual(si["role"], "tester")
+        self.assertTrue(si["output_file"].endswith("test-result.json"))
+        self.assertIn("build_instruction", si["inputs"])
+        self.assertNotIn("directive", si["inputs"])  # control keys excluded
+        self.assertNotIn("tester_runners", si["inputs"])  # M1: runner arrays never reach the prompt
+
+
+class TestRunStageIntegration(PipelineTestCase):
+    """The advance/init → run-stage contract, with dummy runners (no LLM):
+    the stage-input.json the DRIVER writes must be consumable by run-stage."""
+
+    def test_spec_author_from_driver_written_stage_input(self):
+        cfg = valid_config(tdd_mode=False)
+        cfg["runners"]["spec_author"] = [{"type": "bash",
+            "command": "printf '# Spec\\n## Requirements\\n- r\\n## Acceptance Criteria\\n- a\\n' > {output_file}"}]
+        p = Pipeline(cfg)
+        self._pipelines.append(p)
+        init_json = p.init(tdd=False)
+        self.assertEqual(init_json["directive"], "run_spec_author")
+        # run-stage consumes the stage-input.json the driver wrote at run_dir.
+        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "spec_author",
+                       "--stage-input", str(p.run_dir / "stage-input.json"))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        self.assertTrue((p.run_dir / "spec.md").exists())
+        # advance now proceeds because spec.md exists.
+        adv = p.advance()
+        self.assertEqual(adv.json["next_state"], "implementation")
+
+    def test_role_mismatch_guard(self):
+        cfg = valid_config(tdd_mode=False)
+        cfg["runners"]["spec_author"] = [{"type": "bash", "command": "true"}]
+        p = Pipeline(cfg)
+        self._pipelines.append(p)
+        p.init(tdd=False)
+        # stage-input role is spec_author; calling --role implementor must fail loudly.
+        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "implementor",
+                       "--stage-input", str(p.run_dir / "stage-input.json"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("role", r.stderr)
+
+    def test_legacy_snapshot_runner_guard(self):
+        cfg = valid_config(tdd_mode=False)
+        p = Pipeline(cfg)
+        self._pipelines.append(p)
+        p.init(tdd=False)
+        # Simulate a pre-3.0.0 snapshot: a runner with no command.
+        snap = json.loads((p.run_dir / "config.snapshot.json").read_text(encoding="utf-8"))
+        snap["runners"]["spec_author"] = [{"type": "claude-subagent", "agent": "dp-spec-author"}]
+        (p.run_dir / "config.snapshot.json").write_text(json.dumps(snap), encoding="utf-8")
+        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "spec_author",
+                       "--stage-input", str(p.run_dir / "stage-input.json"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("pre-3.0.0", r.stderr)
+
+
+class TestRunStage(unittest.TestCase):
+    """run-stage: prompt assembly + bash-runner execution + per-category checks.
+    Uses dummy shell runners (no LLM) so the behavior is deterministic."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.run_dir = pathlib.Path(self._tmp.name)
+        self.proj = self.run_dir / "proj"
+        self.proj.mkdir()
+        (self.run_dir / "state.json").write_text(json.dumps({
+            "state": "test", "project_dir": str(self.proj), "tdd_mode": False,
+            "iterations": {"test": 0, "review": 0, "test_implementation": 0},
+        }), encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _cfg(self, role, runners):
+        (self.run_dir / "config.snapshot.json").write_text(
+            json.dumps({"runners": {role: runners}}), encoding="utf-8")
+
+    def _si(self, role, **extra):
+        si = {"role": role, "work_dir": str(self.run_dir / "w"),
+              "project_root": str(self.proj), "inputs": {"design_instruction": "x"}}
+        si.update(extra)
+        p = self.run_dir / "si.json"
+        p.write_text(json.dumps(si), encoding="utf-8")
+        return p
+
+    def _run(self, role, si_path):
+        return run_driver("run-stage", "--run", str(self.run_dir),
+                          "--role", role, "--stage-input", str(si_path))
+
+    def test_file_role_fallback(self):
+        # 1st runner fails (exit 1), 2nd writes a file and succeeds.
+        self._cfg("implementor", [
+            {"type": "bash", "command": "exit 1"},
+            {"type": "bash", "command": "echo x > {project_root}/made.py"},
+        ])
+        r = self._run("implementor", self._si("implementor"))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        self.assertEqual(r.json["runner"], 1)
+        self.assertTrue((self.proj / "made.py").exists())
+
+    def test_json_role_invalid_then_valid(self):
+        good = self.run_dir / "good.json"
+        good.write_text(json.dumps(test_result(status="pass")), encoding="utf-8")
+        self._cfg("tester", [
+            {"type": "bash", "command": "echo NOT_JSON > {output_file}"},
+            {"type": "bash", "command": f"cp {good} " + "{output_file}"},
+        ])
+        out = self.run_dir / "tr.json"
+        r = self._run("tester", self._si("tester", output_file=str(out)))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        self.assertEqual(r.json["runner"], 1)
+
+    def test_json_role_error_fed_retry(self):
+        # Same runner: writes invalid JSON first, then valid once the prompt shows
+        # the REJECTED feedback (the driver's one error-fed retry).
+        good = self.run_dir / "good.json"
+        good.write_text(json.dumps(test_result(status="pass")), encoding="utf-8")
+        self._cfg("tester", [
+            {"type": "bash",
+             "command": f"if grep -q REJECTED {{user_file}}; then cp {good} {{output_file}}; "
+                        "else echo BAD > {output_file}; fi"},
+        ])
+        out = self.run_dir / "tr.json"
+        r = self._run("tester", self._si("tester", output_file=str(out)))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        self.assertEqual(r.json["runner"], 0)   # same runner, recovered on retry
+        self.assertEqual(r.json["attempts"], [])  # no fallback needed
+
+    def test_json_role_schema_invalid_fails(self):
+        self._cfg("tester", [
+            {"type": "bash", "command": "echo '{\"status\":\"bogus\"}' > {output_file}"},
+        ])
+        out = self.run_dir / "tr.json"
+        r = self._run("tester", self._si("tester", output_file=str(out)))
+        # run-stage emits JSON then exits non-zero on failure (run_driver only
+        # parses .json on a 0 exit), so parse stdout here.
+        self.assertNotEqual(r.returncode, 0)
+        j = json.loads(r.stdout)
+        self.assertFalse(j["ok"])
+        self.assertEqual(j["reason"], "all_runners_failed")
+
+    def test_named_role_sections_present(self):
+        self._cfg("spec_author", [
+            {"type": "bash",
+             "command": "printf '## Requirements\\n## Acceptance Criteria\\n' > {output_file}"},
+        ])
+        out = self.proj / "spec.md"
+        r = self._run("spec_author", self._si(
+            "spec_author", output_file=str(out),
+            required_sections=["## Requirements", "## Acceptance Criteria"]))
+        self.assertTrue(r.json["ok"])
+
+    def test_named_role_missing_section_fails(self):
+        self._cfg("spec_author", [
+            {"type": "bash", "command": "printf '## Requirements\\n' > {output_file}"},
+        ])
+        out = self.proj / "spec.md"
+        r = self._run("spec_author", self._si(
+            "spec_author", output_file=str(out),
+            required_sections=["## Requirements", "## Acceptance Criteria"]))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(json.loads(r.stdout)["ok"])
+
+    def test_named_role_word_insufficient_is_not_a_refusal(self):
+        # A valid spec that merely contains the word "insufficient" must NOT be
+        # treated as an INSUFFICIENT refusal (the marker must START the file).
+        self._cfg("spec_author", [
+            {"type": "bash",
+             "command": "printf '# Spec\\n## Requirements\\nCurrent validation is insufficient.\\n"
+                        "## Acceptance Criteria\\n- ok\\n' > {output_file}"},
+        ])
+        out = self.proj / "spec.md"
+        r = self._run("spec_author", self._si(
+            "spec_author", output_file=str(out),
+            required_sections=["## Requirements", "## Acceptance Criteria"]))
+        self.assertTrue(r.json["ok"])
+
+    def test_named_role_insufficient_marker(self):
+        self._cfg("spec_author", [
+            {"type": "bash", "command": "printf 'INSUFFICIENT: too vague\\n' > {output_file}"},
+        ])
+        out = self.proj / "spec.md"
+        r = self._run("spec_author", self._si(
+            "spec_author", output_file=str(out), required_sections=["## Requirements"]))
+        self.assertFalse(r.json["ok"])
+        self.assertEqual(r.json["reason"], "insufficient")
+
+    def test_empty_runners_errors(self):
+        self._cfg("tester", [])
+        r = self._run("tester", self._si("tester", output_file=str(self.run_dir / "o.json")))
+        self.assertNotEqual(r.returncode, 0)
+
+
+class TestConfigMigration(unittest.TestCase):
+    """3.0.0: validate-config rejects removed runner types with a migration hint;
+    migrate-config converts a pre-3.0.0 config to bash runners."""
+
+    def _write(self, cfg):
+        self._tmp = tempfile.TemporaryDirectory()
+        p = pathlib.Path(self._tmp.name) / "config.json"
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+        return p
+
+    def test_validate_rejects_legacy_runner(self):
+        cfg = valid_config()
+        cfg["runners"]["implementor"] = [{"type": "claude-subagent", "agent": "dp-implementor"}]
+        r = run_driver("validate-config", "--config", str(self._write(cfg)))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("3.0.0", r.stderr)
+        self.assertIn("migrate-config", r.stderr)
+
+    def test_validate_rejects_unknown_placeholder(self):
+        cfg = valid_config()
+        cfg["runners"]["tester"] = [{"type": "bash", "command": "claude -p {spec_path}"}]
+        r = run_driver("validate-config", "--config", str(self._write(cfg)))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("spec_path", r.stderr)
+
+    def test_migrate_converts_to_bash(self):
+        cfg = valid_config()
+        cfg["runners"] = {
+            "implementor": [{"type": "claude-subagent", "agent": "dp-implementor"}],
+            "test_implementor": [{"type": "claude-subagent", "agent": "dp-test-implementor"}],
+            "tester": [{"type": "claude-subagent", "agent": "dp-tester"}],
+            "reviewer": [{"type": "codex-adversarial-review"}],
+        }
+        p = self._write(cfg)
+        r = run_driver("migrate-config", "--config", str(p))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["migrated"])
+        migrated = json.loads(p.read_text(encoding="utf-8"))
+        self.assertIn("spec_author", migrated["runners"])
+        impl = migrated["runners"]["implementor"][0]
+        self.assertEqual(impl["type"], "bash")
+        self.assertNotIn("agent", impl)
+        self.assertIn("claude", impl["command"])
 
 
 if __name__ == "__main__":

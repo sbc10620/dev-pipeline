@@ -52,31 +52,31 @@
   _Orchestrator (main session) model: <model executing this skill>._
 
   ### init state
-  - Runner/method: main session (driver init + spec.md authored directly)
+  - Runner/method: spec_author runner (driver run-stage)
   - <issues, or "No issues">
 
   ### test_implementation state   (TDD only)
-  - Runner/method: <e.g. claude-subagent (dp-test-implementor)>
+  - Runner/method: <e.g. bash runner (config.runners.test_implementor)>
   - <issues across all iterations, or "No issues">
 
   ### red_test state   (TDD only)
-  - Runner/method: <e.g. claude-subagent (dp-tester)>
+  - Runner/method: <e.g. bash runner (config.runners.tester)>
   - <issues, e.g. RED not confirmed and re-authoring, or "No issues">
 
   ### implementation state
-  - Runner/method: <e.g. claude-subagent (dp-implementor) | bash (<command>)>
+  - Runner/method: <e.g. bash runner (config.runners.implementor)>
   - <issues, or "No issues">
 
   ### test state
-  - Runner/method: <e.g. claude-subagent (dp-tester)>
+  - Runner/method: <e.g. bash runner (config.runners.tester)>
   - <issues, or "No issues">
 
   ### review state
-  - Runner/method: <e.g. codex-adversarial-review | claude-subagent (dp-reviewer) fallback>
+  - Runner/method: <e.g. bash runner (config.runners.reviewer): codex then claude fallback>
   - <issues, or "No issues">
   ```
 
-  Fill each `Runner/method` with the concrete agent/command/codex path actually used; note multi-iteration states. Be honest — if the workflow was not followed precisely (an advance out of order, a skipped validation, a boundary re-dispatch), note it.
+  Fill each `Runner/method` with the concrete agent/command/codex path actually used; note multi-iteration states. Be honest — if the workflow was not followed precisely (an advance out of order, a skipped validation, a boundary re-run), note it.
 
 - [Step 4] **Self-evolution** — only if the echoed `run_self_evolution` is true.
   - Use the retrospective findings as input. Identify which agent `.md` files (or SKILL.md / its `states/*.md`) need updating.
