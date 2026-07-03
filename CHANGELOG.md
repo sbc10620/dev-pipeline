@@ -11,37 +11,41 @@ The version is defined in one place — `__version__` in
 
 ## [4.0.0] - 2026-07-03
 
-Make the install layout **provider-neutral**. The role prompts are no longer
-Claude Code subagents (since 3.0.0 they are just LLM-agnostic prose the driver
-assembles), so they move inside the skill, and the whole plugin is installed
-into a `.agents/` tree that is exposed to Claude Code through a `.claude/`
-symlink. **Breaking** — existing installs must be reinstalled (`bash install.sh
-<project-dir>`).
+Make the install layout **provider-neutral and multi-host**. The role prompts
+are no longer Claude Code subagents (since 3.0.0 they are just LLM-agnostic prose
+the driver assembles), so they move inside the skill, and the skill installs into
+the **open Agent Skills standard** location `.agents/skills/dev-pipeline/` — read
+natively by Codex, Gemini CLI, Cursor, Kiro, OpenCode and others. Hosts that
+don't read that standard yet get their own entry point. **Breaking** — existing
+installs must be reinstalled (`bash install.sh <project-dir>`).
 
 ### Changed
 - **Source layout**: the `claude/` directory is gone. The skill lives at
   `agents/skills/dev-pipeline/`, and the role prompts move from `claude/agents/`
   into the skill's own `agents/` subdir (`agents/skills/dev-pipeline/agents/dp-*.md`).
-- **Install layout**: `install.sh` installs into `<project>/.agents/skills/dev-pipeline/`
-  (prompts under `agents/`) and creates a `.claude/skills/dev-pipeline` symlink so
-  Claude Code discovers the skill. `driver.role_prompt_path` now resolves prompts
-  from `<skill_dir>/agents/` (paths are lexical, so it works via the symlink too).
-- **Committing the install**: stage the real `.agents/skills/dev-pipeline/` tree
-  **and** the `.claude/skills/dev-pipeline` symlink — `git add` through the symlink
-  path would stage only the link, not the files. The self-evolution commit in
-  `done.md` now targets the real `.agents/` paths.
+- **Install layout**: `install.sh` installs the canonical skill into
+  `<project>/.agents/skills/dev-pipeline/` (prompts under `agents/`).
+  `driver.role_prompt_path` resolves prompts from `<skill_dir>/agents/`, so every
+  installed copy is self-contained.
+- **Per-host entry points**:
+  - **Claude Code** — a **real copy** at `.claude/skills/dev-pipeline/`. Claude Code
+    does not read `.agents/skills/` yet (anthropics/claude-code#31005) and won't
+    follow a symlinked skill directory (#14836), so a copy is required, not a symlink.
+  - **Cline** — a thin pointer at `.clinerules/workflows/dev-pipeline.md` (slash
+    `/dev-pipeline.md`) that reads and follows `.agents/skills/dev-pipeline/SKILL.md`.
+  - **Codex / Gemini / Cursor / …** — no wiring needed; they discover
+    `.agents/skills/` directly.
+- **Committing the install**: stage `.agents/skills/dev-pipeline/`,
+  `.claude/skills/dev-pipeline/`, and `.clinerules/workflows/dev-pipeline.md`.
+  `.agents/` is the single source of truth; the self-evolution commit in `done.md`
+  edits `.agents/` and mirrors the change into the `.claude/` copy.
 
 ### Fixed
 - Upgrading over a pre-4.0.0 install: `install.sh` replaces the old real
-  `.claude/skills/dev-pipeline` directory with the symlink (instead of nesting a
-  symlink inside it) and removes the stale `.claude/agents/dp-*.md` prompts.
+  `.claude/skills/dev-pipeline` directory (or a 4.0.0-dev symlink) with the real
+  copy and removes the stale `.claude/agents/dp-*.md` prompts.
 - The driver now warns on stderr when a role's prose file is missing instead of
   silently running with a stub system prompt.
-
-### Notes
-- The checked-in `.claude/skills/dev-pipeline` symlink relies on git symlink
-  support; on Windows or with `core.symlinks=false` it materializes as a plain
-  text file — re-run `install.sh` there.
 
 ## [3.0.0] - 2026-06-30
 

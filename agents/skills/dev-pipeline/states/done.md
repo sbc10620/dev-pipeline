@@ -81,11 +81,13 @@
 - [Step 4] **Self-evolution** — only if the echoed `run_self_evolution` is true.
   - Use the retrospective findings as input. Identify which agent `.md` files (or SKILL.md / its `states/*.md`) need updating.
   - If `/advisor` is active, consult it first; otherwise apply only clearly necessary changes.
-  - Editable files (the only ones self-evolution may touch): `.agents/skills/dev-pipeline/agents/dp-spec-author.md`, `.agents/skills/dev-pipeline/agents/dp-implementor.md`, `.agents/skills/dev-pipeline/agents/dp-test-implementor.md`, `.agents/skills/dev-pipeline/agents/dp-tester.md`, `.agents/skills/dev-pipeline/agents/dp-reviewer.md`, `.agents/skills/dev-pipeline/SKILL.md`, and `.agents/skills/dev-pipeline/states/*.md`.
+  - Editable files (the only ones self-evolution may touch), in the **canonical** `.agents/` tree: `.agents/skills/dev-pipeline/agents/dp-spec-author.md`, `.agents/skills/dev-pipeline/agents/dp-implementor.md`, `.agents/skills/dev-pipeline/agents/dp-test-implementor.md`, `.agents/skills/dev-pipeline/agents/dp-tester.md`, `.agents/skills/dev-pipeline/agents/dp-reviewer.md`, `.agents/skills/dev-pipeline/SKILL.md`, and `.agents/skills/dev-pipeline/states/*.md`.
+  - **Keep the Claude copy in sync (avoid drift):** `.claude/skills/dev-pipeline/` is a real copy Claude Code loads from (it does not read `.agents/skills/` yet). Apply each change to the `.agents/` file **and** mirror it into the matching `.claude/skills/dev-pipeline/…` path (or re-run `install.sh`). Codex/Cursor/etc. read `.agents/` directly, so they need no mirror.
   - Notify the user that source-repo files are NOT updated.
-  - **If any changed, commit them separately** (git repo). Stage the **real `.agents/` paths**, not the `.claude/` symlink (adding through the symlink would stage the link, not the files):
+  - **If any changed, commit them separately** (git repo). Stage the real `.agents/` paths and their `.claude/` mirror:
     ```bash
-    git add .agents/skills/dev-pipeline/agents/dp-*.md .agents/skills/dev-pipeline/SKILL.md .agents/skills/dev-pipeline/states/*.md
+    git add .agents/skills/dev-pipeline/agents/dp-*.md .agents/skills/dev-pipeline/SKILL.md .agents/skills/dev-pipeline/states/*.md \
+            .claude/skills/dev-pipeline/agents/dp-*.md .claude/skills/dev-pipeline/SKILL.md .claude/skills/dev-pipeline/states/*.md
     git commit -m "dev-pipeline self-evolution: <one-line summary>"
     ```
     Do NOT push. Skip if nothing changed.

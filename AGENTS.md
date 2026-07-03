@@ -45,7 +45,7 @@ python3 agents/dev-pipeline-tools/driver.py --help
 
 ## Architecture
 
-This repo is a **provider-neutral agent plugin** — it installs a skill (with its role prompts) into a target project's `.agents/` directory and symlinks it into `.claude/` so Claude Code discovers it.
+This repo is a **provider-neutral agent plugin** — it installs a skill (with its role prompts) into a target project's `.agents/skills/` directory (the open Agent Skills standard, read natively by Codex, Gemini CLI, Cursor, …) and adds per-host entry points for the hosts that don't read that standard yet (a real copy under `.claude/skills/` for Claude Code, a workflow pointer under `.clinerules/workflows/` for Cline).
 
 ### Execution model
 
@@ -136,7 +136,7 @@ After editing, skim a sibling file side-by-side and confirm headings, step forma
 | `agents/skills/dev-pipeline/agents/dp-reviewer.md` | Reviewer runner — fully read-only (reviews test code too, never runs it); codex primary, claude fallback per config order |
 | `agents/skills/dev-pipeline/SKILL.md` | Thin orchestrator — Global Rules, Step 0, Run Context, state→file index |
 | `agents/skills/dev-pipeline/states/<state>.md` | Per-state procedure (progressive disclosure); SKILL reads `states/<next_state>.md` after each `advance` |
-| `install.sh` | Installs the skill (incl. `states/` + role prompts under `agents/`) + `driver.py` + `schemas/` + `config.example.json` into `<project>/.agents/skills/dev-pipeline/`, symlinks it into `.claude/`, and updates .gitignore. Does NOT seed the config — the skill bootstraps it on first run. |
+| `install.sh` | Installs the skill (incl. `states/` + role prompts under `agents/`) + `driver.py` + `schemas/` + `config.example.json` into the canonical `<project>/.agents/skills/dev-pipeline/`, adds a real `.claude/skills/` copy (Claude Code) + a `.clinerules/workflows/` pointer (Cline), and updates .gitignore. Does NOT seed the config — the skill bootstraps it on first run. |
 
 ### Runtime layout (inside target project, not this repo)
 
@@ -204,4 +204,10 @@ python3 -m unittest discover -s agents/dev-pipeline-tools/test -v
 bash install.sh <project-dir>
 ```
 
-Installs into `<project-dir>/.agents/` only (never user-global), then symlinks `.claude/skills/dev-pipeline -> ../../.agents/skills/dev-pipeline` so Claude Code discovers the skill while the real files live in the provider-neutral tree. `install.sh` copies the role prompts (`agents/dp-*.md`), `driver.py`, the `schemas/` directory, and `config.example.json` into `<project-dir>/.agents/skills/dev-pipeline/` so the installed pipeline runs standalone without the source repo present. `driver.py` resolves its schemas, the config template, and the role prompts relative to its own location (`SCHEMA_DIR` / `EXAMPLE_PATH = pathlib.Path(__file__).parent / ...`; `role_prompt_path` looks in `<skill_dir>/agents/`) — these are lexical (`__file__` is not symlink-resolved), so the driver finds them whether reached via `.agents/` or the `.claude/` symlink. The SKILL locates the driver as `<skill_dir>/driver.py`. On upgrade, `install.sh` replaces a pre-4.0.0 real `.claude/skills/dev-pipeline` directory with the symlink and removes stale `.claude/agents/dp-*.md`. `install.sh` does **not** create the config — `driver bootstrap-config` seeds it from the template on the first run.
+Installs once into the **canonical** `<project-dir>/.agents/skills/dev-pipeline/` — the open **Agent Skills** standard directory, read natively by Codex, Gemini CLI, Cursor, Kiro, OpenCode and others (Codex scans `.agents/skills` from cwd up to the repo root). `install.sh` copies the role prompts (`agents/dp-*.md`), `driver.py`, the `schemas/` directory, and `config.example.json` there so the installed pipeline runs standalone without the source repo present. `driver.py` resolves its schemas, the config template, and the role prompts relative to its own location (`SCHEMA_DIR` / `EXAMPLE_PATH = pathlib.Path(__file__).parent / ...`; `role_prompt_path` looks in `<skill_dir>/agents/`), so every copy is self-contained. The SKILL locates the driver as `<skill_dir>/driver.py`.
+
+Two hosts need their own entry point because they do not read `.agents/skills/` yet:
+- **Claude Code** — installed as a **real copy** at `<project-dir>/.claude/skills/dev-pipeline/`. Claude Code does not read `.agents/skills/` (anthropics/claude-code#31005) and its skill discovery does not follow a symlinked skill directory (#14836), so a copy — not a symlink — is required. On upgrade, `install.sh` replaces a prior real dir or 4.0.0-dev symlink at that path and removes stale `.claude/agents/dp-*.md`.
+- **Cline** — a thin slash-workflow pointer at `<project-dir>/.clinerules/workflows/dev-pipeline.md` that tells Cline to read and follow `.agents/skills/dev-pipeline/SKILL.md` (no duplication).
+
+`install.sh` does **not** create the config — `driver bootstrap-config` seeds it from the template on the first run. `.agents/` is the single source of truth; the `.claude/` copy must be kept in sync (self-evolution mirrors edits into it, or re-run `install.sh`).
