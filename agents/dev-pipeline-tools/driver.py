@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "3.0.0"
+__version__ = "4.0.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -1222,9 +1222,8 @@ def role_prompt_path(prompt_name: str) -> "pathlib.Path | None":
     """Locate a role's prose file (the system prompt), source or installed layout."""
     here = pathlib.Path(__file__).parent
     for c in (
-        here / "agents" / f"{prompt_name}.md",                            # co-located (install copies here)
-        here.parent.parent / "agents" / f"{prompt_name}.md",             # installed: .claude/agents
-        here.parent.parent / "claude" / "agents" / f"{prompt_name}.md",  # source repo layout
+        here / "agents" / f"{prompt_name}.md",                                     # installed: co-located in skills/dev-pipeline/agents/ (driver flattened beside SKILL.md)
+        here.parent / "skills" / "dev-pipeline" / "agents" / f"{prompt_name}.md",  # source repo layout: agents/skills/dev-pipeline/agents/ (driver in agents/dev-pipeline-tools/)
     ):
         if c.exists():
             return c
@@ -1248,7 +1247,17 @@ def assemble_prompt(role: str, stage_input: dict) -> "tuple[str, str]":
     directives (where to write output) are appended here, never baked into .md."""
     meta = ROLE_META[role]
     sp = role_prompt_path(meta["prompt"])
-    system = strip_frontmatter(sp.read_text(encoding="utf-8")) if sp else f"You are the {role}."
+    if sp:
+        system = strip_frontmatter(sp.read_text(encoding="utf-8"))
+    else:
+        # No prose file found: the role runs with a stub system prompt. This is a
+        # degraded run (a partial/corrupt install), so make it visible instead of
+        # silently shipping a gutted prompt to the LLM.
+        sys.stderr.write(
+            f"[dev-pipeline] WARNING: prose file '{meta['prompt']}.md' not found; "
+            f"running {role} with a stub system prompt. Re-run install.sh to repair.\n"
+        )
+        system = f"You are the {role}."
 
     inputs = stage_input.get("inputs", {})
     lines = ["## Inputs", ""]
