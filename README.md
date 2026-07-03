@@ -49,7 +49,7 @@ plan.md
 bash /path/to/dev-pipeline/install.sh /path/to/your/project
 ```
 
-This copies the skill (incl. `states/` and the role prompts under `agents/`), `driver.py`, schemas, and the config template into `<project>/.agents/` (local only), then symlinks it into `<project>/.claude/` so Claude Code discovers it. It does NOT create the config — the skill bootstraps `dev-pipeline.config.json` from the template (via `driver bootstrap-config`) into the gitignored `<project>/.dev-pipeline/` directory on the first run (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
+This copies the skill (incl. `states/` and the role prompts under `agents/`), `driver.py`, schemas, and the config template into the canonical `<project>/.agents/skills/dev-pipeline/` (the open Agent Skills standard, read by Codex/Gemini/Cursor/…), plus a real `.claude/skills/` copy for Claude Code and a `.clinerules/workflows/` pointer for Cline. It does NOT create the config — the skill bootstraps `dev-pipeline.config.json` from the template (via `driver bootstrap-config`) into the gitignored `<project>/.dev-pipeline/` directory on the first run (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
 
 ---
 
@@ -134,7 +134,7 @@ In Claude Code, with your project open:
 
 **Prerequisites:**
 - `.dev-pipeline/dev-pipeline.config.json` must be present and valid
-- **Commit the installed dev-pipeline files** (the `.agents/skills/dev-pipeline/` tree and its `.claude/skills/dev-pipeline` symlink) before running. Stage the real `.agents/` paths, not the symlink. They are tracked (not gitignored, so self-evolution can manage their history), and the review uses `working-tree` scope — committing them keeps the reviewer focused on your code instead of dev-pipeline's own tooling.
+- **Commit the installed dev-pipeline files** (the canonical `.agents/skills/dev-pipeline/` tree, the `.claude/skills/dev-pipeline/` copy, and `.clinerules/workflows/dev-pipeline.md`) before running. They are tracked (not gitignored, so self-evolution can manage their history), and the review uses `working-tree` scope — committing them keeps the reviewer focused on your code instead of dev-pipeline's own tooling.
 - Start with a **clean working tree** (no unrelated uncommitted changes — they will be included in the review scope)
 - **Gitignore your build outputs** (compiled binaries, object files, etc.). The review uses `working-tree` scope, so any untracked artifact produced by the test phase would otherwise be reviewed alongside your real changes.
 
@@ -276,23 +276,31 @@ dev-pipeline/
 <project>/
 ├── .dev-pipeline/
 │   └── dev-pipeline.config.json   ← your config (gitignored, not in project root)
-├── .agents/                       ← provider-neutral install tree (real files)
-│   └── skills/
+├── .agents/                       ← canonical install (open Agent Skills standard)
+│   └── skills/                      read natively by Codex, Gemini CLI, Cursor, Kiro, …
 │       └── dev-pipeline/
 │           ├── SKILL.md
 │           ├── states/             ← per-state procedure files (read on demand)
 │           ├── agents/             ← role prompts (dp-spec-author … dp-reviewer)
 │           ├── driver.py           ← installed for standalone operation
 │           ├── config.example.json ← template for driver bootstrap-config
-│           └── schemas/
-│               ├── config.schema.json
-│               ├── test-result.schema.json
-│               ├── review-result.schema.json
-│               └── state.schema.json
-└── .claude/
-    └── skills/
-        └── dev-pipeline            ← symlink to ../../.agents/skills/dev-pipeline
+│           └── schemas/            ← config / test-result / review-result / state
+├── .claude/
+│   └── skills/
+│       └── dev-pipeline/           ← real copy for Claude Code (see note below)
+└── .clinerules/
+    └── workflows/
+        └── dev-pipeline.md         ← Cline slash-workflow pointer → .agents/…/SKILL.md
 ```
+
+> **Why does Claude Code get a copy instead of reading `.agents/skills/`?** Claude
+> Code doesn't read the `.agents/skills/` standard yet
+> ([anthropics/claude-code#31005](https://github.com/anthropics/claude-code/issues/31005))
+> and its skill discovery won't follow a symlinked skill directory
+> ([#14836](https://github.com/anthropics/claude-code/issues/14836)), so the
+> installer mirrors the canonical tree as real files under `.claude/skills/`.
+> Codex and other Agent-Skills hosts need no copy. When Claude Code adds
+> `.agents/skills/` support, the copy can go away.
 
 ---
 

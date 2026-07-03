@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# dev-pipeline installer — copies all components into the target project's
-# provider-neutral .agents/ and exposes them to Claude Code via a .claude/ symlink.
+# dev-pipeline installer — installs the skill into the provider-neutral
+# .agents/skills/ tree (the open Agent Skills standard) and wires up each host
+# that needs its own entry point (Claude Code, Cline).
 
 set -euo pipefail
 
@@ -10,23 +11,25 @@ usage() {
   cat <<EOF
 Usage: bash install.sh <project-dir>
 
-Installs dev-pipeline into <project-dir>/.agents/ (local only, not user-global)
-and symlinks it into <project-dir>/.claude/ so Claude Code discovers the skill.
+Installs dev-pipeline once and wires it up for multiple agent hosts.
 
-What gets installed (under .agents/skills/dev-pipeline/):
-  SKILL.md
-  states/                (per-state orchestration files)
-  agents/dp-spec-author.md
-  agents/dp-implementor.md
-  agents/dp-test-implementor.md
-  agents/dp-tester.md
-  agents/dp-reviewer.md
-  driver.py
-  schemas/               (JSON schemas)
-  config.example.json    (config template)
+Canonical install (the open Agent Skills standard — read natively by Codex,
+Gemini CLI, Cursor, Kiro, OpenCode, OpenClaw, …):
+  .agents/skills/dev-pipeline/SKILL.md
+  .agents/skills/dev-pipeline/states/                (per-state orchestration files)
+  .agents/skills/dev-pipeline/agents/dp-*.md         (LLM-agnostic role prompts)
+  .agents/skills/dev-pipeline/driver.py
+  .agents/skills/dev-pipeline/schemas/               (JSON schemas)
+  .agents/skills/dev-pipeline/config.example.json    (config template)
 
-Plus a symlink so Claude Code finds the skill:
-  .claude/skills/dev-pipeline -> ../../.agents/skills/dev-pipeline
+Per-host entry points (added because these hosts don't read .agents/skills yet):
+  .claude/skills/dev-pipeline/          real copy — Claude Code doesn't read
+                                        .agents/skills (anthropics/claude-code#31005)
+                                        and won't follow a symlinked skill dir (#14836)
+  .clinerules/workflows/dev-pipeline.md thin pointer — Cline slash-workflow
+
+Codex (and other Agent-Skills hosts) need no extra wiring — they discover
+.agents/skills/ directly, and the root AGENTS.md is already loaded as guidance.
 
 This installer does NOT create .dev-pipeline/dev-pipeline.config.json. The skill
 bootstraps it from the template on the first /dev-pipeline run (driver
@@ -34,10 +37,9 @@ bootstrap-config) and stops so you can fill in the tester instructions. The
 config lives inside .dev-pipeline/ (gitignored) so it never clutters the project
 root or gets confused with the project's own source files.
 
-The installed .agents/ files are NOT gitignored (their history is tracked, e.g.
-for self-evolution). Commit them (and the .claude symlink) before running
-/dev-pipeline so the reviewer does not mistake them for your changes (the
-install output explains how).
+The installed files are NOT gitignored (their history is tracked, e.g. for
+self-evolution). Commit them before running /dev-pipeline so the reviewer does
+not mistake them for your changes (the install output explains how).
 
 After the first /dev-pipeline run, edit <project-dir>/.dev-pipeline/dev-pipeline.config.json and fill in:
   llm.tester.build_instruction
@@ -126,20 +128,19 @@ fi
 cp "${CONFIG_EXAMPLE}" "${SKILLS_DST}/config.example.json"
 echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/config.example.json"
 
-# Symlink the skill into .claude/ so Claude Code discovers it, while the real
-# files live in the provider-neutral .agents/ tree. A plain `ln -sfn` would nest
-# a symlink INSIDE a pre-existing real directory (leaving a stale install live),
-# so clear the destination explicitly first — mirroring the driver's own
-# `latest`-symlink guard in cmd_init.
+# --- Claude Code entry point: a REAL copy under .claude/skills/ ---
+# Claude Code does not read .agents/skills yet (anthropics/claude-code#31005) and
+# its skill discovery does not follow a symlinked skill directory (#14836), so we
+# mirror the canonical tree as real files. Replace any prior install at the
+# destination first (a pre-4.0.0 real dir, or a 4.0.0-dev symlink) so we never
+# nest inside it or leave stale files behind.
+CLAUDE_SKILL="${CLAUDE_DIR}/skills/dev-pipeline"
 mkdir -p "${CLAUDE_DIR}/skills"
-LINK="${CLAUDE_DIR}/skills/dev-pipeline"
-if [[ -L "$LINK" ]]; then
-  rm -f "$LINK"
-elif [[ -e "$LINK" ]]; then
-  rm -rf "$LINK"                       # old real-directory install being upgraded
+if [[ -L "$CLAUDE_SKILL" || -e "$CLAUDE_SKILL" ]]; then
+  rm -rf "$CLAUDE_SKILL"
 fi
-ln -s "../../.agents/skills/dev-pipeline" "$LINK"
-echo "[dev-pipeline] Linked: .claude/skills/dev-pipeline -> ../../.agents/skills/dev-pipeline"
+cp -R "${SKILLS_DST}" "$CLAUDE_SKILL"
+echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/ (real copy for Claude Code)"
 
 # Remove stale prompts from pre-4.0.0 installs (they used to live in .claude/agents/).
 # They are inert now (the driver only looks inside the skill) but would linger as
@@ -151,6 +152,23 @@ if [[ -d "${CLAUDE_DIR}/agents" ]]; then
   rmdir --ignore-fail-on-non-empty "${CLAUDE_DIR}/agents" 2>/dev/null || true
   echo "[dev-pipeline] Cleaned up stale pre-4.0.0 prompts from .claude/agents/ (if any)"
 fi
+
+# --- Cline entry point: a thin slash-workflow pointer ---
+# Cline discovers /-workflows from .clinerules/workflows/*.md. Rather than
+# duplicating the skill, point Cline at the canonical .agents/ copy so there is
+# no drift.
+CLINE_WF_DIR="${PROJECT_DIR}/.clinerules/workflows"
+mkdir -p "${CLINE_WF_DIR}"
+cat > "${CLINE_WF_DIR}/dev-pipeline.md" <<'EOF'
+# dev-pipeline
+
+Run the dev-pipeline orchestrator: read `.agents/skills/dev-pipeline/SKILL.md`
+and follow its instructions exactly, treating any following text as the
+arguments (e.g. `--plan plan.md [--tdd | --no-tdd]`).
+
+Arguments: $ARGUMENTS
+EOF
+echo "[dev-pipeline] Wrote: .clinerules/workflows/dev-pipeline.md (Cline slash-workflow pointer)"
 
 # Gitignore the runtime directory only.
 # The installed machinery under .agents/ is intentionally NOT gitignored: it is
@@ -177,15 +195,16 @@ echo "[dev-pipeline] Installation complete (version ${DP_VERSION})."
 echo "  Check the installed version anytime with:"
 echo "    python3 .claude/skills/dev-pipeline/driver.py --version"
 echo ""
+echo "  Codex, Gemini CLI, Cursor and other Agent-Skills hosts pick up the skill"
+echo "  from .agents/skills/ automatically. Cline sees it as the /dev-pipeline.md"
+echo "  workflow. Claude Code uses the real copy under .claude/skills/."
+echo ""
 echo "IMPORTANT: Commit the installed dev-pipeline files BEFORE running /dev-pipeline."
 echo "  The review step uses working-tree scope, so any uncommitted/untracked file"
-echo "  is treated as part of your change. Commit BOTH the real .agents/ tree and the"
-echo "  .claude symlink — 'git add .claude/skills/dev-pipeline/' would stage only the"
-echo "  symlink object, not the real files:"
-echo "    git add .agents/skills/dev-pipeline/ .claude/skills/dev-pipeline"
+echo "  is treated as part of your change. Committing the installed files keeps the"
+echo "  reviewer focused on your code, not on dev-pipeline's own tooling:"
+echo "    git add .agents/skills/dev-pipeline/ .claude/skills/dev-pipeline/ .clinerules/workflows/dev-pipeline.md"
 echo "    git commit -m \"Add dev-pipeline (skill + prompts)\""
-echo "  (Note: the checked-in symlink relies on git symlink support; on Windows or"
-echo "   with core.symlinks=false it becomes a plain text file — re-run install.sh there.)"
 echo ""
 echo "Next steps:"
 echo "  1. Write your plan.md"
