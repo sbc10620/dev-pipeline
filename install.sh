@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# dev-pipeline installer — copies all components into the target project's local .claude/
+# dev-pipeline installer — copies all components into the target project's
+# provider-neutral .agents/ and exposes them to Claude Code via a .claude/ symlink.
 
 set -euo pipefail
 
@@ -9,18 +10,23 @@ usage() {
   cat <<EOF
 Usage: bash install.sh <project-dir>
 
-Installs dev-pipeline into <project-dir>/.claude/ (local only, not user-global).
+Installs dev-pipeline into <project-dir>/.agents/ (local only, not user-global)
+and symlinks it into <project-dir>/.claude/ so Claude Code discovers the skill.
 
-What gets installed:
-  .claude/agents/dp-implementor.md
-  .claude/agents/dp-test-implementor.md
-  .claude/agents/dp-tester.md
-  .claude/agents/dp-reviewer.md
-  .claude/skills/dev-pipeline/SKILL.md
-  .claude/skills/dev-pipeline/states/  (per-state orchestration files)
-  .claude/skills/dev-pipeline/driver.py
-  .claude/skills/dev-pipeline/schemas/  (JSON schemas)
-  .claude/skills/dev-pipeline/config.example.json  (config template)
+What gets installed (under .agents/skills/dev-pipeline/):
+  SKILL.md
+  states/                (per-state orchestration files)
+  agents/dp-spec-author.md
+  agents/dp-implementor.md
+  agents/dp-test-implementor.md
+  agents/dp-tester.md
+  agents/dp-reviewer.md
+  driver.py
+  schemas/               (JSON schemas)
+  config.example.json    (config template)
+
+Plus a symlink so Claude Code finds the skill:
+  .claude/skills/dev-pipeline -> ../../.agents/skills/dev-pipeline
 
 This installer does NOT create .dev-pipeline/dev-pipeline.config.json. The skill
 bootstraps it from the template on the first /dev-pipeline run (driver
@@ -28,9 +34,10 @@ bootstrap-config) and stops so you can fill in the tester instructions. The
 config lives inside .dev-pipeline/ (gitignored) so it never clutters the project
 root or gets confused with the project's own source files.
 
-The installed .claude/ files are NOT gitignored (their history is tracked, e.g.
-for self-evolution). Commit them before running /dev-pipeline so the reviewer
-does not mistake them for your changes (the install output explains how).
+The installed .agents/ files are NOT gitignored (their history is tracked, e.g.
+for self-evolution). Commit them (and the .claude symlink) before running
+/dev-pipeline so the reviewer does not mistake them for your changes (the
+install output explains how).
 
 After the first /dev-pipeline run, edit <project-dir>/.dev-pipeline/dev-pipeline.config.json and fill in:
   llm.tester.build_instruction
@@ -46,10 +53,11 @@ fi
 
 PROJECT_DIR="$(cd "$1" && pwd)"
 CLAUDE_DIR="${PROJECT_DIR}/.claude"
-AGENTS_DST="${CLAUDE_DIR}/agents"
-SKILLS_DST="${CLAUDE_DIR}/skills/dev-pipeline"
-SOURCE_AGENTS="${SCRIPT_DIR}/claude/agents"
-SOURCE_SKILL="${SCRIPT_DIR}/claude/skills/dev-pipeline"
+AGENTS_DIR="${PROJECT_DIR}/.agents"
+SKILLS_DST="${AGENTS_DIR}/skills/dev-pipeline"
+PROMPTS_DST="${SKILLS_DST}/agents"
+SOURCE_SKILL="${SCRIPT_DIR}/agents/skills/dev-pipeline"
+SOURCE_AGENTS="${SOURCE_SKILL}/agents"
 SOURCE_TOOLS="${SCRIPT_DIR}/agents/dev-pipeline-tools"
 CONFIG_EXAMPLE="${SOURCE_TOOLS}/config.example.json"
 # Display-only path; the skill (driver bootstrap-config) creates this on first run.
@@ -63,22 +71,24 @@ DP_VERSION="${DP_VERSION:-unknown}"
 echo "[dev-pipeline] Installing version ${DP_VERSION} into: ${PROJECT_DIR}"
 
 # Create destination directories
-mkdir -p "${AGENTS_DST}" "${SKILLS_DST}/schemas" "${SKILLS_DST}/states"
+mkdir -p "${SKILLS_DST}/schemas" "${SKILLS_DST}/states" "${PROMPTS_DST}"
 
-# Copy agent files
+# Copy role-prompt files (LLM-agnostic prose; run-stage assembles them into the
+# system prompt). They live inside the skill (agents/) — no longer a top-level
+# .claude/agents/ subagent dir.
 for f in dp-spec-author.md dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md; do
   src="${SOURCE_AGENTS}/${f}"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Source file not found: ${src}"
     exit 1
   fi
-  cp "${src}" "${AGENTS_DST}/${f}"
-  echo "[dev-pipeline] Copied: .claude/agents/${f}"
+  cp "${src}" "${PROMPTS_DST}/${f}"
+  echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/agents/${f}"
 done
 
 # Copy skill
 cp "${SOURCE_SKILL}/SKILL.md" "${SKILLS_DST}/SKILL.md"
-echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/SKILL.md"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/SKILL.md"
 
 # Copy per-state orchestration files (the SKILL reads states/<state>.md per transition)
 for f in init test_implementation red_test implementation test review done failed; do
@@ -89,11 +99,11 @@ for f in init test_implementation red_test implementation test review done faile
   fi
   cp "${src}" "${SKILLS_DST}/states/${f}.md"
 done
-echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/states/ (8 files)"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/states/ (8 files)"
 
 # Copy driver script (must be co-located with schemas for standalone operation)
 cp "${SOURCE_TOOLS}/driver.py" "${SKILLS_DST}/driver.py"
-echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/driver.py"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/driver.py"
 
 # Copy schemas (driver.py expects schemas/ in the same directory)
 for f in config.schema.json test-result.schema.json review-result.schema.json state.schema.json; do
@@ -104,7 +114,7 @@ for f in config.schema.json test-result.schema.json review-result.schema.json st
   fi
   cp "${src}" "${SKILLS_DST}/schemas/${f}"
 done
-echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/schemas/ (4 files)"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/schemas/ (4 files)"
 
 # Copy the config template next to driver.py so `driver bootstrap-config` can
 # seed .dev-pipeline/dev-pipeline.config.json on the first /dev-pipeline run.
@@ -114,13 +124,39 @@ if [[ ! -f "${CONFIG_EXAMPLE}" ]]; then
   exit 1
 fi
 cp "${CONFIG_EXAMPLE}" "${SKILLS_DST}/config.example.json"
-echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/config.example.json"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/config.example.json"
+
+# Symlink the skill into .claude/ so Claude Code discovers it, while the real
+# files live in the provider-neutral .agents/ tree. A plain `ln -sfn` would nest
+# a symlink INSIDE a pre-existing real directory (leaving a stale install live),
+# so clear the destination explicitly first — mirroring the driver's own
+# `latest`-symlink guard in cmd_init.
+mkdir -p "${CLAUDE_DIR}/skills"
+LINK="${CLAUDE_DIR}/skills/dev-pipeline"
+if [[ -L "$LINK" ]]; then
+  rm -f "$LINK"
+elif [[ -e "$LINK" ]]; then
+  rm -rf "$LINK"                       # old real-directory install being upgraded
+fi
+ln -s "../../.agents/skills/dev-pipeline" "$LINK"
+echo "[dev-pipeline] Linked: .claude/skills/dev-pipeline -> ../../.agents/skills/dev-pipeline"
+
+# Remove stale prompts from pre-4.0.0 installs (they used to live in .claude/agents/).
+# They are inert now (the driver only looks inside the skill) but would linger as
+# dead tracked files that contradict the "prompts live in the skill" layout.
+if [[ -d "${CLAUDE_DIR}/agents" ]]; then
+  rm -f "${CLAUDE_DIR}/agents/"dp-spec-author.md "${CLAUDE_DIR}/agents/"dp-implementor.md \
+        "${CLAUDE_DIR}/agents/"dp-test-implementor.md "${CLAUDE_DIR}/agents/"dp-tester.md \
+        "${CLAUDE_DIR}/agents/"dp-reviewer.md
+  rmdir --ignore-fail-on-non-empty "${CLAUDE_DIR}/agents" 2>/dev/null || true
+  echo "[dev-pipeline] Cleaned up stale pre-4.0.0 prompts from .claude/agents/ (if any)"
+fi
 
 # Gitignore the runtime directory only.
-# The installed machinery under .claude/ is intentionally NOT gitignored: it is
+# The installed machinery under .agents/ is intentionally NOT gitignored: it is
 # tracked so its history can be managed (e.g. by self-evolution). To keep the
 # reviewer from confusing the installed agents/skill with the user's changes,
-# the user must COMMIT the installed .claude/ files before running /dev-pipeline
+# the user must COMMIT the installed files before running /dev-pipeline
 # (see the post-install notice below). Once committed, they are no longer part
 # of the working-tree review scope.
 GITIGNORE_ENTRY=".dev-pipeline/"
@@ -143,10 +179,13 @@ echo "    python3 .claude/skills/dev-pipeline/driver.py --version"
 echo ""
 echo "IMPORTANT: Commit the installed dev-pipeline files BEFORE running /dev-pipeline."
 echo "  The review step uses working-tree scope, so any uncommitted/untracked file"
-echo "  is treated as part of your change. Committing the installed agents and skill"
-echo "  keeps the reviewer focused on your code, not on dev-pipeline's own tooling:"
-echo "    git add .claude/agents/ .claude/skills/dev-pipeline/"
-echo "    git commit -m \"Add dev-pipeline (agents + skill)\""
+echo "  is treated as part of your change. Commit BOTH the real .agents/ tree and the"
+echo "  .claude symlink — 'git add .claude/skills/dev-pipeline/' would stage only the"
+echo "  symlink object, not the real files:"
+echo "    git add .agents/skills/dev-pipeline/ .claude/skills/dev-pipeline"
+echo "    git commit -m \"Add dev-pipeline (skill + prompts)\""
+echo "  (Note: the checked-in symlink relies on git symlink support; on Windows or"
+echo "   with core.symlinks=false it becomes a plain text file — re-run install.sh there.)"
 echo ""
 echo "Next steps:"
 echo "  1. Write your plan.md"
