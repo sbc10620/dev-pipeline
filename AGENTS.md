@@ -45,7 +45,7 @@ python3 agents/dev-pipeline-tools/driver.py --help
 
 ## Architecture
 
-This repo is a **Claude Code plugin** — it installs agents and a skill into a target project's `.claude/` directory.
+This repo is a **provider-neutral agent plugin** — it installs a skill (with its role prompts) into a target project's `.agents/` directory and symlinks it into `.claude/` so Claude Code discovers it.
 
 ### Execution model
 
@@ -91,7 +91,7 @@ All new keys are read with `.get(default)` so a run/config created by an older d
 
 Every LLM role (`spec_author`, `test_implementor`, `implementor`, `tester`, `reviewer`) runs through one mechanism: `driver run-stage --role <role>`. Three layers, strictly separated:
 
-- **Role prose** (`claude/agents/dp-*.md`) — *LLM-agnostic* behavior only. It must contain **no** model name, CLI flag, `--allowedTools`, "final message", or frontmatter `model:`/`tools:` (frontmatter is stripped at assembly). It describes *what* the role does.
+- **Role prose** (`agents/skills/dev-pipeline/agents/dp-*.md`) — *LLM-agnostic* behavior only. It must contain **no** model name, CLI flag, `--allowedTools`, "final message", or frontmatter `model:`/`tools:` (frontmatter is stripped at assembly). It describes *what* the role does.
 - **`config.runners.<role>`** — an ordered array of `{type:"bash", command, normalizer?, timeout?}`. The command is the *concrete* LLM invocation (`claude -p …`, `codex exec …`) with the role's tool envelope/permissions. **The only place an LLM is named.** Tried front-to-back; the next runner is used only when one fails to *produce* a result (non-zero exit / timeout / invalid output after one error-fed retry) — not when the result's content is bad (that is the iteration loop).
 - **`driver run-stage`** — assembles `(system = dp-<role>.md, user = stage-input.json inputs)`, persists them, substitutes placeholders (`{system_file}` `{user_file}` `{output_file}` `{project_root}` …, shell-quoted) into the command, runs it (`cwd=project_root`, timeout), and validates by category: file roles (exit 0; delta read by the SKILL), JSON roles (result written to `{output_file}` → `normalizer` (`passthrough`/`claude-cli`/`codex-cli`) → schema), named roles (spec_author: required sections / an `INSUFFICIENT:` marker that must START the file). The per-runner output directive is mechanism-aware: a command that redirects stdout to `{output_file}` is told to print to stdout; one that writes via a tool is told to write the file. **File-role fallback is not working-tree-isolated** — if a file role has multiple runners and an early one partially edits before failing, those edits remain for the next runner; keep file roles single-runner unless that is acceptable.
 
@@ -111,7 +111,7 @@ State files (`states/*.md`) must **not** read `config.snapshot.json` for control
 
 ### Editing the skill/agent Markdown (style consistency)
 
-`SKILL.md`, `states/*.md`, and `claude/agents/dp-*.md` are **prose instructions an LLM orchestrator executes** — their format *is* their interface. When editing them, match the existing conventions rather than introducing your own; an inconsistent file is harder for the model to follow reliably. Before editing a file, read its neighbours and mirror them:
+`SKILL.md`, `states/*.md`, and `agents/skills/dev-pipeline/agents/dp-*.md` are **prose instructions an LLM orchestrator executes** — their format *is* their interface. When editing them, match the existing conventions rather than introducing your own; an inconsistent file is harder for the model to follow reliably. Before editing a file, read its neighbours and mirror them:
 
 - **Document structure.** Keep each file's established skeleton. State files open with `# STATE: <name>` (plus `(TDD only)` where applicable), then `**Goal:** …`, then a sentence naming what the landing `advance` echoed, then the steps, then a `**Checklist:**`. Do not drop or reorder these sections.
 - **Workflow numbering.** Steps are `- [Step N]` in execution order; sub-points are nested bullets. Keep the numbering contiguous and sequential — if you insert a step, renumber the rest (see git history: "unify step numbering"). Reference other states as `states/<name>.md` and never hard-code a transition the driver decides.
@@ -129,14 +129,14 @@ After editing, skim a sibling file side-by-side and confirm headings, step forma
 | `agents/dev-pipeline-tools/test/test_driver.py` | Deterministic black-box tests for the driver (CLI subprocess; no LLM) |
 | `agents/dev-pipeline-tools/schemas/` | JSON schemas for config, test-result, review-result, state |
 | `agents/dev-pipeline-tools/config.example.json` | Seed config (English defaults, placeholders for tester instructions) |
-| `claude/agents/dp-spec-author.md` | Spec author runner — turns the plan into a structured, testable spec (or an `INSUFFICIENT:` marker); LLM-agnostic |
-| `claude/agents/dp-implementor.md` | Implementor runner — production code only; build-checks (compiles) its code before handoff; in TDD must not touch `test_paths` |
-| `claude/agents/dp-test-implementor.md` | Test author runner (TDD) — writes tests from the spec, tests only (no Bash), stays within `test_paths` |
-| `claude/agents/dp-tester.md` | Tester runner — exit-code-only pass/fail, classifies `failure_type`; used by both `red_test` and `test` |
-| `claude/agents/dp-reviewer.md` | Reviewer runner — fully read-only (reviews test code too, never runs it); codex primary, claude fallback per config order |
-| `claude/skills/dev-pipeline/SKILL.md` | Thin orchestrator — Global Rules, Step 0, Run Context, state→file index |
-| `claude/skills/dev-pipeline/states/<state>.md` | Per-state procedure (progressive disclosure); SKILL reads `states/<next_state>.md` after each `advance` |
-| `install.sh` | Copies agents + skill (incl. `states/`) + `config.example.json` into `<project>/.claude/`, updates .gitignore. Does NOT seed the config — the skill bootstraps it on first run. |
+| `agents/skills/dev-pipeline/agents/dp-spec-author.md` | Spec author runner — turns the plan into a structured, testable spec (or an `INSUFFICIENT:` marker); LLM-agnostic |
+| `agents/skills/dev-pipeline/agents/dp-implementor.md` | Implementor runner — production code only; build-checks (compiles) its code before handoff; in TDD must not touch `test_paths` |
+| `agents/skills/dev-pipeline/agents/dp-test-implementor.md` | Test author runner (TDD) — writes tests from the spec, tests only (no Bash), stays within `test_paths` |
+| `agents/skills/dev-pipeline/agents/dp-tester.md` | Tester runner — exit-code-only pass/fail, classifies `failure_type`; used by both `red_test` and `test` |
+| `agents/skills/dev-pipeline/agents/dp-reviewer.md` | Reviewer runner — fully read-only (reviews test code too, never runs it); codex primary, claude fallback per config order |
+| `agents/skills/dev-pipeline/SKILL.md` | Thin orchestrator — Global Rules, Step 0, Run Context, state→file index |
+| `agents/skills/dev-pipeline/states/<state>.md` | Per-state procedure (progressive disclosure); SKILL reads `states/<next_state>.md` after each `advance` |
+| `install.sh` | Installs the skill (incl. `states/` + role prompts under `agents/`) + `driver.py` + `schemas/` + `config.example.json` into `<project>/.agents/skills/dev-pipeline/`, symlinks it into `.claude/`, and updates .gitignore. Does NOT seed the config — the skill bootstraps it on first run. |
 
 ### Runtime layout (inside target project, not this repo)
 
@@ -204,4 +204,4 @@ python3 -m unittest discover -s agents/dev-pipeline-tools/test -v
 bash install.sh <project-dir>
 ```
 
-Installs into `<project-dir>/.claude/` only (never user-global). `install.sh` copies `driver.py`, the `schemas/` directory, and `config.example.json` into `<project-dir>/.claude/skills/dev-pipeline/` so the installed pipeline runs standalone without the source repo present. `driver.py` resolves both its schemas and the config template relative to its own location (`SCHEMA_DIR` / `EXAMPLE_PATH = pathlib.Path(__file__).parent / ...`), so the copied driver finds them. The SKILL locates the driver as `<skill_dir>/driver.py`. `install.sh` does **not** create the config — `driver bootstrap-config` seeds it from the template on the first run.
+Installs into `<project-dir>/.agents/` only (never user-global), then symlinks `.claude/skills/dev-pipeline -> ../../.agents/skills/dev-pipeline` so Claude Code discovers the skill while the real files live in the provider-neutral tree. `install.sh` copies the role prompts (`agents/dp-*.md`), `driver.py`, the `schemas/` directory, and `config.example.json` into `<project-dir>/.agents/skills/dev-pipeline/` so the installed pipeline runs standalone without the source repo present. `driver.py` resolves its schemas, the config template, and the role prompts relative to its own location (`SCHEMA_DIR` / `EXAMPLE_PATH = pathlib.Path(__file__).parent / ...`; `role_prompt_path` looks in `<skill_dir>/agents/`) — these are lexical (`__file__` is not symlink-resolved), so the driver finds them whether reached via `.agents/` or the `.claude/` symlink. The SKILL locates the driver as `<skill_dir>/driver.py`. On upgrade, `install.sh` replaces a pre-4.0.0 real `.claude/skills/dev-pipeline` directory with the symlink and removes stale `.claude/agents/dp-*.md`. `install.sh` does **not** create the config — `driver bootstrap-config` seeds it from the template on the first run.

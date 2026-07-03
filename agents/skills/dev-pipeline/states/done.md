@@ -81,11 +81,11 @@
 - [Step 4] **Self-evolution** — only if the echoed `run_self_evolution` is true.
   - Use the retrospective findings as input. Identify which agent `.md` files (or SKILL.md / its `states/*.md`) need updating.
   - If `/advisor` is active, consult it first; otherwise apply only clearly necessary changes.
-  - Editable files (the only ones self-evolution may touch): `.claude/agents/dp-implementor.md`, `.claude/agents/dp-test-implementor.md`, `.claude/agents/dp-tester.md`, `.claude/agents/dp-reviewer.md`, `.claude/skills/dev-pipeline/SKILL.md`, and `.claude/skills/dev-pipeline/states/*.md`.
+  - Editable files (the only ones self-evolution may touch): `.agents/skills/dev-pipeline/agents/dp-spec-author.md`, `.agents/skills/dev-pipeline/agents/dp-implementor.md`, `.agents/skills/dev-pipeline/agents/dp-test-implementor.md`, `.agents/skills/dev-pipeline/agents/dp-tester.md`, `.agents/skills/dev-pipeline/agents/dp-reviewer.md`, `.agents/skills/dev-pipeline/SKILL.md`, and `.agents/skills/dev-pipeline/states/*.md`.
   - Notify the user that source-repo files are NOT updated.
-  - **If any changed, commit them separately** (git repo):
+  - **If any changed, commit them separately** (git repo). Stage the **real `.agents/` paths**, not the `.claude/` symlink (adding through the symlink would stage the link, not the files):
     ```bash
-    git add .claude/agents/dp-*.md .claude/skills/dev-pipeline/SKILL.md .claude/skills/dev-pipeline/states/*.md
+    git add .agents/skills/dev-pipeline/agents/dp-*.md .agents/skills/dev-pipeline/SKILL.md .agents/skills/dev-pipeline/states/*.md
     git commit -m "dev-pipeline self-evolution: <one-line summary>"
     ```
     Do NOT push. Skip if nothing changed.
