@@ -49,7 +49,7 @@ plan.md
 bash /path/to/dev-pipeline/install.sh /path/to/your/project
 ```
 
-This copies agents, the skill (incl. `states/`), `driver.py`, schemas, and the config template into `<project>/.claude/` (local only). It does NOT create the config — the skill bootstraps `dev-pipeline.config.json` from the template (via `driver bootstrap-config`) into the gitignored `<project>/.dev-pipeline/` directory on the first run (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
+This copies the skill (incl. `states/` and the role prompts under `agents/`), `driver.py`, schemas, and the config template into `<project>/.agents/` (local only), then symlinks it into `<project>/.claude/` so Claude Code discovers it. It does NOT create the config — the skill bootstraps `dev-pipeline.config.json` from the template (via `driver bootstrap-config`) into the gitignored `<project>/.dev-pipeline/` directory on the first run (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
 
 ---
 
@@ -134,7 +134,7 @@ In Claude Code, with your project open:
 
 **Prerequisites:**
 - `.dev-pipeline/dev-pipeline.config.json` must be present and valid
-- **Commit the installed dev-pipeline files** (`.claude/agents/dp-*.md`, `.claude/skills/dev-pipeline/`) before running. They are tracked (not gitignored, so self-evolution can manage their history), and the review uses `working-tree` scope — committing them keeps the reviewer focused on your code instead of dev-pipeline's own tooling.
+- **Commit the installed dev-pipeline files** (the `.agents/skills/dev-pipeline/` tree and its `.claude/skills/dev-pipeline` symlink) before running. Stage the real `.agents/` paths, not the symlink. They are tracked (not gitignored, so self-evolution can manage their history), and the review uses `working-tree` scope — committing them keeps the reviewer focused on your code instead of dev-pipeline's own tooling.
 - Start with a **clean working tree** (no unrelated uncommitted changes — they will be included in the review scope)
 - **Gitignore your build outputs** (compiled binaries, object files, etc.). The review uses `working-tree` scope, so any untracked artifact produced by the test phase would otherwise be reviewed alongside your real changes.
 
@@ -142,7 +142,7 @@ In Claude Code, with your project open:
 
 ## Roles
 
-Each role is an LLM-agnostic prose file (`claude/agents/dp-<role>.md`) run by `driver run-stage` through its `config.runners.<role>` command. The **tool envelope** below is whatever that command's flags grant (e.g. claude `--allowedTools`) — set in config, not in the role file.
+Each role is an LLM-agnostic prose file (`agents/skills/dev-pipeline/agents/dp-<role>.md`) run by `driver run-stage` through its `config.runners.<role>` command. The **tool envelope** below is whatever that command's flags grant (e.g. claude `--allowedTools`) — set in config, not in the role file.
 
 | Role | Does | Tool envelope (set in config) |
 |---|---|---|
@@ -248,17 +248,17 @@ re-run `install.sh` to upgrade an existing install to a newer version.
 dev-pipeline/
 ├── install.sh
 ├── README.md
-├── claude/
-│   ├── agents/
-│   │   ├── dp-implementor.md
-│   │   ├── dp-test-implementor.md
-│   │   ├── dp-tester.md
-│   │   └── dp-reviewer.md
-│   └── skills/
-│       └── dev-pipeline/
-│           ├── SKILL.md
-│           └── states/            ← per-state procedure files (init, red_test, …)
 └── agents/
+    ├── skills/
+    │   └── dev-pipeline/
+    │       ├── SKILL.md
+    │       ├── states/            ← per-state procedure files (init, red_test, …)
+    │       └── agents/            ← LLM-agnostic role prompts
+    │           ├── dp-spec-author.md
+    │           ├── dp-implementor.md
+    │           ├── dp-test-implementor.md
+    │           ├── dp-tester.md
+    │           └── dp-reviewer.md
     └── dev-pipeline-tools/
         ├── driver.py
         ├── config.example.json
@@ -276,23 +276,22 @@ dev-pipeline/
 <project>/
 ├── .dev-pipeline/
 │   └── dev-pipeline.config.json   ← your config (gitignored, not in project root)
+├── .agents/                       ← provider-neutral install tree (real files)
+│   └── skills/
+│       └── dev-pipeline/
+│           ├── SKILL.md
+│           ├── states/             ← per-state procedure files (read on demand)
+│           ├── agents/             ← role prompts (dp-spec-author … dp-reviewer)
+│           ├── driver.py           ← installed for standalone operation
+│           ├── config.example.json ← template for driver bootstrap-config
+│           └── schemas/
+│               ├── config.schema.json
+│               ├── test-result.schema.json
+│               ├── review-result.schema.json
+│               └── state.schema.json
 └── .claude/
-    ├── agents/
-    │   ├── dp-implementor.md
-    │   ├── dp-test-implementor.md
-    │   ├── dp-tester.md
-    │   └── dp-reviewer.md
     └── skills/
-        └── dev-pipeline/
-            ├── SKILL.md
-            ├── states/             ← per-state procedure files (read on demand)
-            ├── driver.py           ← installed for standalone operation
-            ├── config.example.json ← template for driver bootstrap-config
-            └── schemas/
-                ├── config.schema.json
-                ├── test-result.schema.json
-                ├── review-result.schema.json
-                └── state.schema.json
+        └── dev-pipeline            ← symlink to ../../.agents/skills/dev-pipeline
 ```
 
 ---
