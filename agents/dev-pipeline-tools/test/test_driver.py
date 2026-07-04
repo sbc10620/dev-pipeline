@@ -16,6 +16,7 @@ Run:
 import importlib.util
 import json
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1326,6 +1327,25 @@ class TestRunStage(unittest.TestCase):
         marker = next((l.strip() for l in body.splitlines() if len(l.strip()) > 40), None)
         self.assertIsNotNone(marker, "no distinctive prose line found to assert on")
         self.assertIn(marker, system_text)
+
+    def test_json_role_fenced_output_persisted_clean(self):
+        # A model may wrap its JSON in a markdown fence. run-stage tolerates it for
+        # validation, but must PERSIST clean JSON so the driver's advance (which
+        # reads the file with a plain json.loads) does not choke. Regression guard.
+        payload = json.dumps(test_result(status="pass"))
+        self._cfg("tester", [
+            {"type": "bash",
+             "command": "printf '```json\\n%s\\n```\\n' " + shlex.quote(payload) + " > {output_file}",
+             "normalizer": "claude-cli"},
+        ])
+        out = self.run_dir / "tr.json"
+        r = self._run("tester", self._si("tester", output_file=str(out)))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        # The persisted file must be plain JSON — no fence — so json.loads succeeds.
+        text = out.read_text(encoding="utf-8")
+        self.assertNotIn("```", text)
+        self.assertEqual(json.loads(text)["status"], "pass")
 
     def test_json_role_invalid_then_valid(self):
         good = self.run_dir / "good.json"
