@@ -13,6 +13,7 @@ Run:
     python3 -m unittest discover -s agents/dev-pipeline-tools/test -v
 """
 
+import importlib.util
 import json
 import pathlib
 import shutil
@@ -1313,11 +1314,17 @@ class TestRunStage(unittest.TestCase):
         system_text = sysf.read_text(encoding="utf-8")
         self.assertNotEqual(system_text.strip(), "You are the implementor.")
         # The assembled system prompt IS the real prose file (frontmatter stripped),
-        # so a distinctive body line from the source must survive into it.
+        # so a distinctive body line from the source must survive into it. Reuse the
+        # driver's own strip_frontmatter so the "body" matches what run-stage built
+        # (no divergent local heuristic).
         src = (TOOLS_DIR.parent / "skills" / "dev-pipeline" / "agents"
                / "dp-implementor.md").read_text(encoding="utf-8")
-        body = src.split("---", 2)[-1] if src.startswith("---") else src
-        marker = next(l.strip() for l in body.splitlines() if len(l.strip()) > 40)
+        spec = importlib.util.spec_from_file_location("dp_driver", DRIVER)
+        drv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(drv)
+        body = drv.strip_frontmatter(src)
+        marker = next((l.strip() for l in body.splitlines() if len(l.strip()) > 40), None)
+        self.assertIsNotNone(marker, "no distinctive prose line found to assert on")
         self.assertIn(marker, system_text)
 
     def test_json_role_invalid_then_valid(self):
