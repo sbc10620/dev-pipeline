@@ -1299,6 +1299,27 @@ class TestRunStage(unittest.TestCase):
         self.assertEqual(r.json["runner"], 1)
         self.assertTrue((self.proj / "made.py").exists())
 
+    def test_prompt_prose_resolved_from_layout(self):
+        # Guards role_prompt_path + the .agents/skills/dev-pipeline/agents/ layout:
+        # if resolution broke, the role would silently run on the "You are the
+        # <role>." stub and emit a stderr WARNING. Assert the real prose is found
+        # and assembled instead.
+        self._cfg("implementor", [{"type": "bash", "command": "true"}])
+        r = self._run("implementor", self._si("implementor"))
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("WARNING: prose file", r.stderr)
+        sysf = self.run_dir / "w" / "implementor-system.txt"
+        self.assertTrue(sysf.exists(), "run-stage did not persist the system prompt")
+        system_text = sysf.read_text(encoding="utf-8")
+        self.assertNotEqual(system_text.strip(), "You are the implementor.")
+        # The assembled system prompt IS the real prose file (frontmatter stripped),
+        # so a distinctive body line from the source must survive into it.
+        src = (TOOLS_DIR.parent / "skills" / "dev-pipeline" / "agents"
+               / "dp-implementor.md").read_text(encoding="utf-8")
+        body = src.split("---", 2)[-1] if src.startswith("---") else src
+        marker = next(l.strip() for l in body.splitlines() if len(l.strip()) > 40)
+        self.assertIn(marker, system_text)
+
     def test_json_role_invalid_then_valid(self):
         good = self.run_dir / "good.json"
         good.write_text(json.dumps(test_result(status="pass")), encoding="utf-8")

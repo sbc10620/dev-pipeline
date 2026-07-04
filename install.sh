@@ -14,7 +14,7 @@ Usage: bash install.sh <project-dir>
 Installs dev-pipeline once and wires it up for multiple agent hosts.
 
 Canonical install (the open Agent Skills standard — read natively by Codex,
-Gemini CLI, Cursor, Kiro, OpenCode, OpenClaw, …):
+Gemini CLI, Cursor, Kiro, OpenCode, …):
   .agents/skills/dev-pipeline/SKILL.md
   .agents/skills/dev-pipeline/states/                (per-state orchestration files)
   .agents/skills/dev-pipeline/agents/dp-*.md         (LLM-agnostic role prompts)
@@ -29,7 +29,8 @@ Per-host entry points (added because these hosts don't read .agents/skills yet):
   .clinerules/workflows/dev-pipeline.md thin pointer — Cline slash-workflow
 
 Codex (and other Agent-Skills hosts) need no extra wiring — they discover
-.agents/skills/ directly, and the root AGENTS.md is already loaded as guidance.
+.agents/skills/ directly. (Codex/Cursor/Copilot also read a project AGENTS.md
+as general guidance if the project has one.)
 
 This installer does NOT create .dev-pipeline/dev-pipeline.config.json. The skill
 bootstraps it from the template on the first /dev-pipeline run (driver
@@ -66,8 +67,10 @@ CONFIG_EXAMPLE="${SOURCE_TOOLS}/config.example.json"
 RUNTIME_DIR="${PROJECT_DIR}/.dev-pipeline"
 GITIGNORE="${PROJECT_DIR}/.gitignore"
 
-# Read the version from driver.py (the single source of truth).
-DP_VERSION="$(python3 "${SOURCE_TOOLS}/driver.py" --version 2>/dev/null | awk '{print $2}')"
+# Read the version from driver.py (the single source of truth). The `|| true`
+# keeps `set -e` from killing the script if python3 is missing — the fallback
+# below then applies.
+DP_VERSION="$(python3 "${SOURCE_TOOLS}/driver.py" --version 2>/dev/null | awk '{print $2}' || true)"
 DP_VERSION="${DP_VERSION:-unknown}"
 
 echo "[dev-pipeline] Installing version ${DP_VERSION} into: ${PROJECT_DIR}"
@@ -145,11 +148,13 @@ echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/ (real copy for Claude 
 # Remove stale prompts from pre-4.0.0 installs (they used to live in .claude/agents/).
 # They are inert now (the driver only looks inside the skill) but would linger as
 # dead tracked files that contradict the "prompts live in the skill" layout.
+CLEANED_OLD_AGENTS=""
 if [[ -d "${CLAUDE_DIR}/agents" ]]; then
   rm -f "${CLAUDE_DIR}/agents/"dp-spec-author.md "${CLAUDE_DIR}/agents/"dp-implementor.md \
         "${CLAUDE_DIR}/agents/"dp-test-implementor.md "${CLAUDE_DIR}/agents/"dp-tester.md \
         "${CLAUDE_DIR}/agents/"dp-reviewer.md
-  rmdir --ignore-fail-on-non-empty "${CLAUDE_DIR}/agents" 2>/dev/null || true
+  rmdir "${CLAUDE_DIR}/agents" 2>/dev/null || true   # portable; only removes it if now empty
+  CLEANED_OLD_AGENTS=1
   echo "[dev-pipeline] Cleaned up stale pre-4.0.0 prompts from .claude/agents/ (if any)"
 fi
 
@@ -193,17 +198,24 @@ fi
 echo ""
 echo "[dev-pipeline] Installation complete (version ${DP_VERSION})."
 echo "  Check the installed version anytime with:"
-echo "    python3 .claude/skills/dev-pipeline/driver.py --version"
+echo "    python3 .agents/skills/dev-pipeline/driver.py --version"
 echo ""
 echo "  Codex, Gemini CLI, Cursor and other Agent-Skills hosts pick up the skill"
 echo "  from .agents/skills/ automatically. Cline sees it as the /dev-pipeline.md"
 echo "  workflow. Claude Code uses the real copy under .claude/skills/."
 echo ""
+# Stage exactly what this installer created/changed so the user starts with a
+# clean tree: the two skill trees, the Cline pointer, the .gitignore we touched,
+# and — only on an upgrade that removed them — the stale .claude/agents/ deletions.
+GIT_ADD_PATHS=".agents/skills/dev-pipeline/ .claude/skills/dev-pipeline/ .clinerules/workflows/dev-pipeline.md .gitignore"
+if [[ -n "${CLEANED_OLD_AGENTS}" ]]; then
+  GIT_ADD_PATHS="${GIT_ADD_PATHS} .claude/agents/"
+fi
 echo "IMPORTANT: Commit the installed dev-pipeline files BEFORE running /dev-pipeline."
 echo "  The review step uses working-tree scope, so any uncommitted/untracked file"
 echo "  is treated as part of your change. Committing the installed files keeps the"
 echo "  reviewer focused on your code, not on dev-pipeline's own tooling:"
-echo "    git add .agents/skills/dev-pipeline/ .claude/skills/dev-pipeline/ .clinerules/workflows/dev-pipeline.md"
+echo "    git add ${GIT_ADD_PATHS}"
 echo "    git commit -m \"Add dev-pipeline (skill + prompts)\""
 echo ""
 echo "Next steps:"

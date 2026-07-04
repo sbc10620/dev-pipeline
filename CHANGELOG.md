@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
-`python3 .claude/skills/dev-pipeline/driver.py --version`.
+`python3 .agents/skills/dev-pipeline/driver.py --version`.
 
 ## [4.0.0] - 2026-07-03
 
