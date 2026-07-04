@@ -1388,6 +1388,14 @@ def cmd_run_stage(args) -> None:
                 errs = validate_against_schema(result, f"{meta['schema']}.schema.json")
                 if errs:
                     return "schema: " + "; ".join(errs[:3]), proc.returncode
+            # Persist the NORMALIZED JSON back to the file. The runner may have
+            # written a markdown-fenced or prose-wrapped payload (common with many
+            # models); _normalize_output tolerated it for validation, but every
+            # downstream consumer (driver advance, the SKILL) reads this file with a
+            # plain json.loads. Writing the canonical object back makes the result
+            # robust to how the model formatted its output.
+            output_file.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             return None, proc.returncode
         # named (e.g. spec.md): an INSUFFICIENT marker must START the file (the spec
         # author's contract), then required-section presence.
