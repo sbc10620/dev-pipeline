@@ -232,7 +232,7 @@ defined once, in `driver.py`, and read everywhere else.
 python3 agents/dev-pipeline-tools/driver.py --version
 
 # An installed copy (tells you whether your install is stale vs. the latest source)
-python3 .claude/skills/dev-pipeline/driver.py --version
+python3 .agents/skills/dev-pipeline/driver.py --version
 ```
 
 Each run also records the version under `dev_pipeline_version` in its `state.json`.

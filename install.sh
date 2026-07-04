@@ -75,7 +75,10 @@ DP_VERSION="${DP_VERSION:-unknown}"
 
 echo "[dev-pipeline] Installing version ${DP_VERSION} into: ${PROJECT_DIR}"
 
-# Create destination directories
+# Start the canonical skill tree from a clean slate so a file removed in a newer
+# release does not linger here (and then get faithfully propagated into the
+# .claude/ copy by the cp -R below).
+rm -rf "${SKILLS_DST}"
 mkdir -p "${SKILLS_DST}/schemas" "${SKILLS_DST}/states" "${PROMPTS_DST}"
 
 # Copy role-prompt files (LLM-agnostic prose; run-stage assembles them into the
@@ -148,14 +151,21 @@ echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/ (real copy for Claude 
 # Remove stale prompts from pre-4.0.0 installs (they used to live in .claude/agents/).
 # They are inert now (the driver only looks inside the skill) but would linger as
 # dead tracked files that contradict the "prompts live in the skill" layout.
+# .claude/agents/ is also a standard Claude Code directory for the USER's own
+# subagents, so only remove OUR pre-4.0.0 dp-*.md prompts, and only flag the
+# cleanup when at least one was actually present — otherwise the commit hint
+# below would sweep the user's unrelated agents into the dev-pipeline commit.
 CLEANED_OLD_AGENTS=""
 if [[ -d "${CLAUDE_DIR}/agents" ]]; then
-  rm -f "${CLAUDE_DIR}/agents/"dp-spec-author.md "${CLAUDE_DIR}/agents/"dp-implementor.md \
-        "${CLAUDE_DIR}/agents/"dp-test-implementor.md "${CLAUDE_DIR}/agents/"dp-tester.md \
-        "${CLAUDE_DIR}/agents/"dp-reviewer.md
+  for f in dp-spec-author.md dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md; do
+    if [[ -f "${CLAUDE_DIR}/agents/${f}" ]]; then
+      rm -f "${CLAUDE_DIR}/agents/${f}"
+      CLEANED_OLD_AGENTS=1
+    fi
+  done
   rmdir "${CLAUDE_DIR}/agents" 2>/dev/null || true   # portable; only removes it if now empty
-  CLEANED_OLD_AGENTS=1
-  echo "[dev-pipeline] Cleaned up stale pre-4.0.0 prompts from .claude/agents/ (if any)"
+  [[ -n "${CLEANED_OLD_AGENTS}" ]] && \
+    echo "[dev-pipeline] Cleaned up stale pre-4.0.0 prompts from .claude/agents/"
 fi
 
 # --- Cline entry point: a thin slash-workflow pointer ---
@@ -167,9 +177,13 @@ mkdir -p "${CLINE_WF_DIR}"
 cat > "${CLINE_WF_DIR}/dev-pipeline.md" <<'EOF'
 # dev-pipeline
 
-Run the dev-pipeline orchestrator: read `.agents/skills/dev-pipeline/SKILL.md`
-and follow its instructions exactly, treating any following text as the
-arguments (e.g. `--plan plan.md [--tdd | --no-tdd]`).
+Open the file `.agents/skills/dev-pipeline/SKILL.md` in this project and follow
+its instructions exactly.
+
+For the skill's arguments, use whatever text the user typed after
+`/dev-pipeline.md` in their message (for example `--plan plan.md [--tdd | --no-tdd]`).
+If the line below still shows the literal text "$ARGUMENTS", ignore that line and
+read the arguments from the user's message instead.
 
 Arguments: $ARGUMENTS
 EOF
@@ -209,7 +223,9 @@ echo ""
 # and — only on an upgrade that removed them — the stale .claude/agents/ deletions.
 GIT_ADD_PATHS=".agents/skills/dev-pipeline/ .claude/skills/dev-pipeline/ .clinerules/workflows/dev-pipeline.md .gitignore"
 if [[ -n "${CLEANED_OLD_AGENTS}" ]]; then
-  GIT_ADD_PATHS="${GIT_ADD_PATHS} .claude/agents/"
+  # Narrow pathspec: stage only OUR removed prompts' deletions, never the user's
+  # own .claude/agents/ files.
+  GIT_ADD_PATHS="${GIT_ADD_PATHS} .claude/agents/dp-*.md"
 fi
 echo "IMPORTANT: Commit the installed dev-pipeline files BEFORE running /dev-pipeline."
 echo "  The review step uses working-tree scope, so any uncommitted/untracked file"

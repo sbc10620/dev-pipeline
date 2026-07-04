@@ -81,17 +81,18 @@
 - [Step 4] **Self-evolution** — only if the echoed `run_self_evolution` is true.
   - Use the retrospective findings as input. Identify which agent `.md` files (or SKILL.md / its `states/*.md`) need updating.
   - If `/advisor` is active, consult it first; otherwise apply only clearly necessary changes.
-  - Edit only the **canonical** `.agents/` tree — these are the sole files self-evolution may touch: `.agents/skills/dev-pipeline/agents/dp-spec-author.md`, `.agents/skills/dev-pipeline/agents/dp-implementor.md`, `.agents/skills/dev-pipeline/agents/dp-test-implementor.md`, `.agents/skills/dev-pipeline/agents/dp-tester.md`, `.agents/skills/dev-pipeline/agents/dp-reviewer.md`, `.agents/skills/dev-pipeline/SKILL.md`, and `.agents/skills/dev-pipeline/states/*.md`.
+  - Edit only the **canonical** `.agents/` tree, and **resolve every path against `project_root`, not your current directory** (your cwd may be a subdirectory). These are the sole files self-evolution may touch: `<project_root>/.agents/skills/dev-pipeline/agents/dp-spec-author.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-implementor.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-test-implementor.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-tester.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-reviewer.md`, `<project_root>/.agents/skills/dev-pipeline/SKILL.md`, and `<project_root>/.agents/skills/dev-pipeline/states/*.md`.
   - Notify the user that source-repo files are NOT updated.
-  - **If any changed, commit them** (git repo). Sync the whole `.agents/` skill into the `.claude/` copy Claude Code loads from with **one atomic command** (a whole-tree copy that cannot be half-applied — a per-file mirror risks Claude silently loading stale prose), then stage both trees:
+  - **If any changed, commit them** (git repo). First re-sync the whole `.agents/` skill into the `.claude/` copy Claude Code loads from (a delete-then-recopy of the whole tree, so the two never partially diverge — do NOT mirror file-by-file, which risks Claude silently loading stale prose), then stage both trees. Run these commands **verbatim, substituting `<project_root>` with the run's real project-root path** (keep the quotes):
     ```bash
-    if [ -d <project_root>/.claude/skills/dev-pipeline ]; then
-      rm -rf <project_root>/.claude/skills/dev-pipeline && \
-        cp -R <project_root>/.agents/skills/dev-pipeline <project_root>/.claude/skills/dev-pipeline
+    if [ -d "<project_root>/.claude/skills/dev-pipeline" ]; then
+      rm -rf "<project_root>/.claude/skills/dev-pipeline" && \
+        cp -R "<project_root>/.agents/skills/dev-pipeline" "<project_root>/.claude/skills/dev-pipeline"
     fi
-    git -C <project_root> add .agents/skills/dev-pipeline .claude/skills/dev-pipeline
-    git -C <project_root> diff --cached --quiet || \
-      git -C <project_root> commit -m "dev-pipeline self-evolution: <one-line summary>"
+    git -C "<project_root>" add .agents/skills/dev-pipeline
+    [ -d "<project_root>/.claude/skills/dev-pipeline" ] && git -C "<project_root>" add .claude/skills/dev-pipeline
+    git -C "<project_root>" diff --cached --quiet || \
+      git -C "<project_root>" commit -m "dev-pipeline self-evolution: <one-line summary>"
     ```
     (Codex/Cursor/etc. read `.agents/` directly, so they need no mirror.) Do NOT push. Skip if nothing changed.
 
