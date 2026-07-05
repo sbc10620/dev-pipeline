@@ -9,6 +9,26 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [5.0.0] - 2026-07-05
+
+Conversational **planner** front-end; `plan.md` becomes the single contract (config header + spec body); `spec.md` / the `spec_author` role are removed.
+
+### Added
+- **`dp-planner.md` + `states/planning.md`** — a conversational planner that runs in the **host session** (not a headless runner). `/dev-pipeline --request "<goal>"` refines the goal, explores the repo read-only, asks the user when ambiguous, decides TDD/no-TDD, and writes one `plan.md`, then runs the pipeline. `--auto-run` skips the post-plan approval gate (planning-phase questions still happen).
+- **`plan.md` config header** — a leading fenced `dev-pipeline-config` JSON block. `init` parses it and merges a **trust-tiered whitelist** into the run's `config.snapshot.json` (never `config.json`): prose keys (`design_instruction`, `focus`, `framework_instruction`, `reviewer.scope`) always; executable/gate keys (`tester.*` commands, `test_paths`, `review_block_severity`, `tdd_mode`) only with human approval (`init --header-approved`, set by the SKILL on approval) or the durable `driver.allow_unattended_header_merge`. `runners` are **never** merged. Parsing is **fail-closed**: a malformed header is a hard error, never a silent fallback.
+- **`driver validate-config --plan <path>`** — validate the config exactly as `init` will (header merged, plan body sections checked).
+- **`driver.allow_unattended_header_merge`** (optional config bool) — opt into unattended executable/gate header merges.
+
+### Changed (breaking)
+- **Removed `spec.md` and the `spec_author` role.** The header-stripped plan **body is the contract**, written by `init` to `<run_dir>/contract.md` and read by the test author, implementor, and reviewer. `init` validates the required body sections deterministically (`## Requirements`, `## Acceptance Criteria`, and `## Interface` under TDD) with non-empty checks — replacing the LLM `INSUFFICIENT` refusal. Section validation runs **before** any run directory is created.
+- **Removed the `--tdd` / `--no-tdd` flags.** `tdd_mode` is sourced solely from `driver.tdd_mode` (which a plan header may set) and frozen into `state.tdd_mode` at init.
+- **State key `spec_path` → `contract_path`** (with a `spec_path` fallback so an in-flight pre-5.0.0 run stays inspectable). The `plan_path` echo to downstream roles was dropped — roles read only `contract.md`.
+- **`runners.spec_author` removed** from the schema/template; a config still carrying it is rejected with a `migrate-config` hint. The run-stage `"named"` category and `INSUFFICIENT` machinery were removed.
+- `install.sh` now installs `dp-planner.md` and `states/planning.md` (9 state files) and no longer `dp-spec-author.md`.
+
+### Migration
+- Re-run `bash install.sh <project>`. Old configs carrying `runners.spec_author` fail validation → run `driver migrate-config --config <path>` (drops it). A pre-5.0.0 run in flight should be finished with the driver version that started it. Hand-written plans now need the section headings above; add a `dev-pipeline-config` header (or keep the instructions in `config.json`).
+
 ## [4.0.0] - 2026-07-03
 
 Make the install layout **provider-neutral and multi-host**. The role prompts

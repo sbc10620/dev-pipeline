@@ -22,16 +22,17 @@
       while IFS= read -r p; do [ -n "$p" ] || continue
         git -C <project_root> add -A -- "$p" 2>/dev/null || true
       done < <run_dir>/changed-manifest.txt
-      # 3. Defensive excludes (plan / spec.md / .dev-pipeline must never be committed).
+      # 3. Defensive excludes (plan.md / .dev-pipeline must never be committed;
+      #    the contract lives under .dev-pipeline so it is covered by that path).
       git -C <project_root> reset -q HEAD -- <plan_path> 2>/dev/null || true
       git -C <project_root> check-ignore -q .dev-pipeline || \
-        git -C <project_root> reset -q HEAD -- <spec_path> <project_root>/.dev-pipeline 2>/dev/null || true
+        git -C <project_root> reset -q HEAD -- <project_root>/.dev-pipeline 2>/dev/null || true
       ```
     - **If the manifest does NOT exist** (e.g. a run started by an older driver before `record-changes`): fall back to the legacy `git add -A` flow and **warn the user**: "No change manifest found — committing with `git add -A`, so untracked files are NOT filtered. Review the staged set before this commits."
       ```bash
       git -C <project_root> add -A
       git -C <project_root> reset HEAD -- <plan_path>
-      git -C <project_root> check-ignore -q .dev-pipeline || git -C <project_root> reset HEAD -- <spec_path> <project_root>/.dev-pipeline
+      git -C <project_root> check-ignore -q .dev-pipeline || git -C <project_root> reset HEAD -- <project_root>/.dev-pipeline
       ```
   - **Commit only if something is staged**, with a one-line summary and a Co-Authored-By footer naming the model executing this skill:
     ```bash
@@ -44,15 +45,15 @@
 
 - [Step 2] **Update CLAUDE.md** — only if there is genuinely new context worth adding. Be conservative.
 
-- [Step 3] **Workflow Retrospective Feedback** — Review `state.json` history and report the **orchestrator (main session) model** by name, and for each state that actually ran report **which runner/method carried out the work**. Include the `test_implementation` and `red_test` sections **only when `tdd_mode` is true** (omit them under `--no-tdd`):
+- [Step 3] **Workflow Retrospective Feedback** — Review `state.json` history and report the **orchestrator (main session) model** by name, and for each state that actually ran report **which runner/method carried out the work**. Include the `test_implementation` and `red_test` sections **only when `tdd_mode` is true** (omit them when tdd_mode is false):
 
   ```markdown
   ## Workflow Retrospective Feedback
 
   _Orchestrator (main session) model: <model executing this skill>._
 
-  ### init state
-  - Runner/method: spec_author runner (driver run-stage)
+  ### planning / init state
+  - Method: conversational planner (dp-planner.md) if run with --request, else the user's plan.md; init merged the header + validated the contract
   - <issues, or "No issues">
 
   ### test_implementation state   (TDD only)
@@ -81,7 +82,7 @@
 - [Step 4] **Self-evolution** — only if the echoed `run_self_evolution` is true.
   - Use the retrospective findings as input. Identify which agent `.md` files (or SKILL.md / its `states/*.md`) need updating.
   - If `/advisor` is active, consult it first; otherwise apply only clearly necessary changes.
-  - Edit only the **canonical** `.agents/` tree, and **resolve every path against `project_root`, not your current directory** (your cwd may be a subdirectory). These are the sole files self-evolution may touch: `<project_root>/.agents/skills/dev-pipeline/agents/dp-spec-author.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-implementor.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-test-implementor.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-tester.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-reviewer.md`, `<project_root>/.agents/skills/dev-pipeline/SKILL.md`, and `<project_root>/.agents/skills/dev-pipeline/states/*.md`.
+  - Edit only the **canonical** `.agents/` tree, and **resolve every path against `project_root`, not your current directory** (your cwd may be a subdirectory). These are the sole files self-evolution may touch: `<project_root>/.agents/skills/dev-pipeline/agents/dp-planner.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-implementor.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-test-implementor.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-tester.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-reviewer.md`, `<project_root>/.agents/skills/dev-pipeline/SKILL.md`, and `<project_root>/.agents/skills/dev-pipeline/states/*.md`.
   - Notify the user that source-repo files are NOT updated.
   - **If any changed, commit them** (git repo). First re-sync the whole `.agents/` skill into the `.claude/` copy Claude Code loads from (a delete-then-recopy of the whole tree, so the two never partially diverge — do NOT mirror file-by-file, which risks Claude silently loading stale prose), then stage both trees. Run these commands **verbatim, substituting `<project_root>` with the run's real project-root path** (keep the quotes):
     ```bash
@@ -99,7 +100,7 @@
 - [Step 5] **Next-step recommendations** — suggest 2–3 concrete next actions for the user.
 
 **Checklist:**
-- [ ] Commit done (or skipped with notification); plan/spec.md/.dev-pipeline NOT committed
+- [ ] Commit done (or skipped with notification); plan.md/.dev-pipeline (incl. contract.md) NOT committed
 - [ ] Retrospective output with the orchestrator model and a section per state that ran (TDD states included only when tdd_mode)
 - [ ] Self-evolution skipped or done conservatively (committed separately if any change)
 - [ ] Next-step recommendations provided

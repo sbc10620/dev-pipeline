@@ -1,8 +1,8 @@
 # STATE: test_implementation  (TDD only)
 
-**Goal:** Run the test-author runner to write tests from the spec, enforce the role boundary, record the manifest, advance.
+**Goal:** Run the test-author runner to write tests from the contract, enforce the role boundary, record the manifest, advance.
 
-The advance that landed here echoed `directive: run_test_implementor`, `iter_dir`, and `tdd_mode`. The driver persisted the test author's context (spec/plan paths, `focus`, `framework_instruction`, `test_paths`, and — on a re-entry — the red-not-confirmed note or the reviewer findings) to `<iter_dir>/stage-input.json`.
+The advance that landed here echoed `directive: run_test_implementor`, `iter_dir`, and `tdd_mode`. The driver persisted the test author's context (`contract_path`, `focus`, `framework_instruction`, `test_paths`, and — on a re-entry — the red-not-confirmed note or the reviewer findings) to `<iter_dir>/stage-input.json`.
 
 - [Step 1] **Stage a boundary/manifest baseline** (git repo only — `git rev-parse --git-dir`). If not a git repo, skip the boundary guard in [Step 3] and note to the user it cannot be enforced.
   ```bash

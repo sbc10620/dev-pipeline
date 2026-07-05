@@ -4,10 +4,10 @@ dev-pipeline driver — deterministic state machine for the implement→test→r
 
 Usage:
   python3 driver.py bootstrap-config [--project <dir>]
-  python3 driver.py init             --plan <path> [--config <path>] [--project <dir>] [--tdd|--no-tdd]
+  python3 driver.py init             --plan <path> [--config <path>] [--project <dir>] [--header-approved]
   python3 driver.py advance          --run <run_dir>
   python3 driver.py status           --run <run_dir>
-  python3 driver.py validate-config  --config <path> [--tdd|--no-tdd]
+  python3 driver.py validate-config  --config <path> [--plan <path>]
   python3 driver.py validate-result  --type test|review --file <path>
   python3 driver.py normalize-review --source codex --in <file> --out <file>
   python3 driver.py append-attempt   --run <run_dir> --state <test_implementation|red_test|test|review> --outcome <text-or-file>
@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "4.0.0"
+__version__ = "5.0.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -191,10 +191,10 @@ def validate_against_schema(data: dict, schema_name: str) -> list[str]:
 INSTRUCTION_KEYS = ["build_instruction", "install_instruction", "test_instruction"]
 
 
-def effective_tdd_mode(cfg: dict, tdd_override=None) -> bool:
-    """Resolve TDD mode: per-run override beats config, config beats default(true)."""
-    if tdd_override is not None:
-        return bool(tdd_override)
+def effective_tdd_mode(cfg: dict) -> bool:
+    """Resolve TDD mode. As of 5.0.0 the single source is config.driver.tdd_mode
+    (the plan.md `dev-pipeline-config` header sets it via the init merge); the
+    per-run --tdd/--no-tdd flags were removed. Default true when unset."""
     return bool(cfg.get("driver", {}).get("tdd_mode", True))
 
 
@@ -214,7 +214,7 @@ def _legacy_runner_roles(cfg: dict) -> list:
     return sorted(set(legacy))
 
 
-def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
+def validate_config_data(cfg: dict) -> list[str]:
     # 3.0.0 migration: surface removed runner types with an actionable message
     # BEFORE the generic schema enum error.
     legacy = _legacy_runner_roles(cfg)
@@ -223,6 +223,14 @@ def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
                 "(claude-subagent / codex-adversarial-review). Replace each with "
                 '{"type":"bash","command":"..."}, or run `driver migrate-config '
                 "--config <path>` to convert automatically."]
+
+    # spec_author was removed in 5.0.0 (the plan.md body is the contract now). A
+    # config still carrying its runner is rejected with an actionable message
+    # rather than a cryptic additionalProperties schema error.
+    if isinstance(cfg.get("runners"), dict) and "spec_author" in cfg["runners"]:
+        return ["runners.spec_author: removed in 5.0.0 — the plan.md body is the contract "
+                "and there is no spec-author stage. Delete runners.spec_author, or run "
+                "`driver migrate-config --config <path>` to drop it automatically."]
 
     errors = validate_against_schema(cfg, "config.schema.json")
     if errors:
@@ -242,14 +250,14 @@ def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
             if s not in VALID_SEVERITIES:
                 errors.append(f"driver.review_block_severity: unknown severity {s!r}")
 
-    # TDD is opt-out-able. When effectively enabled, the test_implementor block
+    # TDD is opt-out-able. When enabled, the test_implementor block
     # and its runner are mandatory and must not contain placeholders.
-    if effective_tdd_mode(cfg, tdd_override):
+    if effective_tdd_mode(cfg):
         ti = cfg.get("llm", {}).get("test_implementor")
         if not ti:
             errors.append(
                 "llm.test_implementor: required when tdd_mode is enabled — add it (focus, "
-                "framework_instruction, test_paths) or run with --no-tdd / set driver.tdd_mode=false"
+                "framework_instruction, test_paths) or set driver.tdd_mode=false"
             )
         else:
             for key in ("focus", "framework_instruction"):
@@ -266,7 +274,7 @@ def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
         if not cfg.get("runners", {}).get("test_implementor"):
             errors.append(
                 "runners.test_implementor: required when tdd_mode is enabled — add it "
-                "or run with --no-tdd / set driver.tdd_mode=false"
+                "or set driver.tdd_mode=false"
             )
 
     # Runner commands may only reference placeholders the driver substitutes, so a
@@ -281,6 +289,181 @@ def validate_config_data(cfg: dict, tdd_override=None) -> list[str]:
                               f"{{{', '.join(unknown)}}}; allowed: {sorted(known)}")
 
     return errors
+
+
+# ---------------------------------------------------------------------------
+# plan.md config header (5.0.0)
+#
+# plan.md carries a leading ```dev-pipeline-config fenced JSON block. `init`
+# parses it, merges a trust-tiered whitelist into the run's config *snapshot*
+# (never config.json), and validates the header-stripped body's required
+# sections deterministically. plan.md is UNTRUSTED input, so: only whitelisted
+# leaves ever merge (never `runners`, which become shell commands); executable /
+# gate keys merge only with human approval; parsing is fail-closed.
+# ---------------------------------------------------------------------------
+
+HEADER_INFO_STRING = "dev-pipeline-config"
+
+# Prose-guidance keys: merged on every run — they are only ever handed to an LLM
+# as data, never executed and never a hard gate.
+_HEADER_PROSE_KEYS = {
+    ("llm", "implementor", "design_instruction"),
+    ("llm", "reviewer", "focus"),
+    ("llm", "reviewer", "scope"),
+    ("llm", "test_implementor", "focus"),
+    ("llm", "test_implementor", "framework_instruction"),
+}
+# Executable / gate keys: tester.* strings are RUN as shell; test_paths is the
+# boundary + review-routing gate; review_block_severity / tdd_mode change control
+# flow. Merged from the (untrusted) header ONLY when a human approved this header
+# (init --header-approved) or the project opted in via
+# driver.allow_unattended_header_merge. Otherwise they come from config.json and
+# validation fails loudly if config.json left them as placeholders.
+_HEADER_EXEC_KEYS = {
+    ("llm", "tester", "build_instruction"),
+    ("llm", "tester", "install_instruction"),
+    ("llm", "tester", "test_instruction"),
+    ("llm", "test_implementor", "test_paths"),
+    ("driver", "review_block_severity"),
+    ("driver", "tdd_mode"),
+}
+
+
+def parse_plan_header(text: str):
+    """Fail-closed parse of a plan.md `dev-pipeline-config` header.
+
+    Returns (header_dict | None, body_text).
+      * Recognized ONLY when the file's first non-whitespace content is a fenced
+        block whose info string is exactly `dev-pipeline-config` (leading BOM
+        tolerated). This position anchor stops a dev-pipeline-config *example*
+        inside a plan body from being mis-parsed/mis-stripped.
+      * A recognized header that is not valid JSON is a HARD die — never a silent
+        fall-through to "no header" (which would run on stale config values that
+        differ per planner model). Body JSON examples are never extracted.
+      * A genuinely absent header returns (None, text); the caller must surface it.
+    """
+    raw = text.lstrip("﻿")
+    stripped = raw.lstrip()
+    m = re.match(r"(`{3,}|~{3,})[ \t]*([^\s`~]*)[ \t]*\n", stripped)
+    if not m or m.group(2) != HEADER_INFO_STRING:
+        return None, text
+    fence = m.group(1)
+    rest = stripped[m.end():]
+    close = re.search(r"^" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*$",
+                      rest, re.MULTILINE)
+    if not close:
+        die("plan.md config header: opening `dev-pipeline-config` fence has no closing fence.")
+    json_text = rest[:close.start()]
+    body = rest[close.end():]
+    try:
+        header = json.loads(json_text)
+    except json.JSONDecodeError as e:
+        die(f"plan.md config header is not valid JSON: {e}. Fix the "
+            "```dev-pipeline-config block (no trailing commas, comments, or smart quotes).")
+    if not isinstance(header, dict):
+        die("plan.md config header must be a JSON object.")
+    return header, body
+
+
+def _get_nested(d: dict, path):
+    cur = d
+    for k in path:
+        if not isinstance(cur, dict) or k not in cur:
+            return (False, None)
+        cur = cur[k]
+    return (True, cur)
+
+
+def _set_nested(d: dict, path, value) -> None:
+    cur = d
+    for k in path[:-1]:
+        nxt = cur.get(k)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[k] = nxt
+        cur = nxt
+    cur[path[-1]] = value
+
+
+def merge_plan_header(cfg: dict, header: dict, exec_allowed: bool):
+    """Per-leaf deep-merge the whitelisted header leaves into cfg (in place).
+
+    Only whitelisted leaves are copied — never `runners`, never any key outside
+    the prose/exec whitelists. Prose keys always merge; exec/gate keys merge only
+    when exec_allowed. Siblings the header omits are preserved (per-leaf, not
+    subtree replace). Returns (applied, skipped_exec) dotted-path lists for the
+    caller to report.
+    """
+    applied, skipped_exec = [], []
+    if not isinstance(header, dict):
+        return applied, skipped_exec
+    for path in sorted(_HEADER_PROSE_KEYS | _HEADER_EXEC_KEYS):
+        present, val = _get_nested(header, list(path))
+        if not present:
+            continue
+        dotted = ".".join(path)
+        if path in _HEADER_EXEC_KEYS and not exec_allowed:
+            skipped_exec.append(dotted)
+            continue
+        _set_nested(cfg, list(path), val)
+        applied.append(dotted)
+    return applied, skipped_exec
+
+
+def _strip_code_fences(text: str) -> str:
+    """Blank out fenced code blocks (``` or ~~~, 3+ chars) so a heading shown
+    inside an example is not counted as a real section heading."""
+    out, fence = [], None
+    for line in text.splitlines():
+        s = line.lstrip()
+        if fence is None:
+            m = re.match(r"(`{3,}|~{3,})", s)
+            if m:
+                fence = m.group(1)[0]
+            out.append("")
+            if not m:
+                out[-1] = line
+            continue
+        # inside a fence
+        if re.match(re.escape(fence) + r"{3,}[ \t]*$", s):
+            fence = None
+        out.append("")
+    return "\n".join(out)
+
+
+def _has_h2(text: str, name: str) -> bool:
+    return re.search(r"(?m)^##[ \t]+" + re.escape(name) + r"[ \t]*$", text) is not None
+
+
+def _section_body(text: str, name: str) -> str:
+    """Lines under an exact H2 `name` up to the next H2 (or EOF)."""
+    m = re.search(r"(?m)^##[ \t]+" + re.escape(name) + r"[ \t]*$", text)
+    if not m:
+        return ""
+    rest = text[m.end():]
+    nxt = re.search(r"(?m)^##[ \t]+\S", rest)
+    return rest[:nxt.start()] if nxt else rest
+
+
+def validate_plan_body(body: str, tdd_mode: bool) -> list:
+    """Deterministic required-section + non-empty check on the header-stripped
+    plan body (replaces the old LLM `INSUFFICIENT` refusal). Same bar as the
+    spec-author contract: `## Requirements` + `## Acceptance Criteria` always,
+    `## Interface` additionally under TDD. Exact H2 headings, code fences ignored.
+    Structure only — testability of the ACs is the planner's / user's job.
+    """
+    scan = _strip_code_fences(body)
+    problems = []
+    required = ["Requirements", "Acceptance Criteria"] + (["Interface"] if tdd_mode else [])
+    for name in required:
+        if not _has_h2(scan, name):
+            problems.append(f"missing required section: ## {name}")
+    if _has_h2(scan, "Acceptance Criteria") and not re.search(
+            r"(?m)^[ \t]*[-*][ \t]+\S", _section_body(scan, "Acceptance Criteria")):
+        problems.append("## Acceptance Criteria has no list items (e.g. `- [ ] AC1. …`)")
+    if tdd_mode and _has_h2(scan, "Interface") and not _section_body(scan, "Interface").strip():
+        problems.append("## Interface is empty")
+    return problems
 
 
 # ---------------------------------------------------------------------------
@@ -407,15 +590,44 @@ def cmd_init(args) -> None:
         die(f"Config file not found: {config_path}\n  Run /dev-pipeline once — it bootstraps .dev-pipeline/dev-pipeline.config.json from the template on first run — then fill in the tester instructions and re-run.")
 
     cfg = load_json(config_path)
-    tdd_mode = effective_tdd_mode(cfg, getattr(args, "tdd", None))
-    errors = validate_config_data(cfg, tdd_override=getattr(args, "tdd", None))
+
+    # --- Parse + merge the plan.md config header into the in-memory cfg (which
+    #     becomes this run's config.snapshot.json). config.json on disk is NEVER
+    #     rewritten (per-run, idempotent). plan.md is untrusted: only whitelisted
+    #     leaves merge; executable/gate keys need approval (--header-approved) or
+    #     the durable driver.allow_unattended_header_merge opt-in. ---
+    plan_text = plan_path.read_text(encoding="utf-8")
+    header, body = parse_plan_header(plan_text)
+    exec_allowed = bool(getattr(args, "header_approved", False)) or \
+        bool(cfg.get("driver", {}).get("allow_unattended_header_merge", False))
+    header_applied, header_skipped_exec = [], []
+    if header is not None:
+        header_applied, header_skipped_exec = merge_plan_header(cfg, header, exec_allowed)
+
+    tdd_mode = effective_tdd_mode(cfg)
+
+    # --- Validate the MERGED config AND the plan body BEFORE any disk change, so a
+    #     rejected plan never leaves a half-created run that `advance` could pick
+    #     up (the section gate must not be bypassable). ---
+    errors = validate_config_data(cfg)
     if errors:
         sys.stderr.write("[dev-pipeline] Config validation failed:\n")
         for e in errors:
             sys.stderr.write(f"  - {e}\n")
-        sys.stderr.write("\nFix .dev-pipeline/dev-pipeline.config.json and retry.\n")
+        sys.stderr.write("\nFix the plan.md `dev-pipeline-config` header or "
+                         ".dev-pipeline/dev-pipeline.config.json and retry.\n")
         sys.exit(1)
 
+    body_problems = validate_plan_body(body, tdd_mode)
+    if body_problems:
+        sys.stderr.write("[dev-pipeline] Plan body is not a usable contract:\n")
+        for p in body_problems:
+            sys.stderr.write(f"  - {p}\n")
+        req = "Requirements, Acceptance Criteria" + (", Interface" if tdd_mode else "")
+        sys.stderr.write(f"\nThe plan body needs the required sections with real content ({req}).\n")
+        sys.exit(1)
+
+    # --- All checks passed; now create the run on disk. ---
     project_dir = pathlib.Path(args.project).resolve() if args.project else pathlib.Path(".").resolve()
     rid = run_id_new()
     run_dir = project_dir / ".dev-pipeline" / "runs" / rid
@@ -432,16 +644,20 @@ def cmd_init(args) -> None:
     # Relative target keeps the symlink valid if the project dir is moved/remounted.
     latest_link.symlink_to(pathlib.Path("runs") / rid)
 
-    spec_path = run_dir / "spec.md"
+    # The contract = the header-stripped plan body. It is the single artifact the
+    # downstream roles (test author, implementor, reviewer) read; there is no
+    # separate spec.md and no spec-author stage as of 5.0.0.
+    contract_path = run_dir / "contract.md"
+    contract_path.write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
 
     ts = now_iso()
     state_obj = {
         "run_id": rid,
         "dev_pipeline_version": __version__,
         "state": "init",
-        "plan_path": str(plan_path),
+        "plan_path": str(plan_path),        # source plan (provenance; not fed to roles)
         "config_path": str(config_path),
-        "spec_path": str(spec_path),
+        "contract_path": str(contract_path),
         "project_dir": str(project_dir),
         "tdd_mode": tdd_mode,
         # red_phase is true only while the very first RED verification is pending.
@@ -461,7 +677,7 @@ def cmd_init(args) -> None:
     }
     save_state(run_dir, state_obj)
 
-    # save config snapshot
+    # save the MERGED config snapshot (config.json on disk is untouched)
     save_json(run_dir / "config.snapshot.json", cfg)
 
     # initialise attempts.md
@@ -469,33 +685,26 @@ def cmd_init(args) -> None:
         "# Attempt History\n\n_No attempts recorded yet._\n", encoding="utf-8"
     )
 
-    # Stage-input for the spec author (bash-runner mode). Additive — the legacy
-    # flow still authors spec.md via the init emit below; this only persists the
-    # context so `driver run-stage --role spec_author` can produce spec.md.
-    required = ["## Requirements", "## Acceptance Criteria"]
-    if tdd_mode:
-        required.append("## Test Targets")
-    save_json(run_dir / "stage-input.json", {
-        "role": "spec_author",
-        "project_root": str(project_dir),
-        "work_dir": str(run_dir),
-        "output_file": str(spec_path),
-        "required_sections": required,
-        "inputs": {"plan_path": str(plan_path), "tdd_mode": tdd_mode},
-    })
-
+    notes = []
+    if header is None:
+        notes.append("No `dev-pipeline-config` header found in the plan — using config.json as-is.")
+    if header_skipped_exec:
+        notes.append("Executable/gate header keys were NOT merged (no approval): "
+                     + ", ".join(header_skipped_exec) + " — they come from config.json.")
     emit({
         "state": "init",
         "run_id": rid,
         "run_dir": str(run_dir),
-        "spec_path": str(spec_path),
+        "contract_path": str(contract_path),
         "plan_path": str(plan_path),
         "tdd_mode": tdd_mode,
-        "directive": "run_spec_author",
-        "next_action": "run_spec_author",
-        "message": "Init successful. Run `driver run-stage --role spec_author` "
-                   "(stage-input.json is written at run_dir) to author spec.md, "
-                   "then call `driver advance --run <run_dir>`.",
+        "header_found": header is not None,
+        "header_applied": header_applied,
+        "header_skipped_exec": header_skipped_exec,
+        "directive": "advance",
+        "next_action": "advance",
+        "message": ("Init successful. " + (" ".join(notes) + " " if notes else "")
+                    + "Call `driver advance --run <run_dir>` to enter the first stage."),
     })
 
 
@@ -563,8 +772,9 @@ def cmd_advance(args) -> None:
             "iterations": state["iterations"],
             "halt_reason": state.get("halt_reason"),
             # tdd_mode is the frozen, authoritative run flag (state.json). Echo it on
-            # every advance so a resuming session never recovers it from
-            # config.snapshot.json's driver.tdd_mode (wrong under --tdd/--no-tdd).
+            # every advance so a resuming session recovers it from the echo (or
+            # state.json), not by re-deriving from config — the frozen state value
+            # is the single source once a run has started.
             "tdd_mode": tdd,
         }
         result.update(dest_echoes(new_state))
@@ -578,27 +788,31 @@ def cmd_advance(args) -> None:
         emit(result)
 
     attempts_path = str(run_dir / "attempts.md")
+    # The contract handed to every downstream role. `.get` fallback keeps a run
+    # created just before 5.0.0's rename resumable.
+    contract_path = state.get("contract_path") or state.get("spec_path")
 
     # --- init ---
     if current == "init":
-        spec_path = pathlib.Path(state["spec_path"])
-        if not spec_path.exists():
-            die("spec.md has not been written yet. Write it first, then call advance.")
+        # The contract (header-stripped plan body) is written by `init` itself, so
+        # it always exists here; a fallback covers runs created before 5.0.0.
+        contract_path = pathlib.Path(state.get("contract_path") or state.get("spec_path") or "")
+        if not str(contract_path) or not contract_path.exists():
+            die("Contract not found. This run was created by a pre-5.0.0 driver — "
+                "finish it with the driver version that started it, or start a new run.")
         iter_dir = ensure_iter_dir(run_dir, state)
         if state.get("tdd_mode", False):
-            transition("test_implementation", "spec_ready",
+            transition("test_implementation", "contract_ready",
                        extra={"directive": "run_test_implementor",
                               "iter_dir": str(iter_dir),
-                              "spec_path": str(spec_path),
-                              "plan_path": state["plan_path"],
+                              "contract_path": str(contract_path),
                               "attempts_path": attempts_path,
                               "test_implementor_config": cfg["llm"].get("test_implementor", {})})
         else:
-            transition("implementation", "spec_ready",
+            transition("implementation", "contract_ready",
                        extra={"directive": "run_implementor",
                               "iter_dir": str(iter_dir),
-                              "spec_path": str(spec_path),
-                              "plan_path": state["plan_path"],
+                              "contract_path": str(contract_path),
                               "attempts_path": attempts_path})
 
     # --- test_implementation (TDD: author tests, no result file needed) ---
@@ -615,7 +829,7 @@ def cmd_advance(args) -> None:
                                   "RED phase: production code for the feature under test is "
                                   "intentionally not implemented yet. A failure caused by the feature "
                                   "being absent (missing module/function/symbol, import error, or compile "
-                                  "error referencing the spec's intended interface) MUST be classified "
+                                  "error referencing the contract's intended interface) MUST be classified "
                                   "failure_type=code (the expected RED). Reserve environment for failures "
                                   "unrelated to the missing feature (toolchain/framework/network/permissions)."),
                               "build_instruction":   cfg["llm"]["tester"]["build_instruction"],
@@ -662,8 +876,7 @@ def cmd_advance(args) -> None:
             transition("implementation", "red_confirmed",
                        extra={"directive": "run_implementor",
                               "iter_dir": str(iter_dir),
-                              "spec_path": state["spec_path"],
-                              "plan_path": state["plan_path"],
+                              "contract_path": contract_path,
                               "attempts_path": attempts_path})
         else:  # status == "pass" → RED not confirmed (vacuous tests or feature exists)
             state["iterations"]["test_implementation"] += 1
@@ -680,8 +893,7 @@ def cmd_advance(args) -> None:
                            extra={"directive": "run_test_implementor",
                                   "test_implementation_iter": state["iterations"]["test_implementation"],
                                   "iter_dir": str(iter_dir),
-                                  "spec_path": state["spec_path"],
-                                  "plan_path": state["plan_path"],
+                                  "contract_path": contract_path,
                                   "attempts_path": attempts_path,
                                   "test_implementor_config": cfg["llm"].get("test_implementor", {}),
                                   "note": "The authored tests PASSED with no implementation present. "
@@ -717,7 +929,7 @@ def cmd_advance(args) -> None:
             transition("review", "test_pass",
                        extra={"directive": "run_reviewer",
                               "iter_dir": str(iter_dir),
-                              "spec_path": state["spec_path"],
+                              "contract_path": contract_path,
                               "changes_diff": str(iter_dir / "changes.diff"),
                               "reviewer_config": cfg["llm"]["reviewer"]})
         elif failure_type == "environment":
@@ -739,8 +951,7 @@ def cmd_advance(args) -> None:
                            extra={"directive": "run_implementor",
                                   "test_iter": state["iterations"]["test"],
                                   "iter_dir": str(iter_dir),
-                                  "spec_path": state["spec_path"],
-                                  "plan_path": state["plan_path"],
+                                  "contract_path": contract_path,
                                   "attempts_path": str(run_dir / "attempts.md"),
                                   "failure_details": result.get("failure_details", ""),
                                   "log_excerpt": result.get("log_excerpt", "")})
@@ -773,7 +984,7 @@ def cmd_advance(args) -> None:
                 # surface that so the failure is not mistaken for a code defect.
                 if state.get("tdd_mode", False):
                     extra["hint"] = ("If the implementation could not satisfy the reviewer, the "
-                                     "blocking findings may point at tests that contradict the spec "
+                                     "blocking findings may point at tests that contradict the contract "
                                      "— inspect the test findings, not just the production code.")
                 transition("failed", "review_fail_exhausted",
                            halt_reason="iteration-exhausted", extra=extra)
@@ -793,8 +1004,7 @@ def cmd_advance(args) -> None:
                 extra = {"directive": directive,
                          "review_iter": state["iterations"]["review"],
                          "iter_dir": str(iter_dir),
-                         "spec_path": state["spec_path"],
-                         "plan_path": state["plan_path"],
+                         "contract_path": contract_path,
                          "attempts_path": attempts_path,
                          "verdict": result.get("verdict"),
                          "summary": result.get("summary", ""),
@@ -916,9 +1126,10 @@ def cmd_bootstrap_config(args) -> None:
             "llm.test_implementor.test_paths",
         ],
         "next_action": "Fill in the tester instructions and (TDD is on by default) the "
-                       "test_implementor framework_instruction + test_paths. Placeholder <...> "
-                       "values are rejected. To skip TDD, set driver.tdd_mode=false or run with "
-                       "--no-tdd. Then re-run /dev-pipeline --plan <path>.",
+                       "test_implementor framework_instruction + test_paths — or let a plan.md "
+                       "`dev-pipeline-config` header supply them per run. Placeholder <...> values "
+                       "are rejected. To skip TDD, set driver.tdd_mode=false. Then re-run "
+                       "/dev-pipeline --request \"<goal>\" (or --plan <path>).",
     })
 
 
@@ -929,13 +1140,30 @@ def cmd_bootstrap_config(args) -> None:
 def cmd_validate_config(args) -> None:
     config_path = pathlib.Path(args.config).resolve()
     cfg = load_json(config_path)
-    errors = validate_config_data(cfg, tdd_override=getattr(args, "tdd", None))
+    plan_path = getattr(args, "plan", None)
+    body = None
+    header_applied = []
+    if plan_path:
+        # Validate the config as `init` will see it: merge the plan.md header
+        # (full whitelist — this is the pre-approval "would this plan run?" check)
+        # and require the plan body's sections too.
+        pp = pathlib.Path(plan_path).resolve()
+        if not pp.exists():
+            die(f"Plan file not found: {pp}")
+        header, body = parse_plan_header(pp.read_text(encoding="utf-8"))
+        if header is not None:
+            header_applied, _ = merge_plan_header(cfg, header, exec_allowed=True)
+    errors = validate_config_data(cfg)
+    if body is not None:
+        errors += [f"plan body: {p}" for p in validate_plan_body(body, effective_tdd_mode(cfg))]
     if errors:
         sys.stderr.write("[dev-pipeline] Config validation FAILED:\n")
         for e in errors:
             sys.stderr.write(f"  - {e}\n")
         sys.exit(1)
-    emit({"valid": True, "config": str(config_path)})
+    emit({"valid": True, "config": str(config_path),
+          "plan": str(pathlib.Path(plan_path).resolve()) if plan_path else None,
+          "header_applied": header_applied})
 
 
 # ---------------------------------------------------------------------------
@@ -1117,7 +1345,7 @@ def cmd_check_boundary(args) -> None:
 # Subcommand: record-changes (commit/review manifest)
 # ---------------------------------------------------------------------------
 
-# A path is a pipeline run artifact (spec.md, config snapshot, state, …) when it
+# A path is a pipeline run artifact (contract.md, config snapshot, state, …) when it
 # lives under a .dev-pipeline/ directory at any depth. Such paths are gitignored
 # and must never enter the commit/review manifest.
 _DEV_PIPELINE_RE = re.compile(r"(^|/)\.dev-pipeline/")
@@ -1171,10 +1399,9 @@ def cmd_record_changes(args) -> None:
 #   "file"  — the runner edits the repo; success = exit 0 (delta read elsewhere).
 #   "json"  — the runner writes a result JSON to {output_file}; validated against
 #             `schema`, with one error-fed retry then fallback to the next runner.
-#   "named" — the runner writes a named artifact (spec.md) to {output_file}; the
-#             driver checks the required sections are present.
+# (The 3.0.0 "named" category and its spec_author role were removed in 5.0.0 —
+#  the plan.md body is the contract now; init validates it deterministically.)
 ROLE_META = {
-    "spec_author":      {"category": "named", "schema": None,            "prompt": "dp-spec-author"},
     "test_implementor": {"category": "file",  "schema": None,            "prompt": "dp-test-implementor"},
     "implementor":      {"category": "file",  "schema": None,            "prompt": "dp-implementor"},
     "tester":           {"category": "json",  "schema": "test-result",   "prompt": "dp-tester"},
@@ -1184,7 +1411,6 @@ ROLE_META = {
 
 # Maps an advance `directive` to the run-stage role it drives.
 _DIRECTIVE_ROLE = {
-    "run_spec_author":      "spec_author",
     "run_test_implementor": "test_implementor",
     "run_tester":           "tester",
     "run_implementor":      "implementor",
@@ -1348,62 +1574,52 @@ def cmd_run_stage(args) -> None:
         "run_dir": str(run_dir), "work_dir": str(work),
     }
 
-    INSUFFICIENT = "__insufficient__"
-
     def output_directive(runner: dict) -> str:
         """Per-runner output instruction: a runner that redirects stdout to
         `{output_file}` (e.g. `codex exec … > {output_file}`) must PRINT the result;
         one that writes via a tool must WRITE the file. Matches the actual mechanism."""
-        if meta["category"] not in ("json", "named"):
+        if meta["category"] != "json":
             return ""
-        what = ("a single valid JSON object (no markdown fences, nothing else)"
-                if meta["category"] == "json" else "your result")
+        what = "a single valid JSON object (no markdown fences, nothing else)"
         if re.search(r">\s*\{output_file\}", runner.get("command", "")):
             return f"\n\nOutput {what} to **stdout** only."
         return f"\n\nWrite {what} to this exact file path and nothing else there: {output_file}"
 
     def judge(runner: dict, command: str, timeout: int):
         """Run one command and judge it by category. Returns (problem|None, exit).
-        `problem` is None on success, the sentinel INSUFFICIENT for a spec-author
-        refusal, else a short reason string (also fed back on the retry)."""
-        if meta["category"] in ("json", "named") and output_file.exists():
+        `problem` is None on success, else a short reason string (also fed back on
+        the retry)."""
+        if meta["category"] == "json" and output_file.exists():
             output_file.unlink()  # clean slate so a stale file isn't mistaken for success
         try:
             proc = _run_one(command, subst, project_root, timeout)
         except subprocess.TimeoutExpired:
             return "timeout", None
         # On a non-zero exit, keep a stderr tail so a missing CLI / crash is visible
-        # in the reason (file roles already include it; do it for json/named too).
+        # in the reason (file roles already include it; do it for json too).
         err = f" (exit {proc.returncode}: {proc.stderr.strip()[-300:]})" if proc.returncode else ""
         if meta["category"] == "file":
             return (None if proc.returncode == 0 else f"exit {proc.returncode}: {proc.stderr[-300:]}"), proc.returncode
         if not output_file.exists():
             return "output not produced" + err, proc.returncode
-        if meta["category"] == "json":
-            result = _normalize_output(output_file.read_text(encoding="utf-8"),
-                                       runner.get("normalizer", "passthrough"))
-            if result is None:
-                return "no valid JSON in output" + err, proc.returncode
-            if meta["schema"]:
-                errs = validate_against_schema(result, f"{meta['schema']}.schema.json")
-                if errs:
-                    return "schema: " + "; ".join(errs[:3]), proc.returncode
-            # Persist the NORMALIZED JSON back to the file. The runner may have
-            # written a markdown-fenced or prose-wrapped payload (common with many
-            # models); _normalize_output tolerated it for validation, but every
-            # downstream consumer (driver advance, the SKILL) reads this file with a
-            # plain json.loads. Writing the canonical object back makes the result
-            # robust to how the model formatted its output.
-            output_file.write_text(
-                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-            return None, proc.returncode
-        # named (e.g. spec.md): an INSUFFICIENT marker must START the file (the spec
-        # author's contract), then required-section presence.
-        text = output_file.read_text(encoding="utf-8")
-        if text.lstrip().upper().startswith("INSUFFICIENT"):
-            return INSUFFICIENT, proc.returncode
-        missing = [s for s in (stage_input.get("required_sections") or []) if s not in text]
-        return (("missing required sections: " + ", ".join(missing)) if missing else None), proc.returncode
+        # json role
+        result = _normalize_output(output_file.read_text(encoding="utf-8"),
+                                   runner.get("normalizer", "passthrough"))
+        if result is None:
+            return "no valid JSON in output" + err, proc.returncode
+        if meta["schema"]:
+            errs = validate_against_schema(result, f"{meta['schema']}.schema.json")
+            if errs:
+                return "schema: " + "; ".join(errs[:3]), proc.returncode
+        # Persist the NORMALIZED JSON back to the file. The runner may have written
+        # a markdown-fenced or prose-wrapped payload (common with many models);
+        # _normalize_output tolerated it for validation, but every downstream
+        # consumer (driver advance, the SKILL) reads this file with a plain
+        # json.loads. Writing the canonical object back makes the result robust to
+        # how the model formatted its output.
+        output_file.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return None, proc.returncode
 
     attempts = []
     for idx, runner in enumerate(runners):
@@ -1418,7 +1634,7 @@ def cmd_run_stage(args) -> None:
 
         # One error-fed retry of the SAME runner before falling back: rewrite the
         # user prompt with the validation problem so the model can self-correct.
-        if problem and problem != INSUFFICIENT and meta["category"] in ("json", "named"):
+        if problem and meta["category"] == "json":
             user_file.write_text(
                 runner_user + "\n\n## Your previous output was REJECTED\n" + problem +
                 "\nProduce a corrected result.\n", encoding="utf-8")
@@ -1426,23 +1642,15 @@ def cmd_run_stage(args) -> None:
             if retry_problem is None:
                 problem, exit_code = None, retry_exit
 
-        if problem == INSUFFICIENT:
-            # An "input too vague" verdict is not LLM-specific — do NOT try a
-            # fallback runner; surface it to the user.
-            if output_file.exists():
-                output_file.unlink()  # don't leave an INSUFFICIENT marker where a spec is expected
-            emit({"ok": False, "role": role, "category": "named", "reason": "insufficient",
-                  "message": "the author reported the input is too vague to proceed", "runner": idx})
-            return
         if problem is None:
             emit({"ok": True, "role": role, "category": meta["category"], "runner": idx,
                   "used": command, "output_file": str(output_file), "attempts": attempts})
             return
         attempts.append({"runner": idx, "exit": exit_code, "problem": problem})
 
-    # Every runner failed: for named/json roles, remove any partial output so a
+    # Every runner failed: for json roles, remove any partial output so a
     # downstream `advance` cannot mistake it for a valid result (n3 hardening).
-    if meta["category"] in ("json", "named") and output_file.exists():
+    if meta["category"] == "json" and output_file.exists():
         output_file.unlink()
 
     emit({"ok": False, "role": role, "category": meta["category"],
@@ -1455,9 +1663,9 @@ def cmd_run_stage(args) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_migrate_config(args) -> None:
-    """Convert a pre-3.0.0 config to the bash-runner shape: replace the removed
-    claude-subagent / codex-adversarial-review runners with the canonical bash
-    defaults (and add the now-required spec_author runner). The driver and llm
+    """Convert an old config to the current bash-runner shape: replace the whole
+    runners section with the canonical bash defaults. This also drops a removed
+    role like the pre-5.0.0 spec_author (no longer a runner). The driver and llm
     sections are preserved; only runners are rewritten."""
     config_path = pathlib.Path(args.config).resolve()
     cfg = load_json(config_path)
@@ -1473,8 +1681,9 @@ def cmd_migrate_config(args) -> None:
     emit({"migrated": True, "config": str(out),
           "legacy_roles": legacy, "replaced_roles": replaced,
           "backup": (str(out.with_suffix(out.suffix + ".bak")) if not args.out else None),
-          "warning": "ALL runners were replaced with the 3.0.0 bash defaults (incl. spec_author) — "
-                     "any custom runner commands were dropped (see the .bak). Review and customize."})
+          "warning": "ALL runners were replaced with the current bash defaults; any removed role "
+                     "(e.g. the pre-5.0.0 spec_author) is dropped and any custom runner commands "
+                     "were lost (see the .bak). Review and customize."})
 
 
 # ---------------------------------------------------------------------------
@@ -1486,19 +1695,20 @@ dev-pipeline — automated implement → test → review loop
 
 WORKFLOW OVERVIEW
 -----------------
-1. Write a plan.md describing what to implement.
-2. Install dev-pipeline into your project:
+1. Install dev-pipeline into your project:
      bash /path/to/dev-pipeline/install.sh /path/to/project
-3. Invoke the SKILL inside Claude Code:
-     /dev-pipeline --plan plan.md
-   On first run it bootstraps .dev-pipeline/dev-pipeline.config.json from the
-   template and stops so you can fill in build/install/test instructions.
-4. Edit .dev-pipeline/dev-pipeline.config.json, then re-run /dev-pipeline.
+2. Invoke the SKILL inside your agent host:
+     /dev-pipeline --request "<what to build>"      (planner writes plan.md for you)
+     /dev-pipeline --plan plan.md                   (run an existing plan.md)
+   A plan.md carries a leading ```dev-pipeline-config header (tester instructions,
+   tdd_mode, …) plus a spec body (Requirements, Acceptance Criteria, Interface).
+   On first run the config is bootstrapped from the template; the plan header can
+   supply the per-run instructions.
 
 STATES
 ------
-  init                → validate config, generate spec.md
-  test_implementation → (TDD) test author writes tests from the spec
+  init                → merge plan header + validate config/contract, write contract.md
+  test_implementation → (TDD) test author writes tests from the contract
   red_test            → (TDD) tester proves the tests FAIL before any code exists
   implementation      → implementor agent writes code
   test                → tester agent runs build/install/test
@@ -1506,7 +1716,7 @@ STATES
   done                → commit, retrospective, (optional) self-evolution
   failed              → stopped due to exhausted iterations or environment error
 
-  TDD flow (default; disable with --no-tdd or driver.tdd_mode=false):
+  TDD flow (default; disable with driver.tdd_mode=false in the config/header):
     init → test_implementation → red_test → implementation → test → review → done
   Legacy flow (tdd off):
     init → implementation → test → review → done
@@ -1514,17 +1724,17 @@ STATES
 DRIVER CLI
 ----------
   bootstrap-config Seed .dev-pipeline/dev-pipeline.config.json from the template
-  init             Create a new run from a plan + config  [--tdd/--no-tdd]
+  init             Create a new run from a plan + config  [--header-approved]
   advance          Compute and apply the next state transition
   status           Print current run state
-  validate-config  Check config completeness and schema   [--tdd/--no-tdd]
+  validate-config  Check config completeness and schema   [--plan <path>]
   validate-result  Check a test-result or review-result file
   normalize-review Convert codex --json payload → canonical review-result JSON
   append-attempt   Log a failed attempt to attempts.md for implementor context
   check-boundary   (TDD) verify a role only touched files it is allowed to
   record-changes   Accumulate pipeline-produced files into changed-manifest.txt
   run-stage        Execute a role via its configured bash runner (assemble prompt, run, validate)
-  migrate-config   Convert a pre-3.0.0 config (claude-subagent runners) to bash runners
+  migrate-config   Convert an old config's runners to the current bash defaults
   --version        Print the dev-pipeline version and exit
   --help           Show this message
 
@@ -1537,10 +1747,11 @@ ITERATION LIMITS
 
 TDD MODE
 --------
-  tdd_mode (config, default true) — author tests first and prove they fail (RED)
-  before writing code, then make them pass (GREEN). Override per run with
-  --tdd / --no-tdd. When enabled, llm.test_implementor (focus,
-  framework_instruction, test_paths) and runners.test_implementor are required.
+  tdd_mode (config / plan header, default true) — author tests first and prove
+  they fail (RED) before writing code, then make them pass (GREEN). The single
+  source is driver.tdd_mode (a plan.md header can set it); it is frozen into the
+  run at init. When enabled, llm.test_implementor (focus, framework_instruction,
+  test_paths) and runners.test_implementor are required.
 
 REVIEW GATE
 -----------
@@ -1579,8 +1790,11 @@ def main() -> None:
     p_init.add_argument("--plan", required=True)
     p_init.add_argument("--config")
     p_init.add_argument("--project")
-    # --tdd / --no-tdd: per-run override (None = fall back to config / default true)
-    p_init.add_argument("--tdd", dest="tdd", default=None, action=argparse.BooleanOptionalAction)
+    # Human approved this plan's header (per --request approval / --plan confirm),
+    # so its executable/gate keys (tester.* commands, test_paths, review_block_
+    # severity, tdd_mode) may be merged from the untrusted plan.md. Without it,
+    # those keys come from config.json (unless driver.allow_unattended_header_merge).
+    p_init.add_argument("--header-approved", dest="header_approved", action="store_true")
 
     p_adv = sub.add_parser("advance")
     p_adv.add_argument("--run", required=True)
@@ -1590,7 +1804,9 @@ def main() -> None:
 
     p_vc = sub.add_parser("validate-config")
     p_vc.add_argument("--config", required=True)
-    p_vc.add_argument("--tdd", dest="tdd", default=None, action=argparse.BooleanOptionalAction)
+    # Optional: merge a plan.md header (full whitelist) and check the plan body,
+    # i.e. validate the config exactly as `init` will see it for that plan.
+    p_vc.add_argument("--plan")
 
     p_vr = sub.add_parser("validate-result")
     p_vr.add_argument("--type", required=True, choices=["test", "review"])

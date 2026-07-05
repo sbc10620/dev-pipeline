@@ -27,6 +27,9 @@
         "run_self_evolution": {
           "type": "boolean"
         },
+        "allow_unattended_header_merge": {
+          "type": "boolean"
+        },
         "review_block_severity": {
           "oneOf": [
             {
@@ -96,9 +99,8 @@
     "runners": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["spec_author", "implementor", "tester", "reviewer"],
+      "required": ["implementor", "tester", "reviewer"],
       "properties": {
-        "spec_author":      { "$ref": "#/$defs/runner_array" },
         "implementor":      { "$ref": "#/$defs/runner_array" },
         "tester":           { "$ref": "#/$defs/runner_array" },
         "test_implementor": { "$ref": "#/$defs/runner_array" },

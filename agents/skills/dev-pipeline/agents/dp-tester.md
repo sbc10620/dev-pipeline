@@ -49,7 +49,7 @@ Status is determined purely by exit codes — never by a subjective reading of t
 ### [Step 4] Classify failure type (only when status is "fail")
 - [Step 4.1] Read the log output of the failed stage.
 - [Step 4.2] Classify as `environment` if the failure is clearly due to: a missing **third-party** dependency/package (a library the project installs), test framework or toolchain not found, network error, permission error, external service unavailability, **or clearly flaky/non-deterministic behavior** (e.g. race conditions, intermittent timeouts, port conflicts) — i.e., failures unrelated to the implementation code itself.
-- [Step 4.3] Classify as `code` if the failure is due to: compilation error, test assertion failure, import error in the code being tested, **a module/function/symbol the tests reference that does not exist yet because it is part of the feature under test** (first-party, not implemented yet — including import/compile errors pointing at the spec's intended interface), or any implementation-level defect. A missing first-party symbol the spec defines is `code`, not a missing dependency.
+- [Step 4.3] Classify as `code` if the failure is due to: compilation error, test assertion failure, import error in the code being tested, **a module/function/symbol the tests reference that does not exist yet because it is part of the feature under test** (first-party, not implemented yet — including import/compile errors pointing at the contract's intended interface), or any implementation-level defect. A missing first-party symbol the contract defines is `code`, not a missing dependency.
 - [Step 4.4] When in doubt, classify as `code` (conservative).
 - [Step 4.5] When status is `pass`, set `failure_type: null`.
 

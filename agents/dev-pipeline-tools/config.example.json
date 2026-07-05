@@ -9,7 +9,7 @@
   },
   "llm": {
     "implementor": {
-      "design_instruction": "Prefer reusing existing code patterns and utilities. Stay within the plan/spec scope. Implement in small, clear, testable units. Write code comments in English."
+      "design_instruction": "Prefer reusing existing code patterns and utilities. Stay within the contract scope. Implement in small, clear, testable units. Write code comments in English."
     },
     "test_implementor": {
       "focus": "Write one meaningful test per acceptance criterion that exercises real behavior. Never write empty, skipped, or always-passing tests. Do NOT write production code.",
@@ -22,14 +22,11 @@
       "test_instruction": "<REQUIRED: test command, e.g. 'npm test' — or 'no test step' if not applicable>"
     },
     "reviewer": {
-      "focus": "Adversarially review for correctness, boundary/exception handling, data integrity, security boundaries, and regression risk. Always verify that the spec's acceptance criteria are met. Review production code AND test code, but never run anything. The gate subject is the production code's spec compliance: test style/coverage nitpicks are at most medium severity, but a test that asserts behavior contradicting the spec is a legitimate high finding.",
+      "focus": "Adversarially review for correctness, boundary/exception handling, data integrity, security boundaries, and regression risk. Always verify that the contract's acceptance criteria are met. Review production code AND test code, but never run anything. The gate subject is the production code's contract compliance: test style/coverage nitpicks are at most medium severity, but a test that asserts behavior contradicting the contract is a legitimate high finding.",
       "scope": "working-tree"
     }
   },
   "runners": {
-    "spec_author": [
-      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Write" }
-    ],
     "implementor": [
       { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Edit Write Bash" }
     ],
