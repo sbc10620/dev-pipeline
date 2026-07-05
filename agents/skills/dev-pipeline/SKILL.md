@@ -139,7 +139,7 @@ Each advance echoes a `directive` (e.g. `run_test_implementor`, `run_tester`, `r
     ```
     Parse the JSON output:
     - `status == "created"`:
-      - **`--request`:** do **not** stop — save the returned `project_root` and continue. The planner will fill the tester/test_implementor instructions into the plan header, which `init` merges. (Only `runners` must be pre-present, and the template supplies them.)
+      - **`--request`:** do **not** stop — save the returned `project_root` and continue. The planner will fill the tester/test_implementor instructions into the plan header, which `init` merges **after you approve the plan**. (Only `runners` must be pre-present, and the template supplies them.) **Caveat for `--auto-run` on a fresh config:** the header's executable/gate keys are only merged with approval or `driver.allow_unattended_header_merge` — so an unattended run against a still-placeholder config will be stopped at planning with instructions (see `states/planning.md` Step 2). For a hands-off first run, either drop `--auto-run`, set that config key, or pre-fill the config.
       - **`--plan`:** **stop** and tell the user, using the returned `config_path` and `required_fields`:
         > "✅ Created the dev-pipeline config from the template: `<config_path>`
         > Before running, either fill the required fields (placeholder `<...>` values are rejected) — `llm.tester.build_instruction`/`install_instruction`/`test_instruction`, and (TDD on by default) `llm.test_implementor.framework_instruction` + `test_paths` — or put them in your plan.md `dev-pipeline-config` header. To skip TDD set `driver.tdd_mode: false`. Then re-run."
