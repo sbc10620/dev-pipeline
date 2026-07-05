@@ -7,7 +7,7 @@ Usage:
   python3 driver.py init             --plan <path> [--config <path>] [--project <dir>] [--header-approved]
   python3 driver.py advance          --run <run_dir>
   python3 driver.py status           --run <run_dir>
-  python3 driver.py validate-config  --config <path> [--plan <path>]
+  python3 driver.py validate-config  --config <path> [--plan <path>] [--header-approved]
   python3 driver.py validate-result  --type test|review --file <path>
   python3 driver.py normalize-review --source codex --in <file> --out <file>
   python3 driver.py append-attempt   --run <run_dir> --state <test_implementation|red_test|test|review> --outcome <text-or-file>
@@ -342,6 +342,11 @@ def parse_plan_header(text: str):
         differ per planner model). Body JSON examples are never extracted.
       * A genuinely absent header returns (None, text); the caller must surface it.
     """
+    # Normalize line endings once so a CRLF/CR plan.md (Windows or some LLMs) is
+    # parsed identically to LF — otherwise the trailing \r would break the fence
+    # regexes and the header would be silently dropped (fail-open). The returned
+    # body is therefore LF too, which is fine for contract.md.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     raw = text.lstrip("﻿")
     stripped = raw.lstrip()
     m = re.match(r"(`{3,}|~{3,})[ \t]*([^\s`~]*)[ \t]*\n", stripped)
@@ -349,7 +354,9 @@ def parse_plan_header(text: str):
         return None, text
     fence = m.group(1)
     rest = stripped[m.end():]
-    close = re.search(r"^" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*$",
+    # Closing fence: same char, at least as long as the opener, on its own line
+    # (up to 3 leading spaces allowed, per CommonMark).
+    close = re.search(r"^[ ]{0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*$",
                       rest, re.MULTILINE)
     if not close:
         die("plan.md config header: opening `dev-pipeline-config` fence has no closing fence.")
@@ -412,20 +419,23 @@ def merge_plan_header(cfg: dict, header: dict, exec_allowed: bool):
 
 def _strip_code_fences(text: str) -> str:
     """Blank out fenced code blocks (``` or ~~~, 3+ chars) so a heading shown
-    inside an example is not counted as a real section heading."""
-    out, fence = [], None
+    inside an example is not counted as a real section heading. Tracks the
+    opener's (char, length): a closing fence must be the same char and at least
+    as long — so a 3-backtick line inside a 4-backtick example does NOT close it
+    (the exact wrapping dp-planner.md's template teaches)."""
+    out, fence = [], None  # fence = (char, length) while inside a block
     for line in text.splitlines():
         s = line.lstrip()
         if fence is None:
             m = re.match(r"(`{3,}|~{3,})", s)
             if m:
-                fence = m.group(1)[0]
-            out.append("")
-            if not m:
-                out[-1] = line
+                fence = (m.group(1)[0], len(m.group(1)))
+                out.append("")
+            else:
+                out.append(line)
             continue
-        # inside a fence
-        if re.match(re.escape(fence) + r"{3,}[ \t]*$", s):
+        # inside a fence — close only on same char, length >= opener
+        if re.match(re.escape(fence[0]) + "{" + str(fence[1]) + r",}[ \t]*$", s):
             fence = None
         out.append("")
     return "\n".join(out)
@@ -459,8 +469,10 @@ def validate_plan_body(body: str, tdd_mode: bool) -> list:
         if not _has_h2(scan, name):
             problems.append(f"missing required section: ## {name}")
     if _has_h2(scan, "Acceptance Criteria") and not re.search(
-            r"(?m)^[ \t]*[-*][ \t]+\S", _section_body(scan, "Acceptance Criteria")):
-        problems.append("## Acceptance Criteria has no list items (e.g. `- [ ] AC1. …`)")
+            r"(?m)^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+)\S",
+            _section_body(scan, "Acceptance Criteria")):
+        problems.append("## Acceptance Criteria has no list items "
+                        "(e.g. `- [ ] AC1. …` or `1. AC1. …`)")
     if tdd_mode and _has_h2(scan, "Interface") and not _section_body(scan, "Interface").strip():
         problems.append("## Interface is empty")
     return problems
@@ -796,10 +808,11 @@ def cmd_advance(args) -> None:
     if current == "init":
         # The contract (header-stripped plan body) is written by `init` itself, so
         # it always exists here; a fallback covers runs created before 5.0.0.
-        contract_path = pathlib.Path(state.get("contract_path") or state.get("spec_path") or "")
-        if not str(contract_path) or not contract_path.exists():
+        contract_raw = state.get("contract_path") or state.get("spec_path")
+        if not contract_raw or not pathlib.Path(contract_raw).exists():
             die("Contract not found. This run was created by a pre-5.0.0 driver — "
                 "finish it with the driver version that started it, or start a new run.")
+        contract_path = str(contract_raw)
         iter_dir = ensure_iter_dir(run_dir, state)
         if state.get("tdd_mode", False):
             transition("test_implementation", "contract_ready",
@@ -1144,15 +1157,20 @@ def cmd_validate_config(args) -> None:
     body = None
     header_applied = []
     if plan_path:
-        # Validate the config as `init` will see it: merge the plan.md header
-        # (full whitelist — this is the pre-approval "would this plan run?" check)
-        # and require the plan body's sections too.
+        # Validate the config EXACTLY as `init` will see it, using the SAME
+        # exec-key trust rule: executable/gate header keys merge only when the
+        # header is approved (--header-approved, passed by the SKILL when the plan
+        # will be approved) or the durable driver.allow_unattended_header_merge is
+        # set. Mirroring init here keeps the planning pre-approval gate honest —
+        # a plan that passes this check passes init under the same approval state.
         pp = pathlib.Path(plan_path).resolve()
         if not pp.exists():
             die(f"Plan file not found: {pp}")
         header, body = parse_plan_header(pp.read_text(encoding="utf-8"))
+        exec_allowed = bool(getattr(args, "header_approved", False)) or \
+            bool(cfg.get("driver", {}).get("allow_unattended_header_merge", False))
         if header is not None:
-            header_applied, _ = merge_plan_header(cfg, header, exec_allowed=True)
+            header_applied, _ = merge_plan_header(cfg, header, exec_allowed)
     errors = validate_config_data(cfg)
     if body is not None:
         errors += [f"plan body: {p}" for p in validate_plan_body(body, effective_tdd_mode(cfg))]
@@ -1536,17 +1554,17 @@ def cmd_run_stage(args) -> None:
         die(f"Unknown role: {role}")
     meta = ROLE_META[role]
 
-    # stage-input.json is written by cmd_init (spec) or cmd_advance (other roles);
-    # it carries the dynamic, advance-computed context. The static runner array
-    # and project root come from the run's own files (driver-owned, not the SKILL).
+    # stage-input.json is written by cmd_advance into each iteration dir; it
+    # carries the dynamic, advance-computed context. The static runner array and
+    # project root come from the run's own files (driver-owned, not the SKILL).
     si_path = run_dir / args.stage_input if pathlib.Path(args.stage_input).name == args.stage_input else pathlib.Path(args.stage_input)
     stage_input = load_json(si_path)
     cfg = load_json(run_dir / "config.snapshot.json")
     state = load_state(run_dir)
     project_root = pathlib.Path(stage_input.get("project_root") or state.get("project_dir") or ".").resolve()
 
-    # Guard against passing the wrong stage-input (e.g. the default spec-author one
-    # for an iteration role) — the SKILL always passes the matching path.
+    # Guard against passing the wrong stage-input (a mismatched iteration/role
+    # path) — the SKILL always passes the matching path.
     if stage_input.get("role") and stage_input["role"] != role:
         die(f"stage-input role {stage_input['role']!r} != --role {role!r}; wrong --stage-input path.")
 
@@ -1804,9 +1822,11 @@ def main() -> None:
 
     p_vc = sub.add_parser("validate-config")
     p_vc.add_argument("--config", required=True)
-    # Optional: merge a plan.md header (full whitelist) and check the plan body,
-    # i.e. validate the config exactly as `init` will see it for that plan.
+    # Optional: merge a plan.md header and check the plan body, i.e. validate the
+    # config exactly as `init` will see it for that plan. --header-approved mirrors
+    # init's trust gate so the check matches init under the same approval state.
     p_vc.add_argument("--plan")
+    p_vc.add_argument("--header-approved", dest="header_approved", action="store_true")
 
     p_vr = sub.add_parser("validate-result")
     p_vr.add_argument("--type", required=True, choices=["test", "review"])

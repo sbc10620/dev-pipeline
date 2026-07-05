@@ -1614,6 +1614,99 @@ class TestPlanHeader(PipelineTestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.json["next_state"], "implementation")
 
+    def test_crlf_header_is_recognized_and_merged(self):
+        # A CRLF plan.md must be parsed identically to LF — the header is
+        # recognized/merged, not silently dropped (fail-open regression guard).
+        p = self.make_pipeline(tdd_mode=False)
+        header = {"llm": {"tester": {"test_instruction": "pytest -q"}}}
+        plan_crlf = plan_with_header(header).replace("\n", "\r\n")
+        j = p.init(plan_text=plan_crlf, header_approved=True)
+        self.assertTrue(j["header_found"])
+        self.assertEqual(self._snap(p)["llm"]["tester"]["test_instruction"], "pytest -q")
+        self.assertNotIn("\r", p.contract_path.read_text(encoding="utf-8"))  # normalized to LF
+
+    def test_wrong_typed_exec_key_in_approved_header_is_rejected(self):
+        # Even with approval, a mistyped exec/gate value must be rejected by the
+        # merged-config schema (the schema is the type backstop, not the merge).
+        for header in (
+            {"driver": {"tdd_mode": "false"}},                 # string, not bool
+            {"llm": {"test_implementor": {"test_paths": "tests/**"}}},  # string, not array
+            {"driver": {"review_block_severity": "critical"}}, # string, not array/null
+        ):
+            p = self.make_pipeline(tdd_mode=False)
+            r = self._init_direct(p, plan_with_header(header))
+            self.assertNotEqual(r.returncode, 0, f"{header} should be rejected")
+            self.assertFalse((p.project / ".dev-pipeline" / "runs").exists())
+
+    def test_heading_inside_nested_example_fence_is_not_a_section(self):
+        # A required heading that only appears inside a 4-backtick example (which
+        # itself shows a 3-backtick block) must NOT satisfy the section gate.
+        p = self.make_pipeline(tdd_mode=True)
+        body = ("# Plan\n\n## Requirements\n- r\n\n## Acceptance Criteria\n- [ ] a\n\n"
+                "````\nexample:\n```\n## Interface\nfoo()\n```\n````\n")
+        r = self._init_direct(p, body)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Interface", r.stderr)
+
+    def test_numbered_acceptance_criteria_accepted(self):
+        p = self.make_pipeline(tdd_mode=False)
+        body = "# Plan\n\n## Requirements\n- r\n\n## Acceptance Criteria\n1. AC1 does x\n"
+        j = p.init(plan_text=body)
+        self.assertTrue((p.run_dir / "state.json").exists())
+        self.assertIn("AC1", p.contract_path.read_text(encoding="utf-8"))
+        _ = j
+
+    def test_header_without_closing_fence_dies(self):
+        p = self.make_pipeline(tdd_mode=False)
+        bad = "```dev-pipeline-config\n{}\n\n# Plan\n\n## Requirements\n- r\n## Acceptance Criteria\n- a\n"
+        r = self._init_direct(p, bad)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("closing fence", r.stderr)
+
+    def test_advance_dies_when_state_has_neither_contract_nor_spec_path(self):
+        # A corrupted state.json missing both keys must die, not echo "." as the
+        # contract (the pre-5.0.0 guard must actually fire).
+        p = self.started(tdd_mode=False)
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        state.pop("contract_path", None)
+        state.pop("spec_path", None)
+        (p.run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        r = p.advance()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("pre-5.0.0", r.stderr)
+
+    def test_validate_config_plan_matches_init_under_same_approval(self):
+        # Parity: on a placeholder config, a header supplying the tester commands
+        # validates + inits WITH approval, and both fail WITHOUT it.
+        p = self.make_pipeline(tdd_mode=False)
+        # start from a placeholder tester config
+        p._config["llm"]["tester"] = {
+            "build_instruction": "<REQUIRED>", "install_instruction": "<REQUIRED>",
+            "test_instruction": "<REQUIRED>"}
+        cfg_path = p.project / ".dev-pipeline" / "dev-pipeline.config.json"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps(p._config), encoding="utf-8")
+        header = {"llm": {"tester": {"build_instruction": "no build step",
+                                     "install_instruction": "no install step",
+                                     "test_instruction": "pytest"}}}
+        plan = p.project / "plan.md"
+        plan.write_text(plan_with_header(header), encoding="utf-8")
+
+        def vc(*extra):
+            return run_driver("validate-config", "--config", str(cfg_path),
+                              "--plan", str(plan), *extra)
+
+        def init(*extra):
+            return run_driver("init", "--plan", str(plan), "--config", str(cfg_path),
+                              "--project", str(p.project), *extra)
+
+        # approved: both pass
+        self.assertEqual(vc("--header-approved").returncode, 0, vc("--header-approved").stderr)
+        self.assertEqual(init("--header-approved").returncode, 0)
+        # unapproved: exec keys not merged → placeholders remain → BOTH fail
+        self.assertNotEqual(vc().returncode, 0)
+        self.assertNotEqual(init().returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
