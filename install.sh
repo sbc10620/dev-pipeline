@@ -84,7 +84,7 @@ mkdir -p "${SKILLS_DST}/schemas" "${SKILLS_DST}/states" "${PROMPTS_DST}"
 # Copy role-prompt files (LLM-agnostic prose; run-stage assembles them into the
 # system prompt). They live inside the skill (agents/) — no longer a top-level
 # .claude/agents/ subagent dir.
-for f in dp-spec-author.md dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md; do
+for f in dp-planner.md dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md; do
   src="${SOURCE_AGENTS}/${f}"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Source file not found: ${src}"
@@ -99,7 +99,7 @@ cp "${SOURCE_SKILL}/SKILL.md" "${SKILLS_DST}/SKILL.md"
 echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/SKILL.md"
 
 # Copy per-state orchestration files (the SKILL reads states/<state>.md per transition)
-for f in init test_implementation red_test implementation test review done failed; do
+for f in planning init test_implementation red_test implementation test review done failed; do
   src="${SOURCE_SKILL}/states/${f}.md"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Source file not found: ${src}"
@@ -107,7 +107,7 @@ for f in init test_implementation red_test implementation test review done faile
   fi
   cp "${src}" "${SKILLS_DST}/states/${f}.md"
 done
-echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/states/ (8 files)"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/states/ (9 files)"
 
 # Copy driver script (must be co-located with schemas for standalone operation)
 cp "${SOURCE_TOOLS}/driver.py" "${SKILLS_DST}/driver.py"
@@ -157,7 +157,7 @@ echo "[dev-pipeline] Copied: .claude/skills/dev-pipeline/ (real copy for Claude 
 # below would sweep the user's unrelated agents into the dev-pipeline commit.
 CLEANED_OLD_AGENTS=""
 if [[ -d "${CLAUDE_DIR}/agents" ]]; then
-  for f in dp-spec-author.md dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md; do
+  for f in dp-planner.md dp-spec-author.md dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md; do
     if [[ -f "${CLAUDE_DIR}/agents/${f}" ]]; then
       rm -f "${CLAUDE_DIR}/agents/${f}"
       CLEANED_OLD_AGENTS=1
@@ -181,7 +181,7 @@ Open the file `.agents/skills/dev-pipeline/SKILL.md` in this project and follow
 its instructions exactly.
 
 For the skill's arguments, use whatever text the user typed after
-`/dev-pipeline.md` in their message (for example `--plan plan.md [--tdd | --no-tdd]`).
+`/dev-pipeline.md` in their message (for example `--request "<goal>"` or `--plan plan.md [--auto-run]`).
 If the line below still shows the literal text "$ARGUMENTS", ignore that line and
 read the arguments from the user's message instead.
 
@@ -235,18 +235,17 @@ echo "    git add ${GIT_ADD_PATHS}"
 echo "    git commit -m \"Add dev-pipeline (skill + prompts)\""
 echo ""
 echo "Next steps:"
-echo "  1. Write your plan.md"
+echo "  1. In your agent host, run either:"
+echo "       /dev-pipeline --request \"<what to build>\"   (planner writes plan.md for you)"
+echo "       /dev-pipeline --plan plan.md                 (run an existing plan.md)"
+echo "     The first run creates ${RUNTIME_DIR}/dev-pipeline.config.json from the template."
 echo ""
-echo "  2. In Claude Code, run:"
-echo "     /dev-pipeline --plan plan.md"
-echo "     The first run creates ${RUNTIME_DIR}/dev-pipeline.config.json"
-echo "     from the template and stops."
-echo ""
-echo "  3. Edit ${RUNTIME_DIR}/dev-pipeline.config.json"
-echo "     Fill in: llm.tester.build_instruction / install_instruction / test_instruction"
-echo "     TDD is on by default, so also fill: llm.test_implementor.framework_instruction"
-echo "       and llm.test_implementor.test_paths (or run with --no-tdd to skip)."
+echo "  2. Provide the tester/test_implementor instructions either in that config OR in"
+echo "     the plan.md 'dev-pipeline-config' header (the planner fills the header for you)."
+echo "       config: llm.tester.build_instruction / install_instruction / test_instruction;"
+echo "       TDD on by default → llm.test_implementor.framework_instruction + test_paths"
+echo "       (set driver.tdd_mode=false to skip TDD)."
 echo "     The default runners call the 'claude' (and 'codex') CLI — see config.runners."
-echo "     SECURITY: default runners run headless without a sandbox and treat plan/spec"
-echo "       as untrusted; run dev-pipeline in a sandboxed/throwaway environment."
-echo "     Then re-run /dev-pipeline --plan plan.md"
+echo "     SECURITY: default runners run headless without a sandbox and treat plan.md /"
+echo "       the contract as untrusted; a plan header's executable/gate keys merge only"
+echo "       with your approval. Run dev-pipeline in a sandboxed/throwaway environment."

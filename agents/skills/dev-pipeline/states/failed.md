@@ -19,6 +19,6 @@ Stop immediately. Report:
 Report:
 - Which budget was exhausted. The `outcome` in `state.json` history distinguishes them: `test_fail_exhausted` (green test), `review_fail_exhausted` (review), or `red_not_confirmed_exhausted` (the authored tests kept passing with no implementation — the tests are likely vacuous; point the user at the test author output).
 - The last failure details / review findings, and a summary of all attempts from `attempts.md`.
-- If the advance echoed a `hint` (TDD review exhaustion), surface it: the blocking findings may point at tests that contradict the spec, not at a production defect — inspect the test findings before assuming the code is wrong.
+- If the advance echoed a `hint` (TDD review exhaustion), surface it: the blocking findings may point at tests that contradict the contract, not at a production defect — inspect the test findings before assuming the code is wrong.
 
 There is no further automatic action from a `failed` state. Stop after reporting.

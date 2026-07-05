@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["run_id", "dev_pipeline_version", "state", "plan_path", "config_path", "spec_path", "project_dir", "iterations", "max", "history", "started_at", "updated_at"],
+  "required": ["run_id", "dev_pipeline_version", "state", "plan_path", "config_path", "project_dir", "iterations", "max", "history", "started_at", "updated_at"],
   "properties": {
     "run_id":                { "type": "string" },
     "dev_pipeline_version":  { "type": "string" },
@@ -10,10 +10,11 @@
       "type": "string",
       "enum": ["init", "test_implementation", "red_test", "implementation", "test", "review", "done", "failed"]
     },
-    "plan_path":    { "type": "string" },
-    "config_path":  { "type": "string" },
-    "spec_path":    { "type": "string" },
-    "project_dir":  { "type": "string" },
+    "plan_path":     { "type": "string" },
+    "config_path":   { "type": "string" },
+    "contract_path": { "type": "string" },
+    "spec_path":     { "type": "string" },
+    "project_dir":   { "type": "string" },
     "tdd_mode":     { "type": "boolean" },
     "red_phase":    { "type": "boolean" },
     "iterations": {

@@ -1,24 +1,27 @@
 # dev-pipeline
 
-Automated **test-driven** development pipeline for Claude Code: author tests from the spec, prove they fail (RED), write code, prove they pass (GREEN), then review.
+Automated **test-driven** development pipeline for coding agents: author tests from the contract, prove they fail (RED), write code, prove they pass (GREEN), then review.
 
-Accepts a `plan.md` written by any LLM (Claude, Codex, etc.) and drives the full development cycle using per-stage LLM runners (claude, codex, …; chosen in config), with deterministic state transitions handled by a Python driver script.
+Give it a goal — a **conversational planner** writes a single `plan.md` (a `dev-pipeline-config` header + a testable spec body) — or hand it a `plan.md` you already wrote. It then drives the full development cycle using per-stage LLM runners (claude, codex, …; chosen in config), with deterministic state transitions handled by a Python driver script.
 
 ---
 
 ## How it works
 
 ```
-plan.md
+/dev-pipeline --request "<goal>"   (planner writes plan.md)   |   --plan plan.md
    │
    ▼
- [init]  →  validate config, generate spec.md (incl. Test Targets / Interface)
+ [planning] (--request)  →  planner explores read-only, asks you, writes plan.md, you approve
    │
    ▼
- [test_implementation]  →  test author writes tests from the spec        ┐ TDD
-   │                                                                      │ (default;
-   ▼                                                                      │  skipped
- [red_test]  →  tester proves the tests FAIL (no code yet)                ┘  with --no-tdd)
+ [init]  →  merge the plan's config header, validate config + contract, write contract.md
+   │
+   ▼
+ [test_implementation]  →  test author writes tests from the contract   ┐ TDD
+   │                                                                     │ (default;
+   ▼                                                                     │  skipped when
+ [red_test]  →  tester proves the tests FAIL (no code yet)               ┘  tdd_mode=false)
    │ red confirmed
    ▼
  [implementation]  →  implementor agent writes code
@@ -33,7 +36,7 @@ plan.md
  [done]                   [failed]
 ```
 
-- **TDD is on by default.** Run with `--no-tdd` (or set `driver.tdd_mode: false`) to skip `test_implementation`/`red_test` and use the legacy `implement → test → review` flow.
+- **TDD is on by default.** Set `driver.tdd_mode: false` (in the config or the plan header) to skip `test_implementation`/`red_test` and use the legacy `implement → test → review` flow.
 - RED not confirmed (authored tests pass with no code) → re-author tests (up to `max_test_implementation_iteration` times)
 - Test failure → retry implementation (up to `max_test_iteration` times)
 - Review failure → retry implementation, or — if the blocking finding is about a test file — re-author tests (up to `max_review_iteration` times)
@@ -87,7 +90,6 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
     }
   },
   "runners": {
-    "spec_author":      [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Write" }],
     "implementor":      [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Edit Write Bash" }],
     "test_implementor": [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Edit Write" }],
     "tester":           [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Bash > {output_file}", "normalizer": "claude-cli" }],
@@ -99,9 +101,9 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
 }
 ```
 
-**Runners (3.0.0).** Each role runs through `driver run-stage`, which assembles the prompt from the LLM-agnostic `dp-<role>.md` + the stage's inputs and runs `config.runners.<role>` — an ordered array of `{ "type": "bash", "command": …, "normalizer"?: "passthrough|claude-cli|codex-cli" }`. **The command is the only place an LLM is named**; swap/add an LLM by editing config alone. Placeholders the driver substitutes: `{system_file}` `{user_file}` `{output_file}` `{project_root}` `{run_dir}` `{work_dir}`. JSON roles either write `{output_file}` (tool) or print to stdout (when the command redirects `> {output_file}`). `runners.spec_author` is required; `llm.test_implementor` + `runners.test_implementor` are required only under TDD (the default — `--no-tdd` / `tdd_mode:false` to omit).
+**Runners (3.0.0).** Each role runs through `driver run-stage`, which assembles the prompt from the LLM-agnostic `dp-<role>.md` + the stage's inputs and runs `config.runners.<role>` — an ordered array of `{ "type": "bash", "command": …, "normalizer"?: "passthrough|claude-cli|codex-cli" }`. **The command is the only place an LLM is named**; swap/add an LLM by editing config alone. Placeholders the driver substitutes: `{system_file}` `{user_file}` `{output_file}` `{project_root}` `{run_dir}` `{work_dir}`. JSON roles either write `{output_file}` (tool) or print to stdout (when the command redirects `> {output_file}`). `llm.test_implementor` + `runners.test_implementor` are required only under TDD (the default — set `tdd_mode:false` to omit). The `planner` has no runner — it runs conversationally in the host session.
 
-> **Security:** the default `claude` runners run headless with pre-approved tools and **no sandbox**; `plan.md`/`spec.md`/code are untrusted input. Run dev-pipeline in a sandboxed/throwaway environment and keep each role's `--allowedTools` minimal (read-only roles use a stdout-redirect command with no `Write`). A pre-3.0.0 config is rejected with a hint — run `driver migrate-config --config <path>` to convert.
+> **Security:** the default `claude` runners run headless with pre-approved tools and **no sandbox**; `plan.md`/the contract/code are untrusted input. A `plan.md` config header can set instructions, but its *executable/gate* keys (tester commands, `test_paths`, `review_block_severity`, `tdd_mode`) merge only with your approval; `runners` never merge. Run dev-pipeline in a sandboxed/throwaway environment and keep each role's `--allowedTools` minimal (read-only roles use a stdout-redirect command with no `Write`). An old config with a removed runner (e.g. `spec_author`) is rejected with a hint — run `driver migrate-config --config <path>` to convert.
 
 ### Config fields
 
@@ -110,7 +112,7 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
 | `driver.max_test_iteration` | Yes | Max implementation retries after test failure |
 | `driver.max_review_iteration` | Yes | Max implementation retries after review failure |
 | `driver.max_test_implementation_iteration` | No | Max test re-authoring when RED is not confirmed (default: 2) |
-| `driver.tdd_mode` | No | Author tests first (RED→GREEN). Default `true`. Override per run with `--tdd`/`--no-tdd` |
+| `driver.tdd_mode` | No | Author tests first (RED→GREEN). Default `true`. A `plan.md` header may set it |
 | `driver.run_self_evolution` | Yes | Update installed agent .md files after done (default: false) |
 | `driver.review_block_severity` | No | Severities that block review pass (default: `["critical","high"]`). Null = use verdict gate |
 | `llm.tester.build_instruction` | **Yes** | Exact build command. Use `"no build step"` if not needed |
@@ -127,8 +129,9 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
 In Claude Code, with your project open:
 
 ```
-/dev-pipeline --plan plan.md            # TDD by default
-/dev-pipeline --plan plan.md --no-tdd   # legacy implement → test → review
+/dev-pipeline --request "add rate limiting"   # planner writes plan.md, then runs
+/dev-pipeline --request "<goal>" --auto-run   # skip the post-plan approval gate
+/dev-pipeline --plan plan.md                  # run an existing plan.md
 /dev-pipeline --help
 ```
 
@@ -146,11 +149,11 @@ Each role is an LLM-agnostic prose file (`agents/skills/dev-pipeline/agents/dp-<
 
 | Role | Does | Tool envelope (set in config) |
 |---|---|---|
-| `dp-spec-author` | Turns the plan into a structured, testable spec (or an `INSUFFICIENT:` marker) | Read, Write (spec only) |
-| `dp-test-implementor` | (TDD) Writes tests from the spec — tests only, no production code | Read, Write, Edit (no Bash) |
-| `dp-implementor` | Writes + build-checks code from plan + spec; never edits tests under TDD | Read, Edit, Write, Bash |
+| `dp-planner` | **Conversational, host session** (not a runner). Turns a goal into one `plan.md` (config header + testable spec body); read-only repo exploration | host session (read-only discipline in prose) |
+| `dp-test-implementor` | (TDD) Writes tests from the contract — tests only, no production code | Read, Write, Edit (no Bash) |
+| `dp-implementor` | Writes + build-checks code from the contract; never edits tests under TDD | Read, Edit, Write, Bash |
 | `dp-tester` | Runs build/install/test — **no code inference** (used by `red_test` and `test`) | Read, Bash (read-only; no Write) |
-| `dp-reviewer` | Adversarial review against the spec; reads the diff, never edits | Read, Grep, Glob (read-only) |
+| `dp-reviewer` | Adversarial review against the contract; reads the diff, never edits | Read, Grep, Glob (read-only) |
 
 ---
 
@@ -177,7 +180,7 @@ Created at `<project>/.dev-pipeline/` (gitignored automatically).
 ├── latest -> runs/<run-id>
 └── runs/<run-id>/
     ├── state.json           # driver state (single source of truth)
-    ├── spec.md              # generated from plan — shared by test author, implementor and reviewer
+    ├── contract.md          # header-stripped plan body — the contract for test author, implementor and reviewer
     ├── attempts.md          # accumulated failure history — passed to authors on retry
     ├── config.snapshot.json
     ├── changed-manifest.txt  # files the runners produced (commit/review scope)
@@ -254,7 +257,7 @@ dev-pipeline/
     │       ├── SKILL.md
     │       ├── states/            ← per-state procedure files (init, red_test, …)
     │       └── agents/            ← LLM-agnostic role prompts
-    │           ├── dp-spec-author.md
+    │           ├── dp-planner.md
     │           ├── dp-implementor.md
     │           ├── dp-test-implementor.md
     │           ├── dp-tester.md
@@ -281,7 +284,7 @@ dev-pipeline/
 │       └── dev-pipeline/
 │           ├── SKILL.md
 │           ├── states/             ← per-state procedure files (read on demand)
-│           ├── agents/             ← role prompts (dp-spec-author … dp-reviewer)
+│           ├── agents/             ← role prompts (dp-planner … dp-reviewer)
 │           ├── driver.py           ← installed for standalone operation
 │           ├── config.example.json ← template for driver bootstrap-config
 │           └── schemas/            ← config / test-result / review-result / state

@@ -2,7 +2,7 @@
 
 **Goal:** Run the implementor runner to write (and build-check) production code, enforce the role boundary (TDD), record the manifest, advance.
 
-The advance that landed here echoed `directive: run_implementor`, `iter_dir`, and `tdd_mode`. The driver persisted the implementor's full context (spec/plan paths, `design_instruction`, `build_instruction`, `test_paths`, retry/failure context) to `<iter_dir>/stage-input.json` — you do not assemble any of it.
+The advance that landed here echoed `directive: run_implementor`, `iter_dir`, and `tdd_mode`. The driver persisted the implementor's full context (`contract_path`, `design_instruction`, `build_instruction`, `test_paths`, retry/failure context) to `<iter_dir>/stage-input.json` — you do not assemble any of it.
 
 - [Step 1] **Stage a boundary/manifest baseline** when `project_root` is a git repo (`git rev-parse --git-dir`). This makes the git index the "before" snapshot so [Step 3] sees only the implementor's changes:
   ```bash
