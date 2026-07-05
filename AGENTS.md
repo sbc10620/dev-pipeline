@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, Cline, …) when working with code in this repository. **`AGENTS.md` is the single source of truth**; `CLAUDE.md` (Claude Code) and `.clinerules/AGENTS.md` (Cline) are symlinks to it, and Codex reads `AGENTS.md` directly.
+This file provides guidance to AI coding agents (Claude Code, Codex, Cline, …) when working with code in this repository. **`AGENTS.md` is the single source of truth**; `CLAUDE.md` (Claude Code) is a symlink to it, and Codex and Cline read `AGENTS.md` directly.
 
 ## Driver CLI
 
