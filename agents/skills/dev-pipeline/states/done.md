@@ -34,11 +34,11 @@
       git -C <project_root> reset HEAD -- <plan_path>
       git -C <project_root> check-ignore -q .dev-pipeline || git -C <project_root> reset HEAD -- <project_root>/.dev-pipeline
       ```
-  - **Commit only if something is staged**, with a one-line summary and a Co-Authored-By footer naming the model executing this skill:
+  - **Commit only if something is staged**, with a one-line summary and a Co-Authored-By footer naming the model executing this skill. Substitute **only** `<orchestrator model>` with your own model name (the LLM running this skill); `<noreply@dev-pipeline.local>` is a literal git-trailer email — leave it as-is. If you cannot determine your model name, use `dev-pipeline orchestrator`.
     ```bash
     git -C <project_root> diff --cached --quiet || git -C <project_root> commit -m "<summary>
 
-    Co-Authored-By: Claude <noreply@anthropic.com>"
+    Co-Authored-By: <orchestrator model> <noreply@dev-pipeline.local>"
     ```
     Do NOT push. (In TDD, the authored tests are part of the implementation and are committed normally.)
   - If not a git repo: inform the user that commit was skipped.
@@ -73,11 +73,11 @@
   - <issues, or "No issues">
 
   ### review state
-  - Runner/method: <e.g. bash runner (config.runners.reviewer): codex then claude fallback>
+  - Runner/method: <e.g. bash runner(s) per config.runners.reviewer order>
   - <issues, or "No issues">
   ```
 
-  Fill each `Runner/method` with the concrete agent/command/codex path actually used; note multi-iteration states. Be honest — if the workflow was not followed precisely (an advance out of order, a skipped validation, a boundary re-run), note it.
+  Fill each `Runner/method` with the concrete agent/command actually used; note multi-iteration states. Be honest — if the workflow was not followed precisely (an advance out of order, a skipped validation, a boundary re-run), note it.
 
 - [Step 4] **Self-evolution** — only if the echoed `run_self_evolution` is true.
   - Use the retrospective findings as input. Identify which agent `.md` files (or SKILL.md / its `states/*.md`) need updating.

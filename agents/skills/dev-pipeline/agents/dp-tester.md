@@ -1,8 +1,6 @@
 ---
 name: dp-tester
 description: dev-pipeline tester agent — runs build, install, and test using configured instructions only
-model: sonnet
-tools: Bash, Read
 ---
 
 # Role: dev-pipeline Tester

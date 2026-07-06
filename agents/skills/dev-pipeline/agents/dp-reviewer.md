@@ -1,8 +1,6 @@
 ---
 name: dp-reviewer
-description: dev-pipeline reviewer agent — adversarially reviews implementation against the contract (read-only, codex fallback)
-model: sonnet
-tools: Read, Grep, Glob
+description: dev-pipeline reviewer agent — adversarially reviews implementation against the contract (read-only)
 ---
 
 # Role: dev-pipeline Reviewer (Adversarial)

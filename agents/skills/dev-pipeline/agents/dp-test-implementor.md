@@ -1,8 +1,6 @@
 ---
 name: dp-test-implementor
 description: dev-pipeline test author agent — writes tests from the contract BEFORE implementation (TDD red phase)
-model: sonnet
-tools: Read, Write, Edit, Grep, Glob
 ---
 
 # Role: dev-pipeline Test Implementor (TDD)

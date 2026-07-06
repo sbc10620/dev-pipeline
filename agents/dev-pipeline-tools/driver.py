@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "5.0.0"
+__version__ = "5.1.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -1730,7 +1730,7 @@ STATES
   red_test            → (TDD) tester proves the tests FAIL before any code exists
   implementation      → implementor agent writes code
   test                → tester agent runs build/install/test
-  review              → codex adversarial-review (fallback: dp-reviewer agent)
+  review              → reviewer runner(s) per config.runners.reviewer
   done                → commit, retrospective, (optional) self-evolution
   failed              → stopped due to exhausted iterations or environment error
 

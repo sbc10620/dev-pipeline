@@ -1,8 +1,6 @@
 ---
 name: dp-implementor
 description: dev-pipeline implementor agent — implements code from the contract, then build-checks it before handoff
-model: sonnet
-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 # Role: dev-pipeline Implementor
