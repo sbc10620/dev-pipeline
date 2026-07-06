@@ -1374,8 +1374,8 @@ def cmd_record_changes(args) -> None:
 
     The SKILL passes each authoring step's delta (the same project_root-relative
     paths it hands to check-boundary). They are merged, de-duplicated and stored
-    in <run_dir>/changed-manifest.txt so the commit (done) and the dp-reviewer
-    fallback (review) operate on an allowlist of pipeline-produced files instead
+    in <run_dir>/changed-manifest.txt so the commit (done) and the review diff
+    (review) operate on an allowlist of pipeline-produced files instead
     of `git add -A` / `git ls-files --others`, which would sweep in untracked
     junk (cscope, ctags, build caches) the user never asked to commit.
     """
