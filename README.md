@@ -136,9 +136,9 @@ In Claude Code, with your project open:
 
 **Prerequisites:**
 - `.dev-pipeline/dev-pipeline.config.json` must be present and valid
-- **Commit the installed dev-pipeline files** (the canonical `.agents/skills/dev-pipeline/` tree, the `.claude/skills/dev-pipeline/` copy, and `.clinerules/workflows/dev-pipeline.md`) before running. They are tracked (not gitignored, so self-evolution can manage their history), and the review uses `working-tree` scope — committing them keeps the reviewer focused on your code instead of dev-pipeline's own tooling.
-- Start with a **clean working tree** (no unrelated uncommitted changes — they will be included in the review scope)
-- **Gitignore your build outputs** (compiled binaries, object files, etc.). The review uses `working-tree` scope, so any untracked artifact produced by the test phase would otherwise be reviewed alongside your real changes.
+- **Commit the installed dev-pipeline files** (the canonical `.agents/skills/dev-pipeline/` tree, the `.claude/skills/dev-pipeline/` copy, and `.clinerules/workflows/dev-pipeline.md`) before running. They are tracked (not gitignored, so self-evolution can manage their history); committing them keeps dev-pipeline's own tooling out of your change's manifest — and out of a codex reviewer's `working-tree` scan, if you configure one.
+- Start with a **clean working tree**. Unrelated uncommitted changes stay out of the manifest-scoped commit and review, but a clean tree keeps the role-boundary checks accurate (and out of scope for an opt-in codex reviewer, which scans the working tree).
+- **Gitignore your build outputs** (compiled binaries, object files, etc.). Build/test artifacts are excluded from the change manifest by design; keeping them gitignored also keeps them out of a codex reviewer's `working-tree` scan (if you configure one).
 
 ---
 

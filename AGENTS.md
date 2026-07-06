@@ -120,7 +120,7 @@ Every **headless** LLM role (`test_implementor`, `implementor`, `tester`, `revie
 
 ### Change manifest (commit/review scope)
 
-Each authoring state (`test_implementation`, `implementation`) computes its agent's delta `project_root`-relative (`git -C <project_root> diff --name-only --relative` + `ls-files --others`) and passes it to `driver record-changes`, which appends it (deduped, `.dev-pipeline/` excluded) to `<run_dir>/changed-manifest.txt`. The `done` commit stages **only** manifest paths (`git add -A -- <path>`, so deletions commit too) instead of `git add -A`; the `review` dp-reviewer fallback scopes to the same set. This keeps untracked junk *not produced by the authoring agents themselves* out of both without per-run `.gitignore` upkeep — build/test caches are generated in the separate `test` state (after the delta snapshot, before the next baseline), so they are absorbed and excluded; an artifact an authoring agent writes during its own turn would still be recorded. If the manifest is absent (run started by an older driver), `done` falls back to `git add -A` and warns. Note: a codex reviewer (if you configure one) discovers changes from the worktree itself and is **not** constrained by the manifest. Note also (since 2.3.0): the implementor build-checks its code, so its delta can include build artifacts — gitignored ones are excluded by `--exclude-standard`, but keep build output gitignored and outside `test_paths` so it neither pollutes the commit nor trips the boundary check.
+Each authoring state (`test_implementation`, `implementation`) computes its agent's delta `project_root`-relative (`git -C <project_root> diff --name-only --relative` + `ls-files --others`) and passes it to `driver record-changes`, which appends it (deduped, `.dev-pipeline/` excluded) to `<run_dir>/changed-manifest.txt`. The `done` commit stages **only** manifest paths (`git add -A -- <path>`, so deletions commit too) instead of `git add -A`; the `review` diff scopes to the same set. This keeps untracked junk *not produced by the authoring agents themselves* out of both without per-run `.gitignore` upkeep — build/test caches are generated in the separate `test` state (after the delta snapshot, before the next baseline), so they are absorbed and excluded; an artifact an authoring agent writes during its own turn would still be recorded. If the manifest is absent (run started by an older driver), `done` falls back to `git add -A` and warns. Note: a codex reviewer (if you configure one) discovers changes from the worktree itself and is **not** constrained by the manifest. Note also (since 2.3.0): the implementor build-checks its code, so its delta can include build artifacts — gitignored ones are excluded by `--exclude-standard`, but keep build output gitignored and outside `test_paths` so it neither pollutes the commit nor trips the boundary check.
 
 ### Determinism: the advance echo is the single channel
 
@@ -166,13 +166,12 @@ After editing, skim a sibling file side-by-side and confirm headings, step forma
 ├── state.json           # driver owns this
 ├── contract.md          # header-stripped plan body, written by init; the contract for test author, implementor + reviewer (TDD: incl. ## Interface)
 ├── attempts.md          # failure log appended on every test_implementation/test/review failure; passed to authors on retry
-├── changed-manifest.txt # files the authoring agents produced (record-changes); commit + review fallback stage only these
+├── changed-manifest.txt # files the authoring agents produced (record-changes); commit + review diff use only these
 ├── config.snapshot.json
 └── iterations/<n>/
     ├── red-test-result.json   # TDD red_test result (validated against the test-result schema)
     ├── test-result.json
-    ├── review-result.json
-    └── codex-raw.json          # only when a codex reviewer runner is configured
+    └── review-result.json
 ```
 
 ## Config requirements
