@@ -9,6 +9,17 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [5.1.0] - 2026-07-06
+
+Default runners are now **all `claude`, pinned to the `sonnet` model**; the shipped default reviewer is claude (codex is no longer the default). Role/orchestrator prose is kept LLM-neutral.
+
+### Changed
+- **`config.example.json` (bootstrap template)** — every default `claude` runner (`implementor`, `test_implementor`, `tester`, `reviewer`) now passes `--model sonnet`, pinning the model instead of relying on the CLI default. The **codex reviewer runner was removed** from the default `reviewer` array, which now ships a single claude reviewer. Codex remains fully supported as an opt-in runner (the `codex-cli` normalizer, `codex exec -s read-only`, and `llm.reviewer.scope` are unchanged) — add it back to `config.runners.reviewer` to use it.
+- **LLM-neutral prose** — the `done` commit `Co-Authored-By` trailer is no longer hardcoded to `Claude`; it names the orchestrator model actually running the skill. Removed the vestigial `model:`/`tools:` frontmatter from the `dp-*.md` role prompts (stripped at assembly; per the "no LLM name in prose" rule). Generalized "codex then claude"/"codex fallback" wording in `states/*.md`, `SKILL.md`, `dp-reviewer.md`, `README.md`, `install.sh`, and `driver.py --help` to reference `config.runners.reviewer` order instead of naming the default LLMs. `AGENTS.md` security/architecture notes updated to reflect the claude default reviewer.
+
+### Migration
+- No action needed for existing installs — their `.dev-pipeline/dev-pipeline.config.json` is unchanged. New runs bootstrapped after upgrading get the sonnet-pinned, claude-only reviewer default. To keep a codex reviewer, add its runner to `config.runners.reviewer`. To use a different claude model, change `--model` in the runner commands.
+
 ## [5.0.0] - 2026-07-05
 
 Conversational **planner** front-end; `plan.md` becomes the single contract (config header + spec body); `spec.md` / the `spec_author` role are removed.

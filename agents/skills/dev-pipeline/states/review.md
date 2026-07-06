@@ -12,7 +12,7 @@ The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `cont
   ```bash
   python3 <driver_path> run-stage --run <run_dir> --role reviewer --stage-input <iter_dir>/stage-input.json
   ```
-  The runner reviews the diff + contract (read-only on the code) and writes a schema-valid `review-result.json` to `<iter_dir>`. Its runner list (e.g. codex then claude) and tool envelope live in `config.runners.reviewer`. Read the JSON:
+  The runner reviews the diff + contract (read-only on the code) and writes a schema-valid `review-result.json` to `<iter_dir>`. Its runner list and tool envelope live in `config.runners.reviewer`. Read the JSON:
   - `ok: true` → a valid review result was written; proceed.
   - `ok: false` → every reviewer runner failed; stop and report the `attempts`.
 

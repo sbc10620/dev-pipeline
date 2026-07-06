@@ -90,12 +90,11 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
     }
   },
   "runners": {
-    "implementor":      [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Edit Write Bash" }],
-    "test_implementor": [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Edit Write" }],
-    "tester":           [{ "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Bash > {output_file}", "normalizer": "claude-cli" }],
+    "implementor":      [{ "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Edit Write Bash" }],
+    "test_implementor": [{ "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Edit Write" }],
+    "tester":           [{ "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Bash > {output_file}", "normalizer": "claude-cli" }],
     "reviewer":    [
-      { "type": "bash", "command": "codex exec -s read-only \"$(cat {system_file}; printf '\\n\\n'; cat {user_file})\" > {output_file}", "normalizer": "codex-cli" },
-      { "type": "bash", "command": "cat {user_file} | claude -p --append-system-prompt-file {system_file} --allowedTools Read Grep Glob > {output_file}", "normalizer": "claude-cli" }
+      { "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Grep Glob > {output_file}", "normalizer": "claude-cli" }
     ]
   }
 }
@@ -120,7 +119,7 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
 | `llm.tester.test_instruction` | **Yes** | Exact test command. Use `"no test step"` if not needed |
 | `llm.test_implementor.framework_instruction` | TDD | Test framework + where/how tests are written |
 | `llm.test_implementor.test_paths` | TDD | Globs matching test files only — the role boundary (e.g. `["tests/**"]`) |
-| `llm.reviewer.scope` | No | Codex review scope: `working-tree` (default), `branch`, `auto` |
+| `llm.reviewer.scope` | No | Review scope for a codex reviewer runner (if configured): `working-tree` (default), `branch`, `auto` |
 
 ---
 
@@ -157,9 +156,9 @@ Each role is an LLM-agnostic prose file (`agents/skills/dev-pipeline/agents/dp-<
 
 ---
 
-## Reviewer: codex primary, claude fallback
+## Reviewer
 
-`config.runners.reviewer` is an ordered array tried front-to-back. The default ships **codex** (`codex exec -s read-only`) first and **claude** (`claude -p`, read-only tools) as the fallback; the next runner is used only if one fails to produce a valid `review-result.json`. Both review the change diff against the spec's Acceptance Criteria. Customize or reorder by editing the config.
+`config.runners.reviewer` is an ordered array tried front-to-back. The default ships a single **claude** reviewer (`claude -p`, read-only tools). Add more entries to get automatic fallback — the next runner is used only if one fails to produce a valid `review-result.json`. A **codex** reviewer is fully supported (`codex exec -s read-only`, `normalizer: "codex-cli"`, OS-sandboxed) if you prefer it or want a second-vendor cross-check — just add it to the array. The reviewer reads the change diff against the spec's Acceptance Criteria.
 
 ---
 

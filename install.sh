@@ -245,7 +245,7 @@ echo "     the plan.md 'dev-pipeline-config' header (the planner fills the heade
 echo "       config: llm.tester.build_instruction / install_instruction / test_instruction;"
 echo "       TDD on by default → llm.test_implementor.framework_instruction + test_paths"
 echo "       (set driver.tdd_mode=false to skip TDD)."
-echo "     The default runners call the 'claude' (and 'codex') CLI — see config.runners."
+echo "     The default runners call the 'claude' CLI (add other CLIs like 'codex' via config.runners)."
 echo "     SECURITY: default runners run headless without a sandbox and treat plan.md /"
 echo "       the contract as untrusted; a plan header's executable/gate keys merge only"
 echo "       with your approval. Run dev-pipeline in a sandboxed/throwaway environment."
