@@ -5,8 +5,13 @@
 The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `contract_path`, and `changes_diff` (the path the reviewer will read). The driver persisted the reviewer context to `<iter_dir>/stage-input.json`, with `output_file` set to `<iter_dir>/review-result.json`.
 
 - [Step 1] **Write the change diff** to the echoed `changes_diff` path so the reviewer can read it. Scope it to the pipeline's manifest when present (so unrelated/untracked files are not reviewed). **Run from `project_root`.** Check for an initial commit: `git -C <project_root> rev-parse --verify HEAD 2>/dev/null`.
-  - **Manifest present** (`<run_dir>/changed-manifest.txt`): `git -C <project_root> diff HEAD -- <manifest paths> > <changes_diff>`. New (untracked) manifest files are not in a diff-vs-HEAD; they remain on disk for the reviewer to Read.
-  - **No manifest / no HEAD (fallback):** `git -C <project_root> diff HEAD > <changes_diff>` (or `git -C <project_root> diff --cached > <changes_diff>` on a repo with no HEAD).
+  - **Manifest present** (`<run_dir>/changed-manifest.txt`): mark new files intent-to-add so they show as `new file` hunks (a plain `diff HEAD` **omits untracked files** — the reviewer has no Bash and sees only this diff), write the diff, then undo the marking so the working tree is unchanged for later states:
+    ```bash
+    git -C <project_root> add -N -- <manifest paths> 2>/dev/null || true
+    git -C <project_root> diff HEAD -- <manifest paths> > <changes_diff>
+    git -C <project_root> reset -q -- <manifest paths> 2>/dev/null || true
+    ```
+  - **No manifest / no HEAD (fallback):** surface untracked files first — `git -C <project_root> add -N . 2>/dev/null || true` then `git -C <project_root> diff HEAD > <changes_diff>` then `git -C <project_root> reset -q` (or `git -C <project_root> diff --cached > <changes_diff>` on a repo with no HEAD).
 
 - [Step 2] **Run the reviewer:**
   ```bash
@@ -30,6 +35,6 @@ The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `cont
 - [Step 5] Follow `states/<next_state>.md` (`done` on pass; `implementation`/`test_implementation` on a retry; `failed` if exhausted).
 
 **Checklist:**
-- [ ] Change diff written to the echoed `changes_diff` path (manifest-scoped when present)
+- [ ] Change diff written to the echoed `changes_diff` path (manifest-scoped when present; new files surfaced via `add -N`, working tree left unchanged)
 - [ ] `run-stage --role reviewer` returned `ok: true` (valid `review-result.json` written); else stopped/reported
 - [ ] `driver advance` called before any `append-attempt`; followed the reported `next_state`
