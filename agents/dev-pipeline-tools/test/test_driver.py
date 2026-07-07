@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 # driver.py lives one directory up from this test file.
@@ -1432,6 +1433,30 @@ class TestRunStage(unittest.TestCase):
         self._cfg("tester", [])
         r = self._run("tester", self._si("tester", output_file=str(self.run_dir / "o.json")))
         self.assertNotEqual(r.returncode, 0)
+
+    def test_timeout_kills_process_group(self):
+        # A runner timeout must SIGKILL the whole process group, not just the
+        # direct child shell — otherwise a grandchild (the real LLM CLI) is
+        # orphaned and keeps running. The runner backgrounds a subshell that
+        # would touch a marker after 5s; with the group-kill fix the marker is
+        # never created. (implementor is a file role, so a timeout is a single
+        # fast attempt — no error-fed retry.)
+        marker = self.proj / "orphan_marker"
+        self._cfg("implementor", [
+            {"type": "bash",
+             "command": "(sleep 5; touch {project_root}/orphan_marker) & sleep 30",
+             "timeout": 1},
+        ])
+        r = self._run("implementor", self._si("implementor"))
+        # all_runners_failed → non-zero exit; run_driver only sets .json on exit 0.
+        self.assertNotEqual(r.returncode, 0)
+        j = json.loads(r.stdout)
+        self.assertFalse(j["ok"])
+        self.assertEqual(j["attempts"][0]["problem"], "timeout")
+        # Wait past the grandchild's 5s sleep; the marker must NOT appear.
+        time.sleep(6)
+        self.assertFalse(marker.exists(),
+                         "grandchild survived the timeout — process group was not killed")
 
 
 class TestConfigMigration(unittest.TestCase):

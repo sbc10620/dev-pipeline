@@ -26,6 +26,7 @@ import pathlib
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -1536,12 +1537,32 @@ def _normalize_output(raw: str, normalizer: str) -> "dict | None":
 
 def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int) -> "subprocess.CompletedProcess":
     """Substitute placeholders (shell-quoted) into a command template and run it
-    in a shell with cwd=project_root."""
+    in a shell with cwd=project_root.
+
+    start_new_session=True puts the runner in its OWN process group so that a
+    timeout (or the driver being interrupted) can SIGKILL the whole group — the
+    shell AND the LLM CLI it spawned. Plain subprocess.run kills only the direct
+    child shell, orphaning the CLI grandchild (reparented to PID 1) to keep
+    running. After killing the group we only reap the direct child with wait()
+    (which cannot block on an escaped grandchild or its pipes, unlike a post-kill
+    communicate()), then re-raise. Limits: a grandchild that calls setsid() itself
+    escapes the group, and a SIGKILL of the driver leaves nothing to clean up."""
     cmd = command
     for key, val in subst.items():
         cmd = cmd.replace("{" + key + "}", shlex.quote(str(val)))
-    return subprocess.run(cmd, shell=True, cwd=str(project_root),
-                          capture_output=True, text=True, timeout=timeout)
+    with subprocess.Popen(cmd, shell=True, cwd=str(project_root),
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, start_new_session=True) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except BaseException:  # TimeoutExpired or an interrupt (KeyboardInterrupt/SIGINT)
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            proc.wait()
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 def cmd_run_stage(args) -> None:
