@@ -125,7 +125,7 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
 
 ## Usage
 
-In Claude Code, with your project open:
+From a host with the skill installed (Claude Code, Cline, …), with your project open:
 
 ```
 /dev-pipeline --request "add rate limiting"   # planner writes plan.md, then runs
@@ -309,7 +309,7 @@ dev-pipeline/
 ## Design notes
 
 - **Deterministic state**: all state transitions go through `driver.py` — the LLM never decides the next state
-- **Pluggable runners**: `runners` config is an ordered array of backends; add `bash` runner for other CLIs (e.g., cline)
+- **Pluggable runners**: `runners` config is an ordered array of backends; add a `bash` runner for other CLIs (e.g., codex, gemini)
 - **Oscillation prevention**: `attempts.md` accumulates every failed attempt and is passed to the implementor on retry
 - **Environment vs code failures**: tester classifies failures; environment failures halt immediately instead of retrying
 - **Self-evolution**: when enabled, uses the done-state retrospective to update the installed agent `.md` files and the skill (`SKILL.md`) (source repo not updated)
