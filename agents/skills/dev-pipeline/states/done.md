@@ -43,7 +43,7 @@
     Do NOT push. (In TDD, the authored tests are part of the implementation and are committed normally.)
   - If not a git repo: inform the user that commit was skipped.
 
-- [Step 2] **Update CLAUDE.md** — only if there is genuinely new context worth adding. Be conservative.
+- [Step 2] **Update the project's agent memory doc** (`AGENTS.md`, the open standard read by Codex/Cline/Cursor/…; some hosts use `CLAUDE.md`, often a symlink to it — update whichever the project has) — only if there is genuinely new context worth adding. Be conservative.
 
 - [Step 3] **Workflow Retrospective Feedback** — Review `state.json` history and report the **orchestrator (main session) model** by name, and for each state that actually ran report **which runner/method carried out the work**. Include the `test_implementation` and `red_test` sections **only when `tdd_mode` is true** (omit them when tdd_mode is false):
 
