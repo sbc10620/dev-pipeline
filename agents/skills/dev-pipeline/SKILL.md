@@ -45,7 +45,7 @@ State files depend ONLY on (a) the **Run Context** below and (b) the **fields ec
 - `project_root` — directory containing `.dev-pipeline/dev-pipeline.config.json`.
 - `plan_path` — the plan.md path: written by the planner (`--request`) or given by the user (`--plan`).
 - `auto_run` — whether `--auto-run` was passed (skips the post-plan approval gate; planning-phase questions still happen).
-- `header_approved` — set true when the user approved this plan's header (planning approval, or a `--plan` confirmation). Forwarded to `driver init` as `--header-approved`; when false the untrusted header's executable/gate keys are NOT merged.
+- `header_approved` — set true when the user consented to this plan's header's executable/gate values: the planner's mid-planning confirmation (`--request`), the post-plan approval, or a `--plan` header confirmation. Forwarded to `driver init` as `--header-approved`; when false the untrusted header's executable/gate keys are NOT merged.
 - `run_dir`, `contract_path` — returned by `driver init` (`contract_path` = the header-stripped plan body the roles read; **`plan_path` is NOT fed to the roles**).
 - `tdd_mode` — boolean returned by `driver init` **and re-echoed by every `driver advance`** (the frozen run flag). Prefer the latest echo; never recover it from `config.snapshot.json`.
 - `config_snapshot_path = <run_dir>/config.snapshot.json` — **audit record only.** Do not read it for control flow or prompt construction (Global Rule 9); every value a state needs is echoed by the relevant advance.
@@ -74,7 +74,7 @@ Each advance echoes a `directive` (e.g. `run_test_implementor`, `run_tester`, `r
 **Accepted arguments** (exactly one entry mode: `--request` or `--plan`):
 - `--request "<goal>"` — build a `plan.md` conversationally from the goal (planning state), then run the pipeline.
 - `--plan <path>` — run an already-written `plan.md` (config header + spec body).
-- `--auto-run` — optional (either mode). Skip the post-plan approval gate and run end-to-end. Planning-phase questions are still asked. Executable/gate header keys are then NOT merged from the plan (they come from `config.json`) unless `driver.allow_unattended_header_merge` is set.
+- `--auto-run` — optional (either mode). Skip the post-plan approval gate and run end-to-end. Planning-phase questions are still asked. With `--plan`, executable/gate header keys are then NOT merged from the plan (they come from `config.json`) unless `driver.allow_unattended_header_merge` is set. With `--request`, the planner confirms those values with you mid-planning (`states/planning.md`), which is the consent to merge them — so they still apply.
 - `--help` — print skill usage summary and stop.
 
 `--request` and `--plan` are mutually exclusive; exactly one is required. If both/neither, or any unknown argument is present, report an error and stop.
@@ -139,7 +139,7 @@ Each advance echoes a `directive` (e.g. `run_test_implementor`, `run_tester`, `r
     ```
     Parse the JSON output:
     - `status == "created"`:
-      - **`--request`:** do **not** stop — save the returned `project_root` and continue. The planner will fill the tester/test_implementor instructions into the plan header, which `init` merges **after you approve the plan**. (Only `runners` must be pre-present, and the template supplies them.) **Caveat for `--auto-run` on a fresh config:** the header's executable/gate keys are only merged with approval or `driver.allow_unattended_header_merge` — so an unattended run against a still-placeholder config will be stopped at planning with instructions (see `states/planning.md` Step 2). For a hands-off first run, either drop `--auto-run`, set that config key, or pre-fill the config.
+      - **`--request`:** do **not** stop — save the returned `project_root` and continue. The planner fills the tester/test_implementor instructions into the plan header and **confirms them with you during planning** (`states/planning.md` Step 2), which is the consent `init` needs to merge them — so a fresh (placeholder) config is fine even under `--auto-run`. (Only `runners` must be pre-present, and the template supplies them.)
       - **`--plan`:** **stop** and tell the user, using the returned `config_path` and `required_fields`:
         > "✅ Created the dev-pipeline config from the template: `<config_path>`
         > Before running, either fill the required fields (placeholder `<...>` values are rejected) — `llm.tester.build_instruction`/`install_instruction`/`test_instruction`, and (TDD on by default) `llm.test_implementor.framework_instruction` + `test_paths` — or put them in your plan.md `dev-pipeline-config` header. To skip TDD set `driver.tdd_mode: false`. Then re-run."

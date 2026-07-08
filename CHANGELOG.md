@@ -9,6 +9,16 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [5.2.0] - 2026-07-07
+
+Stronger conversational planner: plans are contract-detailed but implementation-agnostic, and the required config-header values are decided **with the user**.
+
+### Added
+- **`dp-planner.md` guidance** — new Global Rules ("right-size to one increment", "specify WHAT, delegate HOW / every added detail must be a testable AC or a real constraint"); Step 1 now captures **concrete reuse targets** (`file:symbol`) and the new-file directory, and derives build/install/test commands **by reading the project's build files** (choosing a test command that runs the new tests *with* the existing suite, so regressions aren't missed); Interface calls for data shapes/error modes; a new optional **`## File Layout`** section (kept consistent with `test_paths`); `## Constraints / Notes` carries explicit `Reuse:` pointers; Acceptance-Criteria guidance now requires one-behavior, concrete, deterministic criteria including edge/error cases.
+
+### Changed
+- **Required config-header values are confirmed with the user during planning.** The planner presents the derived `tester.*` commands and (TDD) `test_implementor.framework_instruction` + `test_paths` with their evidence and has the user confirm/correct them instead of silently guessing. In the `--request` flow this confirmation **is** the human consent the executable/gate keys require, so `states/planning.md` now sets `header_approved = true` from it — the confirmed values merge into the run snapshot **even under `--auto-run`** (a hand-written `--plan` still runs the planner-less path and stays gated by SKILL Step 0). `config.json` is never overwritten — the header always merges into the per-run `config.snapshot.json`. The batched confirmation covers **all** executable/gate keys (`tester.*`, `test_paths`, `review_block_severity`, `tdd_mode`), and `header_approved` is set only when that confirmation actually happened. Removed the old `--auto-run` + placeholder-config planning stop — the planner now confirms and fills those values instead.
+
 ## [5.1.0] - 2026-07-06
 
 Default runners are now **all `claude`, pinned to the `sonnet` model**; the shipped default reviewer is claude (codex is no longer the default). Role/orchestrator prose is kept LLM-neutral.
