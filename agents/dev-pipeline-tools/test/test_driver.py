@@ -104,7 +104,7 @@ def review_result(verdict="approve", findings=None, **extra):
         "summary": "stub review result",
         "findings": findings if findings is not None else [],
         "next_steps": [],
-        "source": "claude-subagent",
+        "source": "bash-runner",
     }
     obj.update(extra)
     return obj
@@ -1169,7 +1169,8 @@ class TestAdvanceEchoes(PipelineTestCase):
         self.assertEqual(j["next_state"], "implementation")
         self.assertFalse(j["tdd_mode"])
         self.assertTrue(j["design_instruction"])
-        self.assertIn("claude", j["implementor_runners"][0]["command"])  # bash runner
+        # echoed verbatim from config (LLM-agnostic — not "is it claude?")
+        self.assertEqual(j["implementor_runners"], p._config["runners"]["implementor"])
         # The implementor build-checks before handoff → it gets the tester's build cmd.
         self.assertEqual(j["build_instruction"], "make build")
         self.assertNotIn("test_paths", j)  # legacy: no test boundary
@@ -1177,7 +1178,7 @@ class TestAdvanceEchoes(PipelineTestCase):
         r2 = p.advance()  # implementation -> test
         self.assertEqual(r2.json["next_state"], "test")
         self.assertFalse(r2.json["tdd_mode"])
-        self.assertIn("claude", r2.json["tester_runners"][0]["command"])
+        self.assertEqual(r2.json["tester_runners"], p._config["runners"]["tester"])
 
         p.write_test_result(status="pass")
         r3 = p.advance()  # test -> review
@@ -1195,19 +1196,19 @@ class TestAdvanceEchoes(PipelineTestCase):
         r1 = p.advance()  # init -> test_implementation
         self.assertEqual(r1.json["next_state"], "test_implementation")
         self.assertTrue(r1.json["tdd_mode"])
-        self.assertIn("claude", r1.json["test_implementor_runners"][0]["command"])
+        self.assertEqual(r1.json["test_implementor_runners"], p._config["runners"]["test_implementor"])
 
         r2 = p.advance()  # test_implementation -> red_test (red phase)
         self.assertEqual(r2.json["next_state"], "red_test")
         self.assertTrue(r2.json["tdd_mode"])
-        self.assertIn("claude", r2.json["tester_runners"][0]["command"])
+        self.assertEqual(r2.json["tester_runners"], p._config["runners"]["tester"])
 
         p.write_red_test_result(status="fail", failure_type="code")
         r3 = p.advance()  # red confirmed -> implementation
         self.assertEqual(r3.json["next_state"], "implementation")
         self.assertTrue(r3.json["tdd_mode"])
         self.assertTrue(r3.json["design_instruction"])
-        self.assertIn("claude", r3.json["implementor_runners"][0]["command"])
+        self.assertEqual(r3.json["implementor_runners"], p._config["runners"]["implementor"])
         self.assertEqual(r3.json["build_instruction"], "no build step")
         self.assertEqual(r3.json["test_paths"], ["tests/**"])  # tdd echoes the boundary
 
@@ -1479,7 +1480,7 @@ class TestConfigMigration(unittest.TestCase):
 
     def test_validate_rejects_unknown_placeholder(self):
         cfg = valid_config()
-        cfg["runners"]["tester"] = [{"type": "bash", "command": "claude -p {spec_path}"}]
+        cfg["runners"]["tester"] = [{"type": "bash", "command": "run-model {spec_path}"}]
         r = run_driver("validate-config", "--config", str(self._write(cfg)))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("spec_path", r.stderr)
@@ -1499,10 +1500,13 @@ class TestConfigMigration(unittest.TestCase):
         migrated = json.loads(p.read_text(encoding="utf-8"))
         # spec_author was removed in 5.0.0; migration drops it (the example has none).
         self.assertNotIn("spec_author", migrated["runners"])
+        # migration replaces runners wholesale with the shipped bash defaults
+        # (whatever LLM those name — not asserting "claude" specifically).
+        example = json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["runners"], example["runners"])
         impl = migrated["runners"]["implementor"][0]
         self.assertEqual(impl["type"], "bash")
         self.assertNotIn("agent", impl)
-        self.assertIn("claude", impl["command"])
 
 
 class TestPlanHeader(PipelineTestCase):
