@@ -1737,5 +1737,138 @@ class TestPlanHeader(PipelineTestCase):
         self.assertNotEqual(init().returncode, 0)
 
 
+class TestRunnerModes(unittest.TestCase):
+    """5.3.0: main-session / subagent runner types — validate-config rules, the
+    run-stage handoff (assemble, don't execute), and finalize-stage validation."""
+
+    # -- validate-config -------------------------------------------------------
+
+    def _vc(self, runners_patch):
+        cfg = valid_config()  # tdd off, real bash defaults
+        cfg["runners"].update(runners_patch)
+        p = pathlib.Path(tempfile.mktemp(suffix=".json"))
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+        return run_driver("validate-config", "--config", str(p))
+
+    def test_validate_accepts_main_session_and_subagent(self):
+        r = self._vc({"reviewer": [{"type": "main-session"}],
+                      "tester": [{"type": "subagent", "model": "sonnet", "normalizer": "claude-cli"}]})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["valid"])
+
+    def test_validate_rejects_mixed_array(self):
+        r = self._vc({"reviewer": [{"type": "subagent"}, {"type": "bash", "command": "x {output_file}"}]})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("mixed runner types", r.stderr)
+
+    def test_validate_rejects_bash_without_command(self):
+        r = self._vc({"reviewer": [{"type": "bash"}]})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("bash runner requires", r.stderr)
+
+    def test_validate_rejects_subagent_with_command(self):
+        r = self._vc({"reviewer": [{"type": "subagent", "command": "x"}]})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("must not have a `command`", r.stderr)
+
+    def test_validate_still_rejects_legacy_subagent(self):
+        # The pre-3.0.0 type (with `agent`) stays rejected — not confused with the
+        # new `subagent` type (which carries `model`, no `agent`).
+        r = self._vc({"reviewer": [{"type": "claude-subagent", "agent": "dp-reviewer"}]})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("3.0.0", r.stderr)
+
+    # -- run-stage handoff + finalize-stage ------------------------------------
+
+    def _setup(self, role, runners, json_role=True):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        run_dir = pathlib.Path(tmp.name)
+        proj = run_dir / "proj"
+        proj.mkdir()
+        (run_dir / "state.json").write_text(json.dumps({
+            "state": "test", "project_dir": str(proj), "tdd_mode": False,
+            "iterations": {"test": 0, "review": 0, "test_implementation": 0}}), encoding="utf-8")
+        (run_dir / "config.snapshot.json").write_text(
+            json.dumps({"runners": {role: runners}}), encoding="utf-8")
+        work = run_dir / "w"
+        work.mkdir()
+        si = {"role": role, "work_dir": str(work), "project_root": str(proj),
+              "inputs": {"design_instruction": "x"}}
+        if json_role:
+            si["output_file"] = str(work / f"{role}-output.json")
+        sp = run_dir / "si.json"
+        sp.write_text(json.dumps(si), encoding="utf-8")
+        return run_dir, proj, work, sp
+
+    def test_run_stage_subagent_handoff(self):
+        run_dir, proj, work, sp = self._setup("tester", [{"type": "subagent", "model": "sonnet"}])
+        stale = work / "tester-output.json"
+        stale.write_text("STALE")  # must be cleared before handoff
+        r = run_driver("run-stage", "--run", str(run_dir), "--role", "tester", "--stage-input", str(sp))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json["mode"], "subagent")
+        self.assertEqual(r.json["model"], "sonnet")
+        self.assertTrue(pathlib.Path(r.json["system_file"]).exists())
+        self.assertIn("absolute project root", pathlib.Path(r.json["user_file"]).read_text(encoding="utf-8"))
+        self.assertFalse(stale.exists())  # stale output unlinked; no execution wrote a new one
+
+    def test_run_stage_main_session_handoff(self):
+        run_dir, proj, work, sp = self._setup("tester", [{"type": "main-session"}])
+        r = run_driver("run-stage", "--run", str(run_dir), "--role", "tester", "--stage-input", str(sp))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json["mode"], "main-session")
+        self.assertTrue(r.json["compact_first"])
+        self.assertNotIn("model", r.json)
+
+    def test_finalize_stage_normalizes_fenced_json(self):
+        run_dir, proj, work, sp = self._setup("tester", [{"type": "subagent", "normalizer": "claude-cli"}])
+        outf = work / "tester-output.json"
+        outf.write_text("```json\n" + json.dumps(test_result(status="pass")) + "\n```\n", encoding="utf-8")
+        r = run_driver("finalize-stage", "--run", str(run_dir), "--role", "tester", "--stage-input", str(sp))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["ok"])
+        self.assertNotIn("```", outf.read_text(encoding="utf-8"))  # canonical, no fence
+        self.assertEqual(json.loads(outf.read_text(encoding="utf-8"))["status"], "pass")
+
+    def test_finalize_stage_rejects_invalid(self):
+        run_dir, proj, work, sp = self._setup("tester", [{"type": "subagent"}])
+        (work / "tester-output.json").write_text("not json at all", encoding="utf-8")
+        r = run_driver("finalize-stage", "--run", str(run_dir), "--role", "tester", "--stage-input", str(sp))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("problem", r.stdout)
+
+    def test_finalize_stage_file_role_is_noop(self):
+        run_dir, proj, work, sp = self._setup("implementor", [{"type": "main-session"}], json_role=False)
+        r = run_driver("finalize-stage", "--run", str(run_dir), "--role", "implementor", "--stage-input", str(sp))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["ok"])
+        self.assertIn("file role", r.json["note"])
+
+    def test_run_stage_file_role_handoff(self):
+        # A file-role (implementor) handoff: no output_file, no json output directive.
+        run_dir, proj, work, sp = self._setup("implementor", [{"type": "subagent", "model": "x"}], json_role=False)
+        r = run_driver("run-stage", "--run", str(run_dir), "--role", "implementor", "--stage-input", str(sp))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json["mode"], "subagent")
+        self.assertEqual(r.json["category"], "file")
+        self.assertIsNone(r.json["output_file"])
+        u = pathlib.Path(r.json["user_file"]).read_text(encoding="utf-8")
+        self.assertIn("absolute project root", u)
+        self.assertNotIn("valid JSON object", u)  # no json output directive for a file role
+
+    def test_finalize_stage_stamps_true_review_source(self):
+        # The driver overwrites a review's `source` with the true execution mode —
+        # the role can't know its own runner (so a self-reported value is corrected).
+        run_dir, proj, work, sp = self._setup("reviewer", [{"type": "subagent"}])
+        outf = work / "reviewer-output.json"
+        rr = review_result(verdict="approve")
+        rr["source"] = "bash-runner"  # the role's guess (wrong under a subagent)
+        outf.write_text(json.dumps(rr), encoding="utf-8")
+        r = run_driver("finalize-stage", "--run", str(run_dir), "--role", "reviewer", "--stage-input", str(sp))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(outf.read_text(encoding="utf-8"))["source"], "host-subagent")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

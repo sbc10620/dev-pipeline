@@ -9,6 +9,22 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [5.3.0] - 2026-07-09
+
+Role runners gain two **host execution modes** alongside `bash`, so a role can run in the host session instead of shelling out to a CLI — chosen per role, kept LLM-free (no host agent-definition files).
+
+### Added
+- **`config.runners.<role>` execution modes** — besides `{type:"bash", command, …}`, a runner may now be `{type:"main-session", normalizer?}` (the host LLM performs the role itself, after compacting the conversation — works on any host) or `{type:"subagent", model?, normalizer?}` (the host spawns a subagent with the driver-assembled prompt injected — no `.claude/agents` file needed, so it stays provider-neutral; `model` is selectable). A role's runner array must be homogeneous (cross-mode fallback is a future feature).
+- **`driver run-stage` handoff** — for a `main-session`/`subagent` runner the driver assembles + persists the prompt (as always) but cannot execute it (a subprocess can't call the host's Task tool), so it emits `{mode, system_file, user_file, output_file, model?, compact_first?}` and the SKILL executes it per the new **`SKILL.md §Role Execution`** section (dispatch a subagent, or compact-then-run in the main session; STOP if a subagent runner lands on a host with no Task tool). The `Task` tool is re-added to the SKILL's `allowed-tools` (ignored by hosts that lack it).
+- **`driver finalize-stage --run --role [--stage-input]`** — normalizes (strips fences), schema-validates, and persists the canonical JSON for a result the SKILL got from a main-session/subagent runner — the exact post-processing a bash JSON role gets inside `run-stage` (shared `_finalize_json`), so results validate identically regardless of who produced them. File roles are a no-op (their result is the git delta).
+- **`validate-config` rules** — accepts the new types; rejects a bash runner without `command`, a main-session/subagent runner *with* one, and a heterogeneous runner array — each with a precise message. The pre-3.0.0 `claude-subagent` type is still rejected (not confused with the new `subagent`, which carries `model`, not `agent`).
+
+### Changed
+- `run-stage`'s no-command guard now allows main-session/subagent runners (they have no command by design) while still rejecting an unsupported/legacy type. The bash JSON validation path was factored into `_finalize_json` and shared with `finalize-stage`.
+
+### Security
+- `subagent`/`main-session` runners have **no hard tool envelope** (LLM-free means no host agent-definition files); the executor runs with the host's tools, contained only by the role prose (role prompts were reworded to be tool-envelope-agnostic — e.g. "do not run anything even if a Bash tool is available"). A `subagent`/`main-session` **reviewer/tester** reviews untrusted code with write access — for a read-only role prefer a `bash` runner with a scoped `--allowedTools`. Also: don't run `main-session` for the reviewer when the implementor is also `main-session` (the gate becomes self-review). The driver now **stamps the review-result `source`** with the true execution mode (`bash-runner` / `host-subagent` / `main-session`) instead of the role self-reporting a fixed `bash-runner`, so an audit reflects how a review was actually run (schema enum extended). `bash` remains the default and the portable/sandboxable option; the new modes are opt-in and host-coupled. Documented in `AGENTS.md`, `README.md`, and `SKILL.md §Role Execution`.
+
 ## [5.2.0] - 2026-07-07
 
 Stronger conversational planner: plans are contract-detailed but implementation-agnostic, and the required config-header values are decided **with the user**.

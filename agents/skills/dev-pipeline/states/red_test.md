@@ -9,6 +9,7 @@ The advance that landed here echoed `directive: run_tester`, `iter_dir`, and `td
   python3 <driver_path> run-stage --run <run_dir> --role tester --stage-input <iter_dir>/stage-input.json
   ```
   The runner executes the configured build/install/test and writes a schema-valid `red-test-result.json` to `<iter_dir>`. Read the JSON:
+  - **`mode` is `main-session`/`subagent`** → execute the tester per [SKILL §Role Execution](../SKILL.md#-role-execution) (json role: writes `red-test-result.json` to `output_file`; `driver finalize-stage` validates), then proceed.
   - `ok: true` → a valid result was written; proceed (its pass/fail is the driver's to interpret).
   - `ok: false` → the runner could not produce a valid result (tooling problem). Stop and report the `attempts`.
 
@@ -30,5 +31,5 @@ The advance that landed here echoed `directive: run_tester`, `iter_dir`, and `td
 - [Step 4] Follow `states/<next_state>.md`.
 
 **Checklist:**
-- [ ] `run-stage --role tester` returned `ok: true` (valid `red-test-result.json` written); else stopped/reported
+- [ ] `run-stage --role tester` returned `ok: true` (valid `red-test-result.json` written), **or** a `mode` handoff was executed and `finalize-stage` returned `ok: true`; else stopped/reported
 - [ ] `driver advance` called (before any `append-attempt`); followed the reported `next_state`

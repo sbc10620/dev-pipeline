@@ -13,7 +13,7 @@ The advance that landed here echoed `directive: run_test_implementor`, `iter_dir
   ```bash
   python3 <driver_path> run-stage --run <run_dir> --role test_implementor --stage-input <iter_dir>/stage-input.json
   ```
-  Read the JSON: `ok: true` → proceed; `ok: false` → stop and report. The runner writes tests only (its configured tool envelope has no Bash); the driver enforces the prompt.
+  Read the JSON. **If `mode` is `main-session`/`subagent`, execute the test author per [SKILL §Role Execution](../SKILL.md#-role-execution)** (file role: the executor writes tests; the [Step 3] empty-delta guard catches a no-op), then continue. Otherwise `ok: true` → proceed; `ok: false` → stop and report. A bash runner writes tests only (its configured tool envelope has no Bash); the driver enforces the prompt.
 
 - [Step 3] **Boundary check + manifest** (skip if not a git repo). Print the delta (one `project_root`-relative path per line):
   ```bash
@@ -40,6 +40,6 @@ The advance that landed here echoed `directive: run_test_implementor`, `iter_dir
 
 **Checklist:**
 - [ ] Baseline staged (git repos) before run-stage
-- [ ] `run-stage --role test_implementor` returned `ok: true`
+- [ ] `run-stage --role test_implementor` returned `ok: true`, **or** a `mode` handoff was executed (empty-delta guard applied)
 - [ ] Boundary check passed (or misconfig reported / single re-run performed); manifest recorded
 - [ ] `driver advance` called; followed the reported `next_state`

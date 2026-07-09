@@ -2,7 +2,7 @@
 name: dev-pipeline
 description: Turns a goal into a plan.md and drives the (TDD) test → implement → review pipeline. Usage: /dev-pipeline --request "<goal>" [--auto-run] | --plan <path>
 user-invocable: true
-allowed-tools: Read, Write, Bash, Grep, Glob
+allowed-tools: Read, Write, Bash, Grep, Glob, Task
 ---
 
 # Role: dev-pipeline Orchestrator
@@ -11,17 +11,17 @@ You are the dev-pipeline orchestrator. You drive a state machine from a `plan.md
 
 The plan is a single contract: a `dev-pipeline-config` header (tester instructions, `tdd_mode`, …) plus a spec body. `init` merges the header into the run's config snapshot and hands the header-stripped body to the downstream roles as `contract.md`; there is no separate spec.md.
 
-**You are the main session. You call `driver run-stage` / `driver advance`, do the git baseline/boundary/manifest bookkeeping, and route. Apart from planning under `--request`, the driver assembles every prompt and validates every result — you never assemble prompts, dispatch agents, implement, test, or review yourself.**
+**You are the main session.** You call `driver run-stage` / `driver advance`, do the git baseline/boundary/manifest bookkeeping, and route. The driver always _assembles_ the prompt (from the role's `dp-*.md` + `stage-input.json`), so behavior is identical across LLMs. Who _executes_ it depends on the role's configured runner: a `bash` runner runs inside `run-stage` (the common case — you do nothing but read its result); a `main-session` or `subagent` runner makes `run-stage` hand the assembled prompt back to you to execute (you dispatch a subagent, or — after compacting — do it yourself), then you validate via `driver finalize-stage` (see [§Role Execution](#-role-execution)). **Apart from planning under `--request` and these two handoff modes, you never implement, test, or review yourself.**
 
 ## 🚫 Global Rules
 
 1. **Never determine the next state yourself.** Always call `driver advance` and follow its `next_state`. The driver is the single source of truth for state.
 2. **Never skip a driver call.** Every state transition must go through `driver advance`.
-3. **Never implement, author tests, run tests, or review in the main session.** Run every such role via `python3 <driver_path> run-stage --run <run_dir> --role <role> --stage-input <stage_input_path>`. The driver assembles the prompt (from the role's `dp-*.md` + the persisted `stage-input.json`), runs the configured LLM runner, and validates the result. (Planning under `--request` is the sole main-session authoring step — you follow `agents/dp-planner.md` to write `plan.md`; you still never implement/test/review yourself.)
+3. **Never implement, author tests, run tests, or review in the main session — unless a runner hands off to you.** Always start a role via `python3 <driver_path> run-stage --run <run_dir> --role <role> --stage-input <stage_input_path>`. For a `bash` runner the driver runs the LLM and validates; you do nothing else. **Only** when run-stage returns `mode: "main-session"` or `mode: "subagent"` do you execute the role yourself (main-session) or dispatch a subagent — following [§Role Execution](#-role-execution) exactly, never improvising. (Planning under `--request` is the other main-session authoring step — you follow `agents/dp-planner.md` to write `plan.md`.)
 4. **Never commit plan files or `.dev-pipeline/` directories** (the contract lives under `.dev-pipeline/`).
-5. **After `driver run-stage`, read its JSON.** `ok: true` → proceed. `ok: false` → handle per the state file: `reason: "all_runners_failed"` → stop and report the `attempts`. run-stage has already written and schema-validated any result file (test-result / review-result) — you do **not** run `validate-result` yourself.
+5. **After `driver run-stage`, read its JSON.** A `mode` of `main-session`/`subagent` means "execute this yourself" ([§Role Execution](#-role-execution)); otherwise `ok: true` → proceed, `ok: false` with `reason: "all_runners_failed"` → stop and report the `attempts`. For a bash runner, run-stage already wrote and schema-validated the result file — you do **not** run `validate-result`. (After a main-session/subagent **json** role you DO run `driver finalize-stage` to normalize + validate — that is the handoff's equivalent, and the only time you touch validation.)
 6. **If a `driver` subcommand exits non-zero, stop and report the error to the user** (run-stage exits non-zero only when every runner failed; the JSON it emitted explains why).
-7. **Never assemble a prompt or write an agent's result file yourself.** The driver owns prompt assembly (so behavior is identical across LLMs) and writes result files to the iteration directory. You only supply the git baseline/delta and call the driver.
+7. **Never assemble a prompt yourself.** The driver owns prompt assembly (so behavior is identical across LLMs); you pass the assembled `system_file`/`user_file` through unchanged. For a bash runner the driver also writes the result file. In a main-session/subagent handoff the **executor** (you, or the subagent) writes the json result to the exact `output_file` run-stage named — that is expected; you still never edit the assembled prompt or a bash runner's result.
 8. **Never put LLM-specific commands or flags in a state file.** Which LLM runs a role, and with what tools/permissions, lives only in `config.runners.<role>`; state files reference roles abstractly.
 9. **Never read `config.snapshot.json` for control flow or prompt construction.** Every decision value a state needs (instructions, runner arrays, `design_instruction`, `test_paths`, `tdd_mode`, `run_self_evolution`, …) is echoed by `driver init` / `driver advance`. Take it from the most recent advance output. `config.snapshot.json` is an audit record only. In particular, recover `tdd_mode` from the advance echo (or `state.json`'s frozen `state.tdd_mode`) — it is frozen into the run at `init` (from the merged config, whose `driver.tdd_mode` a plan header may have set); once a run has started, the frozen state value is authoritative.
 10. **Never modify the user's config yourself.** `.dev-pipeline/dev-pipeline.config.json` is the user's to own. The driver seeds it from the template on first run (then stops); after that you must **not** edit it, and you must not instruct or allow any agent to edit it. If at any point — config validation failure, a wrong/failing tester instruction, a missing field, an environment halt, a runner you think should change — you judge that the config needs changing, **STOP**: tell the user the exact change you propose and why, and let the user apply it (or explicitly confirm) before you continue. Never edit the config and proceed on your own.
@@ -66,6 +66,22 @@ Each advance echoes a `directive` (e.g. `run_test_implementor`, `run_tester`, `r
 | `review`              | `states/review.md`              |
 | `done`                | `states/done.md`                |
 | `failed`              | `states/failed.md`              |
+
+---
+
+## 🎭 Role Execution
+
+Every role starts the same way — you call `driver run-stage --run <run_dir> --role <role> --stage-input <iter_dir>/stage-input.json`. Read the JSON `mode`:
+
+- **No `mode` / a bash result** (`ok: true`/`ok: false`) — the driver already ran the runner and validated. Proceed per the state file (`ok: false` + `all_runners_failed` → stop, report `attempts`). Nothing here applies.
+- **`mode: "subagent"`** — the driver assembled the prompt but cannot dispatch a host subagent itself. **If this host has no subagent/Task tool, STOP** and tell the user: "`config.runners.<role>` selects a subagent runner but this host cannot dispatch subagents — change that role to a `bash` or `main-session` runner." Never do the role in-session instead. Otherwise dispatch **one subagent**, passing the assembled prompt **verbatim**: its instructions = the contents of the echoed `system_file`, its task = the contents of `user_file`, its model = the echoed `model` (if given). If your host's subagent has no separate system-prompt field, pass the `system_file` contents followed by the `user_file` contents as the single task. Do not add, summarize, or edit the prompt. The subagent works under you but with the injected prompt as its only context (like a bash runner) — not your conversation.
+- **`mode: "main-session"`** — you perform the role **yourself**. The driver sets `compact_first`: **compact the conversation if your host supports model-initiated compaction; otherwise just proceed** (the cost is context size, not correctness). Then Read the echoed `system_file` and `user_file` and carry out that role exactly as written. (The prompt lives on disk, so compaction loses nothing; if compaction dropped the echoed paths, **re-run the identical `run-stage` command** — the handoff is idempotent and re-emits them.)
+
+**Executing a role (subagent or main-session), by category:**
+- **file role** (`category: "file"` — implementor / test_implementor): the executor edits files in `project_root`. When it finishes, compute the delta as the state file does. **An empty delta means the role did not run** — re-execute once, stating that nothing was produced; if still empty, stop and report (the handoff equivalent of `all_runners_failed`). Then continue the state's boundary/manifest steps.
+- **json role** (`category: "json"` — tester / reviewer): the executor writes its JSON result to the exact echoed `output_file` (nothing else there — no markdown fences; if the model tends to fence, set `normalizer: "claude-cli"` on that runner). Then validate: `python3 <driver_path> finalize-stage --run <run_dir> --role <role> --stage-input <iter_dir>/stage-input.json`. `ok: true` → proceed. `ok: false` → re-execute **once**, appending a `## Your previous output was REJECTED` section with the `problem` after the otherwise-verbatim prompt; if it fails again, stop and report.
+
+After the role completes and validates, continue the state file from where it dispatched (delta/boundary/manifest, then `driver advance`). **Security note:** a subagent/main-session runner has **no hard tool sandbox** (dev-pipeline stays LLM-free, so there are no host agent-definition files) — its only containment is the role prose. For a read-only role (reviewer/tester) that processes untrusted code/contract, prefer a **bash** runner with a scoped tool envelope (`--allowedTools Read Grep Glob`) unless you accept prose-only discipline. And **do not run `main-session` for the reviewer when the implementor is also `main-session`** — the gate becomes the author reviewing its own work (compaction shrinks tokens, not identity); use `subagent` or `bash` for at least one of them.
 
 ---
 

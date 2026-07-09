@@ -9,8 +9,9 @@ The advance that landed here echoed `directive: run_tester` and `iter_dir`. The 
   python3 <driver_path> run-stage --run <run_dir> --role tester --stage-input <iter_dir>/stage-input.json
   ```
   The runner executes the configured build/install/test and writes a schema-valid `test-result.json` to `<iter_dir>`. Read the JSON:
+  - **`mode` is `main-session`/`subagent`** → execute the tester per [SKILL §Role Execution](../SKILL.md#-role-execution) (json role: the executor runs build/install/test and writes the result to `output_file`; then `driver finalize-stage` validates it), then proceed.
   - `ok: true` → a valid result was written; proceed.
-  - `ok: false` → the runner could not produce a valid result. Stop and report the `attempts`. **Do NOT run the build/install/test yourself** (Global Rule 3).
+  - `ok: false` → the runner could not produce a valid result. Stop and report the `attempts`. **Do NOT run the build/install/test yourself** (Global Rule 3 — a handoff is a `mode` result, handled by the bullet above, never `ok: false`).
 
 - [Step 2] Call driver advance:
   ```bash
@@ -25,5 +26,5 @@ The advance that landed here echoed `directive: run_tester` and `iter_dir`. The 
 - [Step 4] Follow `states/<next_state>.md` (`review` on pass, `implementation` on a code failure, `failed` if exhausted/environment).
 
 **Checklist:**
-- [ ] `run-stage --role tester` returned `ok: true` (valid `test-result.json` written); else stopped/reported
+- [ ] `run-stage --role tester` returned `ok: true` (valid `test-result.json` written), **or** a `mode` handoff was executed and `finalize-stage` returned `ok: true`; else stopped/reported
 - [ ] `driver advance` called before any `append-attempt`; followed the reported `next_state`

@@ -14,6 +14,7 @@ Usage:
   python3 driver.py check-boundary   --run <run_dir> --role <test_implementation|implementation> --changed <file...>
   python3 driver.py record-changes   --run <run_dir> --changed <file...>
   python3 driver.py run-stage        --run <run_dir> --role <role> [--stage-input <file>]
+  python3 driver.py finalize-stage   --run <run_dir> --role <role> [--stage-input <file>]
   python3 driver.py migrate-config   --config <path> [--out <path>]
   python3 driver.py --version
   python3 driver.py --help
@@ -39,7 +40,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "5.2.0"
+__version__ = "5.3.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -203,16 +204,47 @@ def _is_placeholder(val) -> bool:
     return isinstance(val, str) and val.strip().startswith("<") and val.strip().endswith(">")
 
 
+RUNNER_TYPES = ("bash", "main-session", "subagent")
+
+
 def _legacy_runner_roles(cfg: dict) -> list:
-    """Roles whose runners use a type removed in 3.0.0 (pre-schema detection)."""
+    """Roles whose runners use a type removed in 3.0.0 (pre-schema detection). The
+    bare `"agent" in r` heuristic only flags a runner whose type is NOT one of the
+    current ones, so the new main-session/subagent runners are never mis-flagged."""
     legacy = []
     for role, arr in (cfg.get("runners") or {}).items():
         if isinstance(arr, list) and any(
             isinstance(r, dict) and (r.get("type") in ("claude-subagent", "codex-adversarial-review")
-                                     or "agent" in r)
+                                     or ("agent" in r and r.get("type") not in RUNNER_TYPES))
             for r in arr):
             legacy.append(role)
     return sorted(set(legacy))
+
+
+def _runner_shape_errors(cfg: dict) -> list:
+    """Precise per-runner business rules (better messages than the generic schema
+    oneOf 'matches none'): a role's runners must be one homogeneous type (cross-type
+    fallback is a future feature); bash needs a command; main-session/subagent must
+    not carry one."""
+    errors = []
+    for role, arr in (cfg.get("runners") or {}).items():
+        if not isinstance(arr, list):
+            continue
+        types = {r.get("type") for r in arr if isinstance(r, dict)}
+        if len(types) > 1:
+            shown = sorted((t if t else "(missing type)") for t in types)
+            errors.append(f"runners.{role}: mixed runner types {shown} — "
+                          "keep one execution type per role (cross-type fallback is not supported yet)")
+        for i, r in enumerate(arr):
+            if not isinstance(r, dict):
+                continue
+            t = r.get("type")
+            if t == "bash" and not (isinstance(r.get("command"), str) and r["command"].strip()):
+                errors.append(f"runners.{role}[{i}]: a bash runner requires a non-empty `command`")
+            elif t in ("main-session", "subagent") and "command" in r:
+                errors.append(f"runners.{role}[{i}]: a {t} runner must not have a `command` "
+                              "(the host session/subagent runs it, not a shell)")
+    return errors
 
 
 def validate_config_data(cfg: dict) -> list[str]:
@@ -232,6 +264,11 @@ def validate_config_data(cfg: dict) -> list[str]:
         return ["runners.spec_author: removed in 5.0.0 — the plan.md body is the contract "
                 "and there is no spec-author stage. Delete runners.spec_author, or run "
                 "`driver migrate-config --config <path>` to drop it automatically."]
+
+    # Precise per-runner shape messages before the generic schema oneOf error.
+    shape = _runner_shape_errors(cfg)
+    if shape:
+        return shape
 
     errors = validate_against_schema(cfg, "config.schema.json")
     if errors:
@@ -1565,6 +1602,37 @@ def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
+def _finalize_json(output_file: pathlib.Path, normalizer: str, schema_name, source=None) -> "str | None":
+    """Normalize a json-role's output file (strip markdown fences / prose wrappers),
+    schema-validate it, and persist the canonical JSON back. Returns None on success
+    or a short problem string. Shared by run-stage's bash `judge()` and
+    `cmd_finalize_stage`, so a json result validates identically no matter whether a
+    bash CLI, a subagent, or the main session produced it.
+
+    `source` (review results only): the driver stamps the TRUE execution mode here
+    (`bash-runner` / `host-subagent` / `main-session`) — the role can't know its own
+    runner (first principle), so we overwrite whatever it wrote before validating."""
+    if not output_file.exists():
+        return "output not produced"
+    result = _normalize_output(output_file.read_text(encoding="utf-8"), normalizer)
+    if result is None:
+        return "no valid JSON in output"
+    if source and isinstance(result, dict) and schema_name == "review-result":
+        result["source"] = source
+    if schema_name:
+        errs = validate_against_schema(result, f"{schema_name}.schema.json")
+        if errs:
+            return "schema: " + "; ".join(errs[:3])
+    # Every downstream consumer (driver advance, the SKILL) reads this with a plain
+    # json.loads, so persist the canonical object regardless of how it was formatted.
+    output_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return None
+
+
+# Maps a runner's execution type to the review-result `source` the driver stamps.
+_SOURCE_BY_MODE = {"bash": "bash-runner", "subagent": "host-subagent", "main-session": "main-session"}
+
+
 def cmd_run_stage(args) -> None:
     """Execute a role's configured runner(s): assemble the prompt, run the LLM CLI
     (subprocess), and validate by category. The LLM choice/flags live entirely in
@@ -1592,11 +1660,23 @@ def cmd_run_stage(args) -> None:
     runners = cfg.get("runners", {}).get(role, [])
     if not runners:
         die(f"config.runners.{role} is empty — nothing to run.")
-    # A run created by a pre-3.0.0 driver has subagent runners (no `command`) frozen
-    # in its snapshot; run-stage cannot drive those. Fail with an explicit reason.
-    if any(isinstance(r, dict) and not r.get("command") for r in runners):
-        die(f"config.runners.{role} has a runner with no `command` — this run was likely "
-            "created by a pre-3.0.0 driver. Start a new run (its config snapshot is frozen).")
+    # main-session/subagent runners legitimately have no `command` (the host runs
+    # them). Reject only an unsupported type (a pre-3.0.0 snapshot) or a bash runner
+    # missing its command.
+    for r in runners:
+        if not isinstance(r, dict):
+            continue
+        t = r.get("type")
+        if t not in RUNNER_TYPES:
+            die(f"config.runners.{role} has an unsupported runner type {t!r} — this run was "
+                "likely created by a pre-3.0.0 driver. Start a new run (its snapshot is frozen).")
+        if t == "bash" and not r.get("command"):
+            die(f"config.runners.{role} has a bash runner with no `command`.")
+    # validate-config rejects heterogeneous arrays, but a hand-edited frozen snapshot
+    # could still reach here — fail loud rather than silently honor only runners[0].
+    if len({r.get("type") for r in runners if isinstance(r, dict)}) > 1:
+        die(f"config.runners.{role} mixes execution types in the frozen snapshot — "
+            "one type per role (cross-type fallback is unsupported).")
 
     work = pathlib.Path(stage_input.get("work_dir") or run_dir)
     work.mkdir(parents=True, exist_ok=True)
@@ -1624,6 +1704,32 @@ def cmd_run_stage(args) -> None:
             return f"\n\nOutput {what} to **stdout** only."
         return f"\n\nWrite {what} to this exact file path and nothing else there: {output_file}"
 
+    # --- main-session / subagent handoff ---------------------------------------
+    # The driver (a subprocess) cannot invoke the host's subagent tool or the main
+    # session, so for these modes it assembles the prompt and hands off to the SKILL
+    # (see SKILL.md §Role Execution). validate-config forbids heterogeneous arrays,
+    # so runners[0] is authoritative — no cross-type fallback here.
+    mode = runners[0].get("type")
+    if mode in ("main-session", "subagent"):
+        directive = ""
+        if meta["category"] == "json":
+            directive += output_directive(runners[0])
+            if output_file.exists():
+                output_file.unlink()  # stale-output guard (parity with judge())
+        # The host executor inherits the session cwd (possibly a subdir); pin the root.
+        directive += ("\n\nOperate from this absolute project root; resolve every relative "
+                      f"path (files you create/edit, test commands, globs) against it: {project_root}")
+        user_file.write_text(user_text + directive, encoding="utf-8")
+        payload = {"ok": True, "mode": mode, "role": role, "category": meta["category"],
+                   "system_file": str(system_file), "user_file": str(user_file),
+                   "output_file": str(output_file) if meta["category"] == "json" else None}
+        if mode == "main-session":
+            payload["compact_first"] = True
+        elif runners[0].get("model"):
+            payload["model"] = runners[0]["model"]
+        emit(payload)
+        return
+
     def judge(runner: dict, command: str, timeout: int):
         """Run one command and judge it by category. Returns (problem|None, exit).
         `problem` is None on success, else a short reason string (also fed back on
@@ -1639,25 +1745,13 @@ def cmd_run_stage(args) -> None:
         err = f" (exit {proc.returncode}: {proc.stderr.strip()[-300:]})" if proc.returncode else ""
         if meta["category"] == "file":
             return (None if proc.returncode == 0 else f"exit {proc.returncode}: {proc.stderr[-300:]}"), proc.returncode
-        if not output_file.exists():
-            return "output not produced" + err, proc.returncode
-        # json role
-        result = _normalize_output(output_file.read_text(encoding="utf-8"),
-                                   runner.get("normalizer", "passthrough"))
-        if result is None:
-            return "no valid JSON in output" + err, proc.returncode
-        if meta["schema"]:
-            errs = validate_against_schema(result, f"{meta['schema']}.schema.json")
-            if errs:
-                return "schema: " + "; ".join(errs[:3]), proc.returncode
-        # Persist the NORMALIZED JSON back to the file. The runner may have written
-        # a markdown-fenced or prose-wrapped payload (common with many models);
-        # _normalize_output tolerated it for validation, but every downstream
-        # consumer (driver advance, the SKILL) reads this file with a plain
-        # json.loads. Writing the canonical object back makes the result robust to
-        # how the model formatted its output.
-        output_file.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        # json role — shared normalize → schema → persist-canonical (same path a
+        # subagent/main-session result takes via cmd_finalize_stage).
+        src = _SOURCE_BY_MODE["bash"] if role == "reviewer" else None
+        problem = _finalize_json(output_file, runner.get("normalizer", "passthrough"), meta["schema"], source=src)
+        if problem:
+            # keep the stderr tail visible for produce/parse failures, as before
+            return (problem if problem.startswith("schema:") else problem + err), proc.returncode
         return None, proc.returncode
 
     attempts = []
@@ -1695,6 +1789,45 @@ def cmd_run_stage(args) -> None:
     emit({"ok": False, "role": role, "category": meta["category"],
           "reason": "all_runners_failed", "attempts": attempts})
     sys.exit(2)
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: finalize-stage (validate a main-session / subagent json result)
+# ---------------------------------------------------------------------------
+
+def cmd_finalize_stage(args) -> None:
+    """Validate a json-role result the SKILL obtained from a main-session/subagent
+    runner: normalize (strip fences), schema-check, and persist the canonical JSON —
+    the exact post-processing a bash json role gets inside run-stage. A file role
+    needs no finalize (its result is the git delta), so this is a no-op there."""
+    run_dir = pathlib.Path(args.run).resolve()
+    role = args.role
+    if role not in ROLE_META:
+        die(f"Unknown role: {role}")
+    meta = ROLE_META[role]
+    if meta["category"] != "json":
+        emit({"ok": True, "role": role, "category": meta["category"],
+              "note": "file role — result is the git delta; nothing to finalize"})
+        return
+    si_path = run_dir / args.stage_input if pathlib.Path(args.stage_input).name == args.stage_input else pathlib.Path(args.stage_input)
+    stage_input = load_json(si_path)
+    if stage_input.get("role") and stage_input["role"] != role:
+        die(f"stage-input role {stage_input['role']!r} != --role {role!r}; wrong --stage-input path.")
+    cfg = load_json(run_dir / "config.snapshot.json")
+    work = pathlib.Path(stage_input.get("work_dir") or run_dir)
+    output_file = pathlib.Path(stage_input["output_file"]) if stage_input.get("output_file") else (work / f"{role}-output.json")
+    runners = cfg.get("runners", {}).get(role, [])
+    first = runners[0] if runners and isinstance(runners[0], dict) else {}
+    # Default the handoff normalizer to claude-cli (tolerates a fence AND bare JSON):
+    # a host model may fence its output despite the "no fences" directive, and a
+    # too-strict passthrough would dead-end the run.
+    normalizer = first.get("normalizer", "claude-cli")
+    src = _SOURCE_BY_MODE.get(first.get("type")) if role == "reviewer" else None
+    problem = _finalize_json(output_file, normalizer, meta["schema"], source=src)
+    if problem:
+        emit({"ok": False, "role": role, "problem": problem, "output_file": str(output_file)})
+        sys.exit(2)
+    emit({"ok": True, "role": role, "category": "json", "output_file": str(output_file)})
 
 
 # ---------------------------------------------------------------------------
@@ -1772,7 +1905,8 @@ DRIVER CLI
   append-attempt   Log a failed attempt to attempts.md for implementor context
   check-boundary   (TDD) verify a role only touched files it is allowed to
   record-changes   Accumulate pipeline-produced files into changed-manifest.txt
-  run-stage        Execute a role via its configured bash runner (assemble prompt, run, validate)
+  run-stage        Execute a role via its configured runner (bash), or hand off (main-session/subagent)
+  finalize-stage   Normalize + schema-validate a json result the SKILL got from a main-session/subagent runner
   migrate-config   Convert an old config's runners to the current bash defaults
   --version        Print the dev-pipeline version and exit
   --help           Show this message
@@ -1880,6 +2014,11 @@ def main() -> None:
                       choices=list(ROLE_META.keys()))
     p_rs.add_argument("--stage-input", dest="stage_input", default="stage-input.json")
 
+    p_fs = sub.add_parser("finalize-stage")
+    p_fs.add_argument("--run", required=True)
+    p_fs.add_argument("--role", required=True, choices=list(ROLE_META.keys()))
+    p_fs.add_argument("--stage-input", dest="stage_input", default="stage-input.json")
+
     p_mc = sub.add_parser("migrate-config")
     p_mc.add_argument("--config", required=True)
     p_mc.add_argument("--out", default="")
@@ -1898,6 +2037,7 @@ def main() -> None:
         "check-boundary":   cmd_check_boundary,
         "record-changes":   cmd_record_changes,
         "run-stage":        cmd_run_stage,
+        "finalize-stage":   cmd_finalize_stage,
         "migrate-config":   cmd_migrate_config,
     }
 

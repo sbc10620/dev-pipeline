@@ -100,7 +100,15 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
 }
 ```
 
-**Runners (3.0.0).** Each role runs through `driver run-stage`, which assembles the prompt from the LLM-agnostic `dp-<role>.md` + the stage's inputs and runs `config.runners.<role>` — an ordered array of `{ "type": "bash", "command": …, "normalizer"?: "passthrough|claude-cli|codex-cli" }`. **The command is the only place an LLM is named**; swap/add an LLM by editing config alone. Placeholders the driver substitutes: `{system_file}` `{user_file}` `{output_file}` `{project_root}` `{run_dir}` `{work_dir}`. JSON roles either write `{output_file}` (tool) or print to stdout (when the command redirects `> {output_file}`). `llm.test_implementor` + `runners.test_implementor` are required only under TDD (the default — set `tdd_mode:false` to omit). The `planner` has no runner — it runs conversationally in the host session.
+**Runners (3.0.0 bash; 5.3.0 adds host modes).** Each role runs through `driver run-stage`, which assembles the prompt from the LLM-agnostic `dp-<role>.md` + the stage's inputs. `config.runners.<role>` is an ordered array (homogeneous per role) whose entries pick an **execution mode**:
+
+- `{ "type": "bash", "command": …, "normalizer"?: "passthrough|claude-cli|codex-cli" }` — a CLI invocation the driver runs (the default; **the only place an LLM is named**). Placeholders substituted: `{system_file}` `{user_file}` `{output_file}` `{project_root}` `{run_dir}` `{work_dir}`.
+- `{ "type": "subagent", "model"?: "…", "normalizer"?: … }` — the host session spawns a subagent with the assembled prompt injected (no host-specific agent file; stays LLM-free). Optional `model`. For a **json** role (tester/reviewer) whose host tends to wrap output in markdown fences, set `"normalizer": "claude-cli"` (it also accepts bare JSON); `finalize-stage` defaults to `claude-cli` for handoffs anyway.
+- `{ "type": "main-session", "normalizer"?: … }` — the host LLM performs the role itself (after compacting the conversation). Works even on hosts without a subagent tool.
+
+For a bash runner the driver runs and validates; for a subagent/main-session runner it **hands the assembled prompt to the SKILL** to execute, then the SKILL validates a JSON result via `driver finalize-stage`. `llm.test_implementor` + `runners.test_implementor` are required only under TDD (default — set `tdd_mode:false` to omit). The `planner` has no runner — it runs conversationally in the host session.
+
+> **Security:** `subagent`/`main-session` runners have **no hard tool sandbox** (LLM-free = no host agent files); their only containment is the role prose. For a read-only role (reviewer/tester) on untrusted code, prefer a **bash** runner with a scoped `--allowedTools`. Don't run `main-session` for the reviewer when the implementor is also `main-session` (the gate becomes self-review — use `subagent`/`bash` for at least one). `subagent`/`main-session` are host-coupled (need a host session); `bash` is the portable default.
 
 > **Security:** the default `claude` runners run headless with pre-approved tools and **no sandbox**; `plan.md`/the contract/code are untrusted input. A `plan.md` config header can set instructions, but its *executable/gate* keys (tester commands, `test_paths`, `review_block_severity`, `tdd_mode`) merge only with your approval; `runners` never merge. Run dev-pipeline in a sandboxed/throwaway environment and keep each role's `--allowedTools` minimal (read-only roles use a stdout-redirect command with no `Write`). An old config with a removed runner (e.g. `spec_author`) is rejected with a hint — run `driver migrate-config --config <path>` to convert.
 
@@ -309,7 +317,7 @@ dev-pipeline/
 ## Design notes
 
 - **Deterministic state**: all state transitions go through `driver.py` — the LLM never decides the next state
-- **Pluggable runners**: `runners` config is an ordered array of backends; add a `bash` runner for other CLIs (e.g., codex, gemini)
+- **Pluggable runners**: `runners` config picks an execution mode per role — a `bash` CLI (codex, gemini, …), a host `subagent` (model-selectable), or the `main-session` itself
 - **Oscillation prevention**: `attempts.md` accumulates every failed attempt and is passed to the implementor on retry
 - **Environment vs code failures**: tester classifies failures; environment failures halt immediately instead of retrying
 - **Self-evolution**: when enabled, uses the done-state retrospective to update the installed agent `.md` files and the skill (`SKILL.md`) (source repo not updated)
