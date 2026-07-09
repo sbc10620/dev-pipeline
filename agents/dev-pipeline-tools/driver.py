@@ -4,6 +4,7 @@ dev-pipeline driver — deterministic state machine for the implement→test→r
 
 Usage:
   python3 driver.py bootstrap-config [--project <dir>]
+  python3 driver.py set-runners      --config <path> --runners-file <path>
   python3 driver.py init             --plan <path> [--config <path>] [--project <dir>] [--header-approved]
   python3 driver.py advance          --run <run_dir>
   python3 driver.py status           --run <run_dir>
@@ -26,7 +27,6 @@ import os
 import pathlib
 import re
 import shlex
-import shutil
 import signal
 import subprocess
 import sys
@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "5.3.0"
+__version__ = "5.4.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -81,8 +81,17 @@ def load_json(path: pathlib.Path) -> dict:
 
 
 def save_json(path: pathlib.Path, obj: dict) -> None:
+    # Atomic write: a crash/SIGKILL/disk-full mid-write must never truncate the
+    # existing file (which for config.json / state.json holds the only copy of the
+    # user's settings or the run's progress). Write a sibling temp file, fsync, then
+    # os.replace (atomic on the same filesystem).
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, indent=2) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +121,12 @@ def _validate(data, schema: dict, path: str = "", root_schema: dict = None) -> l
             "integer": int, "number": (int, float), "boolean": bool, "null": type(None),
         }
         allowed = tuple(type_map[x] for x in types if x in type_map)
+        # bool is a subclass of int in Python, so a naive isinstance would let
+        # `true`/`false` satisfy an integer/number schema (e.g. timeout: true → a
+        # 1-second timeout downstream). Reject bool unless "boolean" is allowed.
+        if isinstance(data, bool) and "boolean" not in types:
+            errors.append(f"{path or 'root'}: expected {t}, got boolean")
+            return errors
         if not isinstance(data, allowed):
             errors.append(f"{path or 'root'}: expected {t}, got {type(data).__name__}")
             return errors
@@ -206,6 +221,11 @@ def _is_placeholder(val) -> bool:
 
 RUNNER_TYPES = ("bash", "main-session", "subagent")
 
+# The four roles every config's `runners` section must configure. Defined once,
+# ahead of both cmd_bootstrap_config (seeds them as "unconfigured") and ROLE_META
+# (which run-stage/finalize-stage key off of) so the two stay in lockstep.
+UNCONFIGURABLE_ROLES = ("implementor", "test_implementor", "tester", "reviewer")
+
 
 def _legacy_runner_roles(cfg: dict) -> list:
     """Roles whose runners use a type removed in 3.0.0 (pre-schema detection). The
@@ -219,6 +239,18 @@ def _legacy_runner_roles(cfg: dict) -> list:
             for r in arr):
             legacy.append(role)
     return sorted(set(legacy))
+
+
+def _unconfigured_runner_roles(cfg: dict) -> list:
+    """Roles whose runners are still the bootstrap sentinel `{"type":"unconfigured"}`
+    (pre-schema detection, same tier as `_legacy_runner_roles`) — `driver
+    set-runners` has not been run yet for this config."""
+    unconfigured = []
+    for role, arr in (cfg.get("runners") or {}).items():
+        if isinstance(arr, list) and any(
+            isinstance(r, dict) and r.get("type") == "unconfigured" for r in arr):
+            unconfigured.append(role)
+    return sorted(set(unconfigured))
 
 
 def _runner_shape_errors(cfg: dict) -> list:
@@ -239,7 +271,19 @@ def _runner_shape_errors(cfg: dict) -> list:
             if not isinstance(r, dict):
                 continue
             t = r.get("type")
-            if t == "bash" and not (isinstance(r.get("command"), str) and r["command"].strip()):
+            if t not in RUNNER_TYPES:
+                # Name the bad type explicitly (the generic schema oneOf would only say
+                # "matches none of the oneOf schemas", which the repair loop can't act on).
+                if t == "unconfigured":
+                    errors.append(f"runners.{role}[{i}]: still the 'unconfigured' sentinel — "
+                                  "provide a real runner (bash / subagent / main-session)")
+                elif t in ("claude-subagent", "codex-adversarial-review"):
+                    errors.append(f"runners.{role}[{i}]: runner type {t!r} was removed in 3.0.0 — "
+                                  "use bash / subagent / main-session")
+                else:
+                    errors.append(f"runners.{role}[{i}]: unknown runner type {t!r} — "
+                                  f"must be one of {list(RUNNER_TYPES)}")
+            elif t == "bash" and not (isinstance(r.get("command"), str) and r["command"].strip()):
                 errors.append(f"runners.{role}[{i}]: a bash runner requires a non-empty `command`")
             elif t in ("main-session", "subagent") and "command" in r:
                 errors.append(f"runners.{role}[{i}]: a {t} runner must not have a `command` "
@@ -256,6 +300,15 @@ def validate_config_data(cfg: dict) -> list[str]:
                 "(claude-subagent / codex-adversarial-review). Replace each with "
                 '{"type":"bash","command":"..."}, or run `driver migrate-config '
                 "--config <path>` to convert automatically."]
+
+    # A freshly bootstrapped config's runners are the "unconfigured" sentinel until
+    # `driver set-runners` seeds them — surface that plainly before the generic
+    # schema oneOf error (which would just say "matches none of the oneOf schemas").
+    unconfigured = _unconfigured_runner_roles(cfg)
+    if unconfigured:
+        return [f"runners.{', '.join(unconfigured)}: not configured yet. Run /dev-pipeline once "
+                "(it walks you through an interactive runner setup), or configure directly with "
+                "`driver set-runners --config <path> --runners-file <path>`."]
 
     # spec_author was removed in 5.0.0 (the plan.md body is the contract now). A
     # config still carrying its runner is rejected with an actionable message
@@ -1147,10 +1200,20 @@ def cmd_bootstrap_config(args) -> None:
     config_path = project_root / ".dev-pipeline" / "dev-pipeline.config.json"
 
     if config_path.exists():
+        # Report whether runners are already configured so the SKILL can decide
+        # whether the interactive setup dialog still needs to run — a first run that
+        # bootstrapped the config then died before setup finished leaves it existing
+        # BUT unconfigured, and must still be finishable (not deadlocked).
+        try:
+            existing = load_json(config_path)
+            runners_configured = not _unconfigured_runner_roles(existing)
+        except SystemExit:
+            runners_configured = None  # unreadable/invalid — let the SKILL surface it
         emit({
             "status": "exists",
             "project_root": str(project_root),
             "config_path": str(config_path),
+            "runners_configured": runners_configured,
         })
         return
 
@@ -1158,7 +1221,14 @@ def cmd_bootstrap_config(args) -> None:
         die(f"Config template not found: {EXAMPLE_PATH}\n  Re-run install.sh to repair the installation.")
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(EXAMPLE_PATH, config_path)
+    # Seed from the template, but leave `runners` UNCONFIGURED (a sentinel, not the
+    # template's concrete claude commands): the SKILL walks the user through an
+    # interactive setup dialog and writes the real choice via `driver set-runners`.
+    # The template file itself is untouched — migrate-config/e2e_llm.py/tests still
+    # read config.example.json directly for its known-good concrete bash defaults.
+    cfg = load_json(EXAMPLE_PATH)
+    cfg["runners"] = {role: [{"type": "unconfigured"}] for role in UNCONFIGURABLE_ROLES}
+    save_json(config_path, cfg)
 
     # Only touch .gitignore when project_root is actually a git repository.
     is_git_repo = _git_toplevel(project_root) is not None
@@ -1169,6 +1239,7 @@ def cmd_bootstrap_config(args) -> None:
         "project_root": str(project_root),
         "config_path": str(config_path),
         "gitignore_updated": gitignore_updated,
+        "runners_configured": False,
         "required_fields": [
             "llm.tester.build_instruction",
             "llm.tester.install_instruction",
@@ -1176,12 +1247,71 @@ def cmd_bootstrap_config(args) -> None:
             "llm.test_implementor.framework_instruction",
             "llm.test_implementor.test_paths",
         ],
-        "next_action": "Fill in the tester instructions and (TDD is on by default) the "
-                       "test_implementor framework_instruction + test_paths — or let a plan.md "
-                       "`dev-pipeline-config` header supply them per run. Placeholder <...> values "
-                       "are rejected. To skip TDD, set driver.tdd_mode=false. Then re-run "
-                       "/dev-pipeline --request \"<goal>\" (or --plan <path>).",
+        "next_action": "First, run the interactive runner setup: propose a runner (execution "
+                       "mode + LLM/model) for each of implementor/test_implementor/tester/reviewer, "
+                       "confirm with the user, then call `driver set-runners` (see SKILL.md Step 5). "
+                       "Then fill in the tester instructions and (TDD is on by "
+                       "default) the test_implementor framework_instruction + test_paths — or let a "
+                       "plan.md `dev-pipeline-config` header supply them per run. Placeholder <...> "
+                       "values are rejected. To skip TDD, set driver.tdd_mode=false.",
     })
+
+
+def cmd_set_runners(args) -> None:
+    """Write the user-confirmed `runners` into a freshly bootstrapped config — the
+    ONE sanctioned exception to 'the SKILL never edits the user's config itself'
+    (SKILL.md Global Rule 10): a one-time interactive setup right after bootstrap,
+    not a workaround for a validation failure. Refuses to run once runners are
+    already configured (edit the config file directly after that point)."""
+    config_path = pathlib.Path(args.config).resolve()
+    cfg = load_json(config_path)
+    # set-runners only seeds a config whose runners are ALL still the sentinel. Give
+    # a message that names which case failed (already/partially configured, or the
+    # role keys are missing) rather than guessing.
+    unconf = set(_unconfigured_runner_roles(cfg))
+    if unconf != set(UNCONFIGURABLE_ROLES):
+        roles = cfg.get("runners") or {}
+        if not unconf:
+            reason = "runners are already configured"
+        elif not isinstance(roles, dict) or set(roles) != set(UNCONFIGURABLE_ROLES):
+            reason = "the config is missing the expected role keys"
+        else:
+            configured = sorted(set(UNCONFIGURABLE_ROLES) - unconf)
+            reason = f"runners are only partially unconfigured (already set: {configured})"
+        die(f"{config_path}: {reason} — set-runners only seeds a freshly bootstrapped config "
+            f"whose runners are all still the 'unconfigured' sentinel. Edit {config_path} "
+            "directly to change runners now.")
+
+    runners_path = pathlib.Path(args.runners_file).resolve()
+    given = load_json(runners_path)
+    if not isinstance(given, dict):
+        die(f"{runners_path}: must be a JSON object of the form "
+            '{"implementor": [...], "test_implementor": [...], "tester": [...], "reviewer": [...]}.')
+
+    errors = []
+    missing = sorted(r for r in UNCONFIGURABLE_ROLES if r not in given)
+    if missing:
+        errors.append(f"runners file is missing role(s): {missing}")
+    extra = sorted(r for r in given if r not in UNCONFIGURABLE_ROLES)
+    if extra:
+        errors.append(f"runners file has unknown role(s): {extra}")
+    if not errors:
+        # Validate only the runners themselves. Run the precise business rules FIRST
+        # (they name the exact type/command/key problem — the 3-attempt SKILL repair
+        # loop needs an actionable message), then the schema shape (normalizer enum,
+        # timeout type, unexpected keys) via the same _validate/$ref the full config
+        # check uses. Both reused as-is from validate_config_data.
+        errors.extend(_runner_shape_errors({"runners": given}))
+        config_schema = load_json(SCHEMA_DIR / "config.schema.json")
+        for role, arr in given.items():
+            errors.extend(_validate(arr, {"$ref": "#/$defs/runner_array"}, f"runners.{role}", config_schema))
+    if errors:
+        die("Invalid runners — nothing was written:\n  " + "\n  ".join(errors))
+
+    cfg["runners"] = given
+    save_json(config_path, cfg)
+    runners_path.unlink(missing_ok=True)  # only clean up the scratch file on success
+    emit({"ok": True, "config": str(config_path), "runners": sorted(given)})
 
 
 # ---------------------------------------------------------------------------
@@ -1668,6 +1798,10 @@ def cmd_run_stage(args) -> None:
             continue
         t = r.get("type")
         if t not in RUNNER_TYPES:
+            if t == "unconfigured":
+                die(f"config.runners.{role} is still the 'unconfigured' sentinel — this snapshot "
+                    "was created before runner setup completed. Configure runners (driver "
+                    "set-runners / the /dev-pipeline setup dialog) and start a new run.")
             die(f"config.runners.{role} has an unsupported runner type {t!r} — this run was "
                 "likely created by a pre-3.0.0 driver. Start a new run (its snapshot is frozen).")
         if t == "bash" and not r.get("command"):
@@ -1841,6 +1975,13 @@ def cmd_migrate_config(args) -> None:
     sections are preserved; only runners are rewritten."""
     config_path = pathlib.Path(args.config).resolve()
     cfg = load_json(config_path)
+    # migrate-config is for converting a LEGACY (pre-3.0.0) config. Refuse a freshly
+    # bootstrapped, still-unconfigured config — replacing its sentinels with concrete
+    # bash defaults would silently bypass the interactive runner-setup dialog.
+    if _unconfigured_runner_roles(cfg):
+        die(f"{config_path}: runners are still the 'unconfigured' sentinel (a freshly "
+            "bootstrapped config). migrate-config converts a legacy config's runners — it is not "
+            "the setup path. Run /dev-pipeline (interactive setup) or `driver set-runners` instead.")
     legacy = _legacy_runner_roles(cfg)
     replaced = sorted((cfg.get("runners") or {}).keys())  # ALL roles are replaced wholesale
     example = load_json(EXAMPLE_PATH)
@@ -1895,7 +2036,8 @@ STATES
 
 DRIVER CLI
 ----------
-  bootstrap-config Seed .dev-pipeline/dev-pipeline.config.json from the template
+  bootstrap-config Seed .dev-pipeline/dev-pipeline.config.json (runners left unconfigured)
+  set-runners      One-time write of the user-confirmed runners into a fresh config
   init             Create a new run from a plan + config  [--header-approved]
   advance          Compute and apply the next state transition
   status           Print current run state
@@ -1958,6 +2100,10 @@ def main() -> None:
 
     p_bc = sub.add_parser("bootstrap-config")
     p_bc.add_argument("--project")
+
+    p_sr = sub.add_parser("set-runners")
+    p_sr.add_argument("--config", required=True)
+    p_sr.add_argument("--runners-file", dest="runners_file", required=True)
 
     p_init = sub.add_parser("init")
     p_init.add_argument("--plan", required=True)
@@ -2027,6 +2173,7 @@ def main() -> None:
 
     dispatch = {
         "bootstrap-config": cmd_bootstrap_config,
+        "set-runners":      cmd_set_runners,
         "init":             cmd_init,
         "advance":          cmd_advance,
         "status":           cmd_status,

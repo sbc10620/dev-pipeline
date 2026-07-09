@@ -769,6 +769,7 @@ class TestBootstrapConfig(unittest.TestCase):
         r = run_driver("bootstrap-config", "--project", str(proj))
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.json["status"], "created")
+        self.assertFalse(r.json["runners_configured"])
         config = proj / ".dev-pipeline" / "dev-pipeline.config.json"
         self.assertTrue(config.exists())
         # No git repo → .gitignore is not touched.
@@ -781,6 +782,14 @@ class TestBootstrapConfig(unittest.TestCase):
              "llm.tester.test_instruction",
              "llm.test_implementor.framework_instruction",
              "llm.test_implementor.test_paths"],
+        )
+        # runners are seeded UNCONFIGURED, not the template's concrete claude
+        # commands — the interactive setup dialog (driver set-runners) fills them.
+        cfg = json.loads(config.read_text(encoding="utf-8"))
+        self.assertEqual(
+            cfg["runners"],
+            {role: [{"type": "unconfigured"}] for role in
+             ("implementor", "test_implementor", "tester", "reviewer")},
         )
 
     def test_existing_config_not_overwritten(self):
@@ -817,15 +826,16 @@ class TestBootstrapConfig(unittest.TestCase):
             encoding="utf-8").splitlines().count(".dev-pipeline/")
         self.assertEqual(occurrences, 1)
 
-    def test_seeded_config_validates_after_filling_instructions(self):
+    def test_seeded_config_validates_after_filling_instructions_and_runners(self):
         proj = self._tmp_project(git=False)
         run_driver("bootstrap-config", "--project", str(proj))
         config = proj / ".dev-pipeline" / "dev-pipeline.config.json"
 
-        # The template ships with placeholder tester instructions, so it must
-        # NOT validate until the user fills them in.
+        # The template ships with placeholder tester instructions AND unconfigured
+        # runners, so it must NOT validate until the user fills both in.
         r_before = run_driver("validate-config", "--config", str(config))
         self.assertNotEqual(r_before.returncode, 0)
+        self.assertIn("not configured yet", r_before.stderr)  # runners flagged first
 
         cfg = json.loads(config.read_text(encoding="utf-8"))
         cfg["llm"]["tester"]["build_instruction"] = "no build step"
@@ -836,9 +846,181 @@ class TestBootstrapConfig(unittest.TestCase):
         cfg["llm"]["test_implementor"]["test_paths"] = ["tests/**"]
         config.write_text(json.dumps(cfg), encoding="utf-8")
 
+        # Instructions alone are not enough — runners are still unconfigured.
+        r_mid = run_driver("validate-config", "--config", str(config))
+        self.assertNotEqual(r_mid.returncode, 0)
+        self.assertIn("not configured yet", r_mid.stderr)
+
+        runners = {
+            "implementor": [{"type": "bash", "command": "true"}],
+            "test_implementor": [{"type": "bash", "command": "true"}],
+            "tester": [{"type": "bash", "command": "true > {output_file}"}],
+            "reviewer": [{"type": "bash", "command": "true > {output_file}"}],
+        }
+        rf = proj / ".dev-pipeline" / "r.json"
+        rf.write_text(json.dumps(runners), encoding="utf-8")
+        r_set = run_driver("set-runners", "--config", str(config), "--runners-file", str(rf))
+        self.assertEqual(r_set.returncode, 0, r_set.stderr)
+        self.assertFalse(rf.exists())  # scratch file cleaned up on success
+
         r_after = run_driver("validate-config", "--config", str(config))
-        self.assertEqual(r_after.returncode, 0)
+        self.assertEqual(r_after.returncode, 0, r_after.stderr)
         self.assertTrue(r_after.json["valid"])
+
+    def test_init_on_unconfigured_config_fails_cleanly(self):
+        proj = self._tmp_project(git=False)
+        run_driver("bootstrap-config", "--project", str(proj))
+        config = proj / ".dev-pipeline" / "dev-pipeline.config.json"
+        plan = proj / "plan.md"
+        plan.write_text("# P\n\n## Requirements\n- r\n\n## Acceptance Criteria\n- [ ] a\n",
+                        encoding="utf-8")
+        r = run_driver("init", "--plan", str(plan), "--config", str(config), "--project", str(proj))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not configured yet", r.stderr)
+        # A rejected init must not create a run directory.
+        self.assertFalse((proj / ".dev-pipeline" / "runs").exists())
+
+    def test_exists_reports_runners_configured_false_when_unconfigured(self):
+        proj = self._tmp_project(git=False)
+        run_driver("bootstrap-config", "--project", str(proj))
+        r = run_driver("bootstrap-config", "--project", str(proj))  # second call → exists
+        self.assertEqual(r.json["status"], "exists")
+        self.assertFalse(r.json["runners_configured"])  # still unconfigured — setup resumable
+
+    def test_migrate_config_refuses_unconfigured(self):
+        proj = self._tmp_project(git=False)
+        run_driver("bootstrap-config", "--project", str(proj))
+        config = proj / ".dev-pipeline" / "dev-pipeline.config.json"
+        r = run_driver("migrate-config", "--config", str(config))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not the setup path", r.stderr)
+
+
+class TestSetRunners(unittest.TestCase):
+    """`driver set-runners` — the one-time write of the user-confirmed runners into
+    a freshly bootstrapped (still-unconfigured) config."""
+
+    VALID_RUNNERS = {
+        "implementor": [{"type": "bash", "command": "true"}],
+        "test_implementor": [{"type": "subagent", "model": "sonnet"}],
+        "tester": [{"type": "main-session"}],
+        "reviewer": [{"type": "bash", "command": "true > {output_file}", "normalizer": "claude-cli"}],
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.proj = pathlib.Path(self._tmp.name)
+        run_driver("bootstrap-config", "--project", str(self.proj))
+        self.config = self.proj / ".dev-pipeline" / "dev-pipeline.config.json"
+        self.rf = self.proj / ".dev-pipeline" / "r.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _set(self, runners):
+        self.rf.write_text(json.dumps(runners), encoding="utf-8")
+        return run_driver("set-runners", "--config", str(self.config), "--runners-file", str(self.rf))
+
+    def test_success_writes_runners_and_cleans_up(self):
+        before = self.config.read_text(encoding="utf-8")
+        r = self._set(self.VALID_RUNNERS)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["ok"])
+        self.assertFalse(self.rf.exists())  # scratch file removed on success
+        cfg = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["runners"], self.VALID_RUNNERS)
+        self.assertNotEqual(self.config.read_text(encoding="utf-8"), before)
+
+    def test_rejects_when_already_configured(self):
+        r1 = self._set(self.VALID_RUNNERS)
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        before = self.config.read_text(encoding="utf-8")
+        r2 = self._set(self.VALID_RUNNERS)  # second call
+        self.assertNotEqual(r2.returncode, 0)
+        self.assertIn("already configured", r2.stderr)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), before)  # untouched
+
+    def test_rejects_missing_role(self):
+        before = self.config.read_text(encoding="utf-8")
+        runners = {k: v for k, v in self.VALID_RUNNERS.items() if k != "reviewer"}
+        r = self._set(runners)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("missing role", r.stderr)
+        self.assertIn("reviewer", r.stderr)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), before)
+
+    def test_rejects_unknown_role(self):
+        before = self.config.read_text(encoding="utf-8")
+        runners = {**self.VALID_RUNNERS, "spec_author": [{"type": "bash", "command": "x"}]}
+        r = self._set(runners)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unknown role", r.stderr)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), before)
+
+    def test_rejects_bash_without_command(self):
+        before = self.config.read_text(encoding="utf-8")
+        runners = {**self.VALID_RUNNERS, "implementor": [{"type": "bash"}]}
+        r = self._set(runners)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("bash runner requires", r.stderr)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), before)
+
+    def test_rejects_subagent_with_command(self):
+        before = self.config.read_text(encoding="utf-8")
+        runners = {**self.VALID_RUNNERS, "implementor": [{"type": "subagent", "command": "x"}]}
+        r = self._set(runners)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("must not have a `command`", r.stderr)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), before)
+
+    def test_rejects_mixed_array(self):
+        before = self.config.read_text(encoding="utf-8")
+        runners = {**self.VALID_RUNNERS,
+                  "implementor": [{"type": "bash", "command": "x"}, {"type": "subagent"}]}
+        r = self._set(runners)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("mixed runner types", r.stderr)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), before)
+
+    def test_failed_call_leaves_scratch_file_for_inspection(self):
+        r = self._set({**self.VALID_RUNNERS, "implementor": [{"type": "bash"}]})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertTrue(self.rf.exists())  # kept on failure, unlike the success path
+
+    def test_rejects_legacy_type_with_actionable_message(self):
+        # A pre-3.0.0 type must be NAMED (not just "matches none of the oneOf"), so
+        # the SKILL's repair loop can act on it.
+        r = self._set({**self.VALID_RUNNERS,
+                       "implementor": [{"type": "claude-subagent", "agent": "x"}]})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("removed in 3.0.0", r.stderr)
+
+    def test_rejects_resubmitted_unconfigured_sentinel(self):
+        r = self._set({**self.VALID_RUNNERS, "implementor": [{"type": "unconfigured"}]})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("sentinel", r.stderr)
+
+    def test_rejects_unknown_type_with_name(self):
+        r = self._set({**self.VALID_RUNNERS, "implementor": [{"type": "wizard"}]})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unknown runner type 'wizard'", r.stderr)
+
+    def test_rejects_bool_timeout(self):
+        # bool is a subclass of int in Python; a naive schema check would accept
+        # timeout:true (→ a 1-second timeout at run time). It must be rejected.
+        r = self._set({**self.VALID_RUNNERS,
+                       "implementor": [{"type": "bash", "command": "x", "timeout": True}]})
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_partial_config_guard_message(self):
+        # Configure one role by hand, leave the rest unconfigured → set-runners must
+        # decline with a message that names the partial state, not "already configured".
+        cfg = json.loads(self.config.read_text(encoding="utf-8"))
+        cfg["runners"]["implementor"] = [{"type": "bash", "command": "x"}]
+        self.config.write_text(json.dumps(cfg), encoding="utf-8")
+        r = self._set(self.VALID_RUNNERS)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("partially unconfigured", r.stderr)
 
 
 class TestTDD(PipelineTestCase):

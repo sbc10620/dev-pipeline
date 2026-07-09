@@ -7,6 +7,13 @@ This file provides guidance to AI coding agents (Claude Code, Codex, Cline, …)
 The driver is the only executable component. No build step required — Python 3 standard library only (Python ≥ 3.9).
 
 ```bash
+# Seed a project's config from the template (runners left "unconfigured")
+python3 agents/dev-pipeline-tools/driver.py bootstrap-config --project <project>
+
+# One-time write of the user-confirmed runners into a freshly bootstrapped config
+# (the SKILL calls this after its interactive setup dialog; refuses a second call)
+python3 agents/dev-pipeline-tools/driver.py set-runners --config <project>/.dev-pipeline/dev-pipeline.config.json --runners-file <path>
+
 # Validate a project's config before running (optionally as `init` will see it for a plan)
 python3 agents/dev-pipeline-tools/driver.py validate-config --config <project>/.dev-pipeline/dev-pipeline.config.json [--plan plan.md]
 
@@ -180,7 +187,7 @@ After editing, skim a sibling file side-by-side and confirm headings, step forma
 
 ## Config requirements
 
-`.dev-pipeline/dev-pipeline.config.json` must be present in the target project (it holds the `runners`). It is **bootstrapped by the skill on the first run** — when absent, the SKILL calls `driver bootstrap-config`, which copies the template into the gitignored `.dev-pipeline/` directory. With `--plan` it stops so you configure it; with `--request` it continues into planning (the planner fills the instructions into the plan header). The tester/test_implementor instructions may live in this file **or** in the `plan.md` `dev-pipeline-config` header (merged per run into the snapshot). Wherever they live, at run time they are **mandatory and may not contain placeholder values** (`<...>`):
+`.dev-pipeline/dev-pipeline.config.json` must be present in the target project (it holds the `runners`). It is **bootstrapped by the skill on the first run** — when absent, the SKILL calls `driver bootstrap-config`, which seeds it from the template into the gitignored `.dev-pipeline/` directory, but leaves `runners` as an **`"unconfigured"` sentinel** (`{"type": "unconfigured"}` per role) rather than the template's concrete claude commands. `driver.py`'s `config.example.json` itself is untouched by this — `migrate-config`, the real-LLM e2e harness, and the test suite still read its concrete bash defaults directly. Right after a fresh bootstrap, the SKILL runs a **one-time interactive runner-setup dialog** (SKILL.md Step 5): it proposes a runner (execution mode + model) per role with reasoning, gets the user's confirmation, then calls the new **`driver set-runners --config <path> --runners-file <path>`** — the one sanctioned exception to "never edit the user's config yourself" (Global Rule 10); it refuses to run again once runners are configured, so later changes are a direct hand-edit. Only after that does the rest proceed: with `--plan` it stops so you fill in the remaining fields; with `--request` it continues into planning (the planner fills the tester/test_implementor instructions into the plan header). Wherever those instructions live, at run time they are **mandatory and may not contain placeholder values** (`<...>`):
 
 ```json
 "tester": {

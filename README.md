@@ -54,11 +54,13 @@ bash /path/to/dev-pipeline/install.sh /path/to/your/project
 
 This copies the skill (incl. `states/` and the role prompts under `agents/`), `driver.py`, schemas, and the config template into the canonical `<project>/.agents/skills/dev-pipeline/` (the open Agent Skills standard, read by Codex/Gemini/Cursor/…), plus a real `.claude/skills/` copy for Claude Code and a `.clinerules/workflows/` pointer for Cline. It does NOT create the config — the skill bootstraps `dev-pipeline.config.json` from the template (via `driver bootstrap-config`) into the gitignored `<project>/.dev-pipeline/` directory on the first run (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
 
+The bootstrapped config's `runners` start **unconfigured**: on that first run the skill walks you through a short interactive setup, proposing a runner (execution mode + model) for each role with its reasoning — confirm or correct in one turn, and it writes them via `driver set-runners` (a one-time operation; edit the config file directly to change runners after that).
+
 ---
 
 ## Configuration
 
-Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester instructions are **required** — the tester will never infer or guess commands.
+Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester instructions are **required** — the tester will never infer or guess commands. `runners` (shown below fully configured) starts as an `"unconfigured"` sentinel per role and is normally filled in once by the interactive setup dialog on first run (see Installation) — edit it directly here to change it afterward.
 
 ```json
 {
@@ -208,6 +210,8 @@ Each `run-id` is a timestamp (`YYYYMMDD-HHMMSS`). Previous runs are preserved fo
 ```bash
 python3 agents/dev-pipeline-tools/driver.py --help
 python3 agents/dev-pipeline-tools/driver.py --version
+python3 agents/dev-pipeline-tools/driver.py bootstrap-config --project .
+python3 agents/dev-pipeline-tools/driver.py set-runners --config .dev-pipeline/dev-pipeline.config.json --runners-file runners.json
 python3 agents/dev-pipeline-tools/driver.py validate-config --config .dev-pipeline/dev-pipeline.config.json
 python3 agents/dev-pipeline-tools/driver.py status --run .dev-pipeline/latest
 python3 agents/dev-pipeline-tools/driver.py migrate-config --config .dev-pipeline/dev-pipeline.config.json

@@ -9,6 +9,20 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [5.4.0] - 2026-07-09
+
+`config.runners` — previously the one setting nobody ever inferred or confirmed — is now configured through a one-time interactive dialog right after the config is first bootstrapped, instead of silently copying the template's concrete claude commands.
+
+### Added
+- **`driver bootstrap-config` seeds `runners` as `"unconfigured"`** — each role gets `[{"type": "unconfigured"}]` instead of the template's concrete bash commands. `config.example.json` itself is untouched (still the known-good bash defaults `migrate-config`, the real-LLM e2e harness, and the test suite rely on); only the newly written `.dev-pipeline/dev-pipeline.config.json` differs.
+- **`driver set-runners --config <path> --runners-file <path>`** — the one-time write of the user-confirmed `runners` into a still-unconfigured config: validates the given runners (schema shape + actionable business-rule messages — bash-needs-command, no-command-on-subagent/main-session, homogeneous array, and named errors for unknown/legacy/`unconfigured` types so the SKILL's repair loop can act on them), then atomically replaces `runners` and deletes the scratch file on success (left in place on failure, for the retry). Refuses to run once runners are already configured — edit the config file directly after that.
+- **`save_json` is now atomic** (temp file + `fsync` + `os.replace`) — a crash mid-write can no longer truncate `config.json` or `state.json`.
+- **`validate-config` detects "not configured yet"** — a config with any `unconfigured` role fails with an actionable message (before the generic schema error), pointing at the interactive setup or `set-runners` directly.
+- **`SKILL.md` Step 5: interactive runner-setup dialog** — runs whenever `bootstrap-config` reports `runners_configured: false` (a fresh bootstrap **or** a first run that was interrupted before setup finished — the setup is resumable, not deadlocked), for **both** `--request` and `--plan`, even under `--auto-run`. Detects available CLIs (`command -v claude`/`codex`), proposes a runner per role with reasoning in a single batched message (mirroring the planner's Step 2 confirmation pattern) — bash with a scoped tool envelope when a CLI is available (reviewer defaults to read-only, the only mode with a **hard** sandbox); `subagent`/`main-session` otherwise, with the no-hard-sandbox trade-off stated plainly for the reviewer, and never a `main-session` reviewer when the implementor is also `main-session` (self-review). A bounded (3-attempt) repair loop handles `set-runners` validation failures. This is the SKILL's one sanctioned exception to Global Rule 10 ("never modify the user's config yourself"), scoped to a config whose runners are still unconfigured. `bootstrap-config` reports `runners_configured` on both the `created` and `exists` paths; `migrate-config` refuses a still-unconfigured config (it converts a legacy config, not the setup path).
+
+### Changed
+- `bootstrap-config`'s `required_fields`/`next_action` output no longer implies runners are ready; it points at the new setup step first.
+
 ## [5.3.0] - 2026-07-09
 
 Role runners gain two **host execution modes** alongside `bash`, so a role can run in the host session instead of shelling out to a CLI — chosen per role, kept LLM-free (no host agent-definition files).

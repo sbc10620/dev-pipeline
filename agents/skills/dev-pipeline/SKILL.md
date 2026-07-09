@@ -24,7 +24,7 @@ The plan is a single contract: a `dev-pipeline-config` header (tester instructio
 7. **Never assemble a prompt yourself.** The driver owns prompt assembly (so behavior is identical across LLMs); you pass the assembled `system_file`/`user_file` through unchanged. For a bash runner the driver also writes the result file. In a main-session/subagent handoff the **executor** (you, or the subagent) writes the json result to the exact `output_file` run-stage named — that is expected; you still never edit the assembled prompt or a bash runner's result.
 8. **Never put LLM-specific commands or flags in a state file.** Which LLM runs a role, and with what tools/permissions, lives only in `config.runners.<role>`; state files reference roles abstractly.
 9. **Never read `config.snapshot.json` for control flow or prompt construction.** Every decision value a state needs (instructions, runner arrays, `design_instruction`, `test_paths`, `tdd_mode`, `run_self_evolution`, …) is echoed by `driver init` / `driver advance`. Take it from the most recent advance output. `config.snapshot.json` is an audit record only. In particular, recover `tdd_mode` from the advance echo (or `state.json`'s frozen `state.tdd_mode`) — it is frozen into the run at `init` (from the merged config, whose `driver.tdd_mode` a plan header may have set); once a run has started, the frozen state value is authoritative.
-10. **Never modify the user's config yourself.** `.dev-pipeline/dev-pipeline.config.json` is the user's to own. The driver seeds it from the template on first run (then stops); after that you must **not** edit it, and you must not instruct or allow any agent to edit it. If at any point — config validation failure, a wrong/failing tester instruction, a missing field, an environment halt, a runner you think should change — you judge that the config needs changing, **STOP**: tell the user the exact change you propose and why, and let the user apply it (or explicitly confirm) before you continue. Never edit the config and proceed on your own.
+10. **Never modify the user's config yourself.** `.dev-pipeline/dev-pipeline.config.json` is the user's to own. The driver seeds it from the template on first run (then stops); after that you must **not** edit it, and you must not instruct or allow any agent to edit it. If at any point — config validation failure, a wrong/failing tester instruction, a missing field, an environment halt, a runner you think should change — you judge that the config needs changing, **STOP**: tell the user the exact change you propose and why, and let the user apply it (or explicitly confirm) before you continue. Never edit the config and proceed on your own. **Exception:** for a config whose `runners` are still the `unconfigured` sentinel (a fresh bootstrap, or a first run that was interrupted before setup finished — `bootstrap-config` reports `runners_configured: false`), you may call `driver set-runners` to seed them, right after the runner-setup dialog gets the user's confirmation (Step 5 below). This is the sanctioned one-time interactive seeding, not a workaround for a validation failure; it succeeds at most **once** (`set-runners` refuses once runners are configured), so retries only follow a *failed* write.
 
 ---
 
@@ -123,9 +123,10 @@ After the role completes and validates, continue the state file from where it di
   With driver.tdd_mode=false the test_implementation and red_test states are skipped.
 
   Prerequisites:
-    - .dev-pipeline/dev-pipeline.config.json — created automatically on first run.
-      It holds the runners; tester/test_implementor instructions can come from it
-      OR from the plan.md dev-pipeline-config header (per run).
+    - .dev-pipeline/dev-pipeline.config.json — created automatically on first run;
+      an interactive dialog then configures the runners (execution mode + model
+      per role) once. Tester/test_implementor instructions can come from it OR
+      from the plan.md dev-pipeline-config header (per run).
     - Start with a clean working tree (no unrelated uncommitted changes)
 
   Installation:
@@ -147,32 +148,44 @@ After the role completes and validates, continue the state file from where it di
   ```bash
   dir="$(pwd)"; while [ "$dir" != "/" ]; do [ -f "$dir/.dev-pipeline/dev-pipeline.config.json" ] && echo "$dir" && break; dir="$(dirname "$dir")"; done
   ```
-  If it prints nothing (and `--plan` was given, also try walking up from the plan file's directory):
-  - **(a) Found** → save the printed directory as `project_root` and continue to Step 5.
-  - **(b) Not found** → bootstrap the config via the driver (do NOT create directories or copy files yourself):
+  In every case, determine `runners_configured` — whether `config.runners` has been set up yet (it is left **unconfigured** at bootstrap and filled in by Step 5) — so you know whether Step 5 still needs to run:
+  - **(a) Found** → save the printed directory as `project_root`, then run `python3 <driver_path> bootstrap-config --project <project_root>` (idempotent — it reports `status: "exists"` for an existing config) and read `runners_configured` from its JSON.
+  - **(b) Not found** → bootstrap the config via the driver (do NOT create directories or copy files yourself; for `--plan`, first try walking up from the plan file's directory):
     ```bash
     python3 <driver_path> bootstrap-config
     ```
-    Parse the JSON output:
-    - `status == "created"`:
-      - **`--request`:** do **not** stop — save the returned `project_root` and continue. The planner fills the tester/test_implementor instructions into the plan header and **confirms them with you during planning** (`states/planning.md` Step 2), which is the consent `init` needs to merge them — so a fresh (placeholder) config is fine even under `--auto-run`. (Only `runners` must be pre-present, and the template supplies them.)
-      - **`--plan`:** **stop** and tell the user, using the returned `config_path` and `required_fields`:
-        > "✅ Created the dev-pipeline config from the template: `<config_path>`
-        > Before running, either fill the required fields (placeholder `<...>` values are rejected) — `llm.tester.build_instruction`/`install_instruction`/`test_instruction`, and (TDD on by default) `llm.test_implementor.framework_instruction` + `test_paths` — or put them in your plan.md `dev-pipeline-config` header. To skip TDD set `driver.tdd_mode: false`. Then re-run."
-    - `status == "exists"` (rare race): save the returned `project_root` and continue.
-    - Non-zero exit: report the driver's error and stop.
+  - Parse the JSON output of whichever call you made:
+    - `status == "created"` → save `project_root`; `runners_configured` is `false` (freshly seeded, unconfigured).
+    - `status == "exists"` → save `project_root`; use the reported `runners_configured` (a first run that bootstrapped then died before setup finished leaves it `false` — the setup is **resumable**, not skipped).
+    - Non-zero exit, or `runners_configured == null` (config unreadable): report the driver's error and stop.
+  - If `runners_configured` is `false` → do **Step 5** next. If `true` → skip Step 5, continue to Step 6.
 
-- [Step 5] Remind the user: **"For accurate role-boundary checks and review, start this pipeline with a clean working tree. In particular, the installed dev-pipeline files (the canonical `.agents/skills/dev-pipeline/` tree, the `.claude/skills/dev-pipeline/` copy, and the `.clinerules/workflows/dev-pipeline.md` pointer) should already be committed."** (The commit and the review diff are both scoped to the change manifest, so stray untracked files are neither committed nor reviewed; only a codex reviewer runner, if you configure one, scans the working tree. A clean tree still keeps role-boundary checks accurate. Because the commit stages only files the pipeline produced, any **unrelated edits you already had** in the working tree will NOT be included in the pipeline's commit — commit or stash them first if you want them kept separately.)
+- [Step 5] **Interactive runner setup** (only when `runners_configured` is `false` — i.e. runners are still the `unconfigured` sentinel; skip entirely otherwise). `config.runners.<role>` decides how each of `implementor`/`test_implementor`/`tester`/`reviewer` actually runs (`bash` CLI, `subagent`, or `main-session` — see [§Role Execution](#-role-execution)); nothing else ever infers or confirms it, so do this now, once, before continuing. **This confirmation happens even under `--auto-run`** (`--auto-run` skips the post-plan approval gate, not this one-time safety-relevant setup).
+  - **Detect the environment** (best-effort, non-blocking): check whether `claude`/`codex` (or other CLIs you know how to drive) are on `PATH` (`command -v claude`, `command -v codex`).
+  - **Propose one recommendation per role, in a single message, with your reasoning** (same pattern as `dp-planner.md` Step 2's batched confirmation): if a CLI is on `PATH`, recommend a `bash` runner per role with a scoped tool envelope (implementor: write tools; test_implementor: write tools scoped to tests; tester: exec-only; **reviewer: read-only tools** — `Read`/`Grep`/`Glob`, no `Write`/`Edit`/`Bash`, because it reviews untrusted diff/contract content and a bash runner is the only mode with a **hard** tool sandbox). If no CLI is available, recommend `subagent` (or `main-session` if the host has no subagent tool) for the write-capable roles, and for the reviewer **say plainly**: a subagent/main-session reviewer has no hard tool sandbox — containment is prose-only (§Role Execution's security note) — so recommend it only if the user accepts that trade-off; bash remains preferable whenever any CLI is available. **If the implementor ends up `main-session`, the reviewer must be `subagent` or `bash`, never `main-session`** (otherwise the gate is the author reviewing its own work — see §Role Execution). Ask for a `model` where relevant. **Do not silently guess** — show the candidates and get explicit confirmation or corrections in one turn.
+  - **Write and apply.** Once confirmed, write the four-role JSON (`{"implementor": [...], "test_implementor": [...], "tester": [...], "reviewer": [...]}`, each entry shaped per [§Role Execution](#-role-execution)/`config.runners`) to `<project_root>/.dev-pipeline/.runners-setup-tmp.json`, then:
+    ```bash
+    python3 <driver_path> set-runners --config <project_root>/.dev-pipeline/dev-pipeline.config.json --runners-file <project_root>/.dev-pipeline/.runners-setup-tmp.json
+    ```
+    - `ok: true` → the scratch file is deleted automatically; continue to Step 6.
+    - Non-zero exit → **bounded repair loop:** show the user the exact error, revise the runners JSON to fix exactly that, and retry. After **3** attempts without success, stop and ask the user to configure `runners` by hand.
+  - `set-runners` succeeds at most **once** per config (it refuses once runners are configured); the repair loop above only retries a *failed* write. Never edit `runners` in the config file yourself.
 
-- [Step 6] **`--plan` header trust gate** (skip for `--request`; that gate lives in `states/planning.md`). A plan.md header can set executable/gate values (tester commands, `test_paths`, `review_block_severity`, `tdd_mode`) — and `plan.md` is untrusted. So:
+- [Step 6] Remind the user: **"For accurate role-boundary checks and review, start this pipeline with a clean working tree. In particular, the installed dev-pipeline files (the canonical `.agents/skills/dev-pipeline/` tree, the `.claude/skills/dev-pipeline/` copy, and the `.clinerules/workflows/dev-pipeline.md` pointer) should already be committed."** (The commit and the review diff are both scoped to the change manifest, so stray untracked files are neither committed nor reviewed; only a codex reviewer runner, if you configure one, scans the working tree. A clean tree still keeps role-boundary checks accurate. Because the commit stages only files the pipeline produced, any **unrelated edits you already had** in the working tree will NOT be included in the pipeline's commit — commit or stash them first if you want them kept separately.)
+  - If Step 5 just configured the runners for a freshly bootstrapped config (its tester/test_implementor instructions are still template placeholders): **`--request`** does **not** stop here — the planner fills those instructions into the plan header and **confirms them with you during planning** (`states/planning.md` Step 2), which is the consent `init` needs to merge them, so a fresh (placeholder) config is fine even under `--auto-run`. **`--plan`** **stops** and tells the user, using `bootstrap-config`'s `config_path`:
+    > "✅ Configured the dev-pipeline runners: `<config_path>`
+    > Before running, either fill the remaining required fields if they are still placeholders (`<...>` values are rejected) — `llm.tester.build_instruction`/`install_instruction`/`test_instruction`, and (TDD on by default) `llm.test_implementor.framework_instruction` + `test_paths` — or put them in your plan.md `dev-pipeline-config` header. To skip TDD set `driver.tdd_mode: false`. Then re-run."
+
+- [Step 7] **`--plan` header trust gate** (skip for `--request`; that gate lives in `states/planning.md`). A plan.md header can set executable/gate values (tester commands, `test_paths`, `review_block_severity`, `tdd_mode`) — and `plan.md` is untrusted. So:
   - If `--auto-run`: leave `header_approved` false (the header's executable/gate keys will come from `config.json`, not the untrusted plan).
   - Otherwise: Read the plan's leading `dev-pipeline-config` block and show the user its **effective** executable/gate settings (the build/install/test commands, `test_paths`, `review_block_severity`, `tdd_mode`). Ask them to confirm. On confirmation set `header_approved = true`; if they decline, stop.
 
 **Step 0 checklist:**
 - [ ] Exactly one of `--request` / `--plan`; `--auto-run` noted as `auto_run`; unknown args rejected
 - [ ] `driver.py` found at `<skill_dir>/driver.py`
-- [ ] Project root identified (config found, or bootstrapped — `--request` continues, `--plan` stops-and-configures on `status: "created"`)
-- [ ] User notified about clean working tree
+- [ ] Project root identified; `runners_configured` read from `bootstrap-config` (both found and bootstrapped paths)
+- [ ] (only if `runners_configured` was false) Interactive runner setup completed — recommendations proposed with reasoning (reviewer read-only unless the user opts out; no main-session reviewer when the implementor is main-session), confirmed by the user even under `--auto-run`, `driver set-runners` succeeded (or the 3-attempt repair loop was exhausted and the user was asked)
+- [ ] User notified about clean working tree; (just-configured fresh config) `--request` continues, `--plan` stops-and-configures on the remaining fields
 - [ ] (`--plan`) header trust gate handled — `header_approved` set per confirmation / `--auto-run`
 
 Now follow `states/planning.md` (`--request`) or `states/init.md` (`--plan`).
