@@ -81,7 +81,7 @@
 
 - [Step 4] **Self-evolution** — only if the echoed `run_self_evolution` is true.
   - Use the retrospective findings as input. Identify which agent `.md` files (or SKILL.md / its `states/*.md`) need updating.
-  - If `/advisor` is active, consult it first; otherwise apply only clearly necessary changes.
+  - If your host provides a dedicated advisory/code-review capability, consult it first; otherwise apply only clearly necessary changes.
   - Edit only the **canonical** `.agents/` tree, and **resolve every path against `project_root`, not your current directory** (your cwd may be a subdirectory). These are the sole files self-evolution may touch: `<project_root>/.agents/skills/dev-pipeline/agents/dp-planner.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-implementor.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-test-implementor.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-tester.md`, `<project_root>/.agents/skills/dev-pipeline/agents/dp-reviewer.md`, `<project_root>/.agents/skills/dev-pipeline/SKILL.md`, and `<project_root>/.agents/skills/dev-pipeline/states/*.md`.
   - Notify the user that source-repo files are NOT updated.
   - **If any changed, commit them** (git repo). First re-sync the whole `.agents/` skill into the `.claude/` copy Claude Code loads from (a delete-then-recopy of the whole tree, so the two never partially diverge — do NOT mirror file-by-file, which risks the host silently loading stale prose), then stage both trees. Run these commands **verbatim, substituting `<project_root>` with the run's real project-root path** (keep the quotes):
