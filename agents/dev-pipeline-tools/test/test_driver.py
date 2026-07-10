@@ -545,7 +545,7 @@ class TestInit(PipelineTestCase):
         self.assertEqual(state["iterations"], {"test": 0, "review": 0, "test_implementation": 0})
         self.assertIn("dev_pipeline_version", state)
         # max is populated from config.
-        self.assertEqual(state["max"]["test"], 3)
+        self.assertEqual(state["max"]["test"], 5)
         self.assertEqual(state["max"]["review"], 3)
 
     def test_init_missing_plan_dies(self):
@@ -1209,7 +1209,7 @@ class TestTDD(PipelineTestCase):
         self.assertEqual(r.json["next_state"], "implementation")
         self.assertEqual(r.json["directive"], "run_implementor")
 
-    def test_default_max_test_implementation_iteration_is_two(self):
+    def test_default_max_test_implementation_iteration_is_three(self):
         # When the key is omitted from config, the driver default applies.
         cfg = valid_config(tdd_mode=True)
         cfg["driver"].pop("max_test_implementation_iteration", None)
@@ -1217,7 +1217,7 @@ class TestTDD(PipelineTestCase):
         self._pipelines.append(p)
         p.init()
         state = json.loads((p.run_dir / "state.json").read_text())
-        self.assertEqual(state["max"]["test_implementation"], 2)
+        self.assertEqual(state["max"]["test_implementation"], 3)
 
     def test_review_prod_finding_routes_to_implementation(self):
         p = self.started_tdd()

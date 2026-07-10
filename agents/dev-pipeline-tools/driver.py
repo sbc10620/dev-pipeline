@@ -716,7 +716,7 @@ def cmd_init(args) -> None:
         "max": {
             "test": cfg["driver"]["max_test_iteration"],
             "review": cfg["driver"]["max_review_iteration"],
-            "test_implementation": cfg["driver"].get("max_test_implementation_iteration", 2),
+            "test_implementation": cfg["driver"].get("max_test_implementation_iteration", 3),
         },
         "halt_reason": None,
         "history": [{"state": "init", "ts": ts, "outcome": "started", "failure_type": None}],

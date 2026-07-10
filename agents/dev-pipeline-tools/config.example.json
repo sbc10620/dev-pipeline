@@ -1,8 +1,8 @@
 {
   "driver": {
-    "max_test_iteration": 3,
+    "max_test_iteration": 5,
     "max_review_iteration": 3,
-    "max_test_implementation_iteration": 2,
+    "max_test_implementation_iteration": 3,
     "tdd_mode": true,
     "run_self_evolution": false,
     "review_block_severity": ["critical", "high"]

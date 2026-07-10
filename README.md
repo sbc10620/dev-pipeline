@@ -68,9 +68,9 @@ Config lives in `.dev-pipeline/dev-pipeline.config.json`. Normally you set it th
 ```json
 {
   "driver": {
-    "max_test_iteration": 3,
+    "max_test_iteration": 5,
     "max_review_iteration": 3,
-    "max_test_implementation_iteration": 2,
+    "max_test_implementation_iteration": 3,
     "tdd_mode": true,
     "run_self_evolution": false,
     "review_block_severity": ["critical", "high"]
@@ -123,7 +123,7 @@ For a bash runner the driver runs and validates; for a subagent/main-session run
 |---|---|---|
 | `driver.max_test_iteration` | Yes | Max implementation retries after test failure |
 | `driver.max_review_iteration` | Yes | Max implementation retries after review failure |
-| `driver.max_test_implementation_iteration` | No | Max test re-authoring when RED is not confirmed (default: 2) |
+| `driver.max_test_implementation_iteration` | No | Max test re-authoring when RED is not confirmed (default: 3) |
 | `driver.tdd_mode` | No | Author tests first (RED→GREEN). Default `true`. Set via `--update-config` |
 | `driver.run_self_evolution` | Yes | Update installed agent .md files after done (default: false) |
 | `driver.review_block_severity` | No | Severities that block review pass (default: `["critical","high"]`). Null = use verdict gate |
