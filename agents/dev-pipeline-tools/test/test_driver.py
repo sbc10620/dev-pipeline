@@ -861,6 +861,54 @@ class TestResume(PipelineTestCase):
         tmps = list(p.run_dir.rglob("*.tmp"))
         self.assertEqual(tmps, [], f"stray temp files: {tmps}")
 
+    def test_resume_stale_window_failure_transition_converges(self):
+        # The risky crash window is a FAILURE transition (test-fail -> implementation):
+        # the counter is incremented and attempts.md appended before transition()
+        # persists anything. A crash-window re-run must converge the counter EXACTLY
+        # (the crashed increment was never saved to state.json), with at most a
+        # duplicated attempts line — pins the idempotency the "accepted limits" claims.
+        p = self.started(tdd_mode=False)
+        p.advance()  # init -> implementation
+        p.advance()  # implementation -> test
+        p.write_test_result(status="fail", failure_type="code",
+                            failure_details="boom", log_excerpt="E boom")
+        window = (p.run_dir / "state.json").read_bytes()  # state==test, iterations.test==0
+        p.advance()  # test -> implementation; iterations.test->1, appends attempt
+        (p.run_dir / "state.json").write_bytes(window)     # roll back to the crash window
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["next_state"], "test")
+        self.assertEqual(res.json["directive"], "advance")  # crash window -> re-run advance
+        adv = p.advance()                                    # re-run the failure transition
+        self.assertEqual(adv.json["next_state"], "implementation")
+        st = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(st["iterations"]["test"], 1)        # converged, NOT 2
+        self.assertEqual([h["state"] for h in st["history"]],
+                         ["init", "init", "implementation", "test"])
+        self.assertIn("boom", (p.run_dir / "attempts.md").read_text(encoding="utf-8"))
+
+    def test_resume_corrupt_last_advance_falls_back_to_recipe(self):
+        # An externally corrupted last-advance.json falls back to the manual recipe,
+        # not a raw JSONDecodeError.
+        p = self.started(tdd_mode=False)
+        p.advance()  # implementation
+        (p.run_dir / "last-advance.json").write_text("{ not json", encoding="utf-8")
+        res = self._resume(p)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("record-changes", res.stderr)   # the recipe
+        self.assertNotIn("Invalid JSON", res.stderr)  # not the raw parse error
+
+    def test_resume_missing_snapshot_still_resumes(self):
+        # A missing config.snapshot.json must not make the live-window heuristic die —
+        # resume still reaches its coherent branches.
+        p = self.started(tdd_mode=False)
+        p.advance()  # implementation
+        (p.run_dir / "config.snapshot.json").unlink()
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["next_state"], "implementation")
+        self.assertNotIn("config.snapshot", res.stderr)
+
 
 class TestBootstrapConfig(unittest.TestCase):
     """bootstrap-config seeds the config from the template deterministically."""

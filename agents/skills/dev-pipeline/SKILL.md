@@ -33,7 +33,7 @@ The `plan.md` is a pure **spec body** (Requirements, Acceptance Criteria, Interf
 The per-state procedures live in separate files under `states/` so this file stays small and each state is self-contained. The loop is:
 
 1. Do **[Step 0]** below once (arguments, driver location, config bootstrap, clean-tree reminder).
-2. If invoked with `--resume`, follow `states/resume.md` to continue an interrupted run from where it stopped (no new run, no planning/config-gate/init), then run the normal advance loop (step 6) from the recovered state.
+2. If invoked with `--resume`, follow `states/resume.md` to continue an interrupted run from where it stopped (no new run, no planning/config-gate/init), then run the normal advance loop (step 7) from the recovered state.
 3. If invoked with `--update-config`, run **only** the config-setup state by following `states/update_config.md` (with `plan_path` if one was given), then **stop** (report the config is ready; the user re-invokes with `--plan`/`--request` to run the pipeline).
 4. If invoked with `--request`, run the **planning** state by following `states/planning.md` (build + approve the `plan.md` spec). With `--plan`, skip straight to the config gate.
 5. **Config gate:** if Step 0 reported `config_complete: false`, run the config-setup state by following `states/update_config.md` (using `plan_path`) before continuing. If `config_complete` was true, skip it.

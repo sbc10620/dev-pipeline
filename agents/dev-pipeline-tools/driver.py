@@ -1147,14 +1147,18 @@ def _resume_live_window(run_dir: pathlib.Path) -> int:
     role's runners sequentially (fallback tries them front-to-back), so the bound is
     the largest per-role SUM of runner timeouts (default 600s each) plus a margin.
     This is a best-effort heuristic, not a lock — updated_at is stamped at the
-    landing advance, so a wedged run can still read as old."""
+    landing advance, so a wedged run can still read as old. Read the snapshot
+    defensively (NOT via load_json, which would die): a run whose snapshot is
+    missing/corrupt — e.g. init crashed before writing it — must still reach
+    cmd_resume's coherent branches, not die inside this heuristic."""
+    longest = 600
+    snap = run_dir / "config.snapshot.json"
     try:
-        cfg = load_json(run_dir / "config.snapshot.json")
-        per_role = [sum(r.get("timeout", 600) for r in runners if isinstance(r, dict))
-                    for runners in cfg.get("runners", {}).values()]
-        longest = max(per_role) if per_role else 600
-    except SystemExit:
-        raise
+        if snap.exists():
+            cfg = json.loads(snap.read_text(encoding="utf-8"))
+            per_role = [sum(r.get("timeout", 600) for r in runners if isinstance(r, dict))
+                        for runners in cfg.get("runners", {}).values()]
+            longest = max(per_role) if per_role else 600
     except Exception:
         longest = 600
     return int(longest) + 120
@@ -1221,8 +1225,18 @@ def cmd_resume(args) -> None:
         return
 
     la_path = run_dir / "last-advance.json"
+    echo = None
     if la_path.exists():
-        echo = load_json(la_path)
+        # Read defensively: save_json is atomic so the driver's own writes can't
+        # corrupt this, but external damage/truncation should fall through to the
+        # manual-recipe fallback (same situation as "the record was lost"), not die
+        # on a raw JSONDecodeError.
+        try:
+            loaded = json.loads(la_path.read_text(encoding="utf-8"))
+            echo = loaded if isinstance(loaded, dict) else None
+        except (json.JSONDecodeError, OSError):
+            echo = None
+    if echo is not None:
         if echo.get("next_state") == current:
             # Normal replay — hand back the exact landing echo (terminal states too:
             # done/failed carry run_self_evolution/halt_reason that finalization
