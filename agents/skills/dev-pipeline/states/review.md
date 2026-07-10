@@ -28,16 +28,11 @@ The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `cont
   ```bash
   python3 <driver_path> advance --run <run_dir>
   ```
+  On a review-failure retry the driver **records the blocking findings to `attempts.md` automatically** (verdict + summary + findings) — you do not log them yourself.
 
-- [Step 4] If `next_state` is `implementation` or `test_implementation` (review failed, retry), append findings to attempt history **after** advance:
-  ```bash
-  # Write summary + top findings from <iter_dir>/review-result.json to <run_dir>/.attempt-tmp.md, then:
-  python3 <driver_path> append-attempt --run <run_dir> --state review --outcome-file <run_dir>/.attempt-tmp.md
-  ```
-
-- [Step 5] Follow `states/<next_state>.md` (`done` on pass; `implementation`/`test_implementation` on a retry; `failed` if exhausted).
+- [Step 4] Follow `states/<next_state>.md` (`done` on pass; `implementation`/`test_implementation` on a retry; `failed` if exhausted).
 
 **Checklist:**
 - [ ] Change diff written to the echoed `changes_diff` path (manifest-scoped when present; new files surfaced via `add -N`, working tree left unchanged)
 - [ ] `run-stage --role reviewer` returned `ok: true` (valid `review-result.json` written), **or** a `mode` handoff was executed and `finalize-stage` returned `ok: true`; else stopped/reported
-- [ ] `driver advance` called before any `append-attempt`; followed the reported `next_state`
+- [ ] `driver advance` called; followed the reported `next_state` (the driver auto-recorded any retry findings)

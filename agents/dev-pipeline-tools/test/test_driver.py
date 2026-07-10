@@ -58,8 +58,8 @@ def run_driver(*args, cwd=None):
 VALID_RUNNERS = {
     "implementor":      [{"type": "bash", "command": "echo {system_file} {user_file}"}],
     "test_implementor": [{"type": "bash", "command": "echo {system_file} {user_file}"}],
-    "tester":           [{"type": "bash", "command": "echo x > {output_file}", "normalizer": "claude-cli"}],
-    "reviewer":         [{"type": "bash", "command": "echo x > {output_file}", "normalizer": "claude-cli"}],
+    "tester":           [{"type": "bash", "command": "echo x > {output_file}", "normalizer": "default"}],
+    "reviewer":         [{"type": "bash", "command": "echo x > {output_file}", "normalizer": "default"}],
 }
 
 
@@ -731,33 +731,53 @@ class TestNormalizeReview(PipelineTestCase):
         self.assertIn("verdict", r.stderr)
 
 
-class TestAppendAttempt(PipelineTestCase):
-    def test_append_replaces_placeholder_and_accumulates(self):
-        p = self.make_pipeline()
-        p.init()
-        attempts = p.run_dir / "attempts.md"
-        self.assertIn("_No attempts recorded yet._",
-                      attempts.read_text(encoding="utf-8"))
+class TestAttemptAutoRecord(PipelineTestCase):
+    """6.0.0: `advance` records the retry context to attempts.md itself when it
+    routes a failure back to a retry — no separate append-attempt step to forget."""
 
-        r = run_driver("append-attempt", "--run", str(p.run_dir),
-                       "--state", "test", "--outcome", "first failure")
-        self.assertEqual(r.returncode, 0)
+    def _to_review(self, p):
+        self.to_test_state(p)          # init -> implementation -> test
+        p.write_test_result(status="pass")
+        r = p.advance()                # test -> review
+        self.assertEqual(r.json["next_state"], "review")
+
+    def test_test_failure_records_attempt(self):
+        p = self.started()             # legacy flow (tdd off)
+        self.to_test_state(p)
+        attempts = p.run_dir / "attempts.md"
+        self.assertIn("_No attempts recorded yet._", attempts.read_text(encoding="utf-8"))
+        p.write_test_result(status="fail", failure_type="code",
+                            failure_details="assertion X failed",
+                            log_excerpt="E   AssertionError: nope")
+        r = p.advance()                # test -> implementation (retry)
+        self.assertEqual(r.json["next_state"], "implementation")
         body = attempts.read_text(encoding="utf-8")
         self.assertNotIn("_No attempts recorded yet._", body)
-        self.assertIn("first failure", body)
+        self.assertIn("assertion X failed", body)
+        self.assertIn("E   AssertionError", body)
+        self.assertIn("state=test", body)
 
-        run_driver("append-attempt", "--run", str(p.run_dir),
-                   "--state", "review", "--outcome", "second failure")
-        body = attempts.read_text(encoding="utf-8")
-        self.assertIn("first failure", body)
-        self.assertIn("second failure", body)
+    def test_test_pass_records_nothing(self):
+        p = self.started()
+        self.to_test_state(p)
+        p.write_test_result(status="pass")
+        r = p.advance()                # test -> review
+        self.assertEqual(r.json["next_state"], "review")
+        self.assertIn("_No attempts recorded yet._",
+                      (p.run_dir / "attempts.md").read_text(encoding="utf-8"))
 
-    def test_empty_outcome_rejected(self):
-        p = self.make_pipeline()
-        p.init()
-        r = run_driver("append-attempt", "--run", str(p.run_dir),
-                       "--state", "test", "--outcome", "   ")
-        self.assertNotEqual(r.returncode, 0)
+    def test_review_failure_records_findings(self):
+        p = self.started()
+        self._to_review(p)
+        p.write_review_result(verdict="needs-attention",
+                             findings=[finding(severity="critical", title="bug in foo",
+                                               file="src/a.py")])
+        r = p.advance()                # review -> implementation (retry)
+        self.assertEqual(r.json["next_state"], "implementation")
+        body = (p.run_dir / "attempts.md").read_text(encoding="utf-8")
+        self.assertIn("bug in foo", body)
+        self.assertIn("src/a.py", body)
+        self.assertIn("state=review", body)
 
 
 class TestBootstrapConfig(unittest.TestCase):
@@ -923,7 +943,7 @@ class TestApplyConfig(unittest.TestCase):
             "implementor": [{"type": "bash", "command": "true"}],
             "test_implementor": [{"type": "subagent", "model": "sonnet"}],
             "tester": [{"type": "main-session"}],
-            "reviewer": [{"type": "bash", "command": "true > {output_file}", "normalizer": "claude-cli"}],
+            "reviewer": [{"type": "bash", "command": "true > {output_file}", "normalizer": "default"}],
         },
     }
 
@@ -1566,7 +1586,7 @@ class TestRunStage(unittest.TestCase):
         self._cfg("tester", [
             {"type": "bash",
              "command": "printf '```json\\n%s\\n```\\n' " + shlex.quote(payload) + " > {output_file}",
-             "normalizer": "claude-cli"},
+             "normalizer": "default"},
         ])
         out = self.run_dir / "tr.json"
         r = self._run("tester", self._si("tester", output_file=str(out)))
@@ -1821,7 +1841,7 @@ class TestRunnerModes(unittest.TestCase):
 
     def test_validate_accepts_main_session_and_subagent(self):
         r = self._vc({"reviewer": [{"type": "main-session"}],
-                      "tester": [{"type": "subagent", "model": "sonnet", "normalizer": "claude-cli"}]})
+                      "tester": [{"type": "subagent", "model": "sonnet", "normalizer": "default"}]})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(r.json["valid"])
 
@@ -1846,6 +1866,22 @@ class TestRunnerModes(unittest.TestCase):
         r = self._vc({"reviewer": [{"type": "claude-subagent", "agent": "dp-reviewer"}]})
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("3.0.0", r.stderr)
+
+    def test_validate_rejects_removed_normalizer_name(self):
+        # 6.0.0: the LLM-specific `claude-cli`/`codex-cli` normalizers were replaced
+        # by `default`; an old name is now an invalid enum value.
+        r = self._vc({"reviewer": [{"type": "bash", "command": "x > {output_file}",
+                                    "normalizer": "claude-cli"}]})
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_validate_rejects_normalizer_on_file_role(self):
+        # A file role (implementor/test_implementor) has no JSON output, so a
+        # normalizer on it is a config mistake — rejected with an actionable reason.
+        r = self._vc({"implementor": [{"type": "bash", "command": "true",
+                                       "normalizer": "default"}]})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("normalizer", r.stderr)
+        self.assertIn("file role", r.stderr)
 
     # -- run-stage handoff + finalize-stage ------------------------------------
 
@@ -1889,9 +1925,13 @@ class TestRunnerModes(unittest.TestCase):
         self.assertEqual(r.json["mode"], "main-session")
         self.assertTrue(r.json["compact_first"])
         self.assertNotIn("model", r.json)
+        # the driver prepends the persona preamble (role-switch + single-role scope)
+        sys_text = pathlib.Path(r.json["system_file"]).read_text(encoding="utf-8")
+        self.assertIn("acting SOLELY as the dev-pipeline tester", sys_text)
+        self.assertIn("Do ONLY this role's work", sys_text)
 
     def test_finalize_stage_normalizes_fenced_json(self):
-        run_dir, proj, work, sp = self._setup("tester", [{"type": "subagent", "normalizer": "claude-cli"}])
+        run_dir, proj, work, sp = self._setup("tester", [{"type": "subagent", "normalizer": "default"}])
         outf = work / "tester-output.json"
         outf.write_text("```json\n" + json.dumps(test_result(status="pass")) + "\n```\n", encoding="utf-8")
         r = run_driver("finalize-stage", "--run", str(run_dir), "--role", "tester", "--stage-input", str(sp))

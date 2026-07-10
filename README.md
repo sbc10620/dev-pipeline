@@ -97,9 +97,9 @@ Config lives in `.dev-pipeline/dev-pipeline.config.json`. Normally you set it th
   "runners": {
     "implementor":      [{ "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Edit Write Bash" }],
     "test_implementor": [{ "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Edit Write" }],
-    "tester":           [{ "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Bash > {output_file}", "normalizer": "claude-cli" }],
+    "tester":           [{ "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Bash > {output_file}", "normalizer": "default" }],
     "reviewer":    [
-      { "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Grep Glob > {output_file}", "normalizer": "claude-cli" }
+      { "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Grep Glob > {output_file}", "normalizer": "default" }
     ]
   }
 }
@@ -107,8 +107,8 @@ Config lives in `.dev-pipeline/dev-pipeline.config.json`. Normally you set it th
 
 **Runners (3.0.0 bash; 5.3.0 adds host modes).** Each role runs through `driver run-stage`, which assembles the prompt from the LLM-agnostic `dp-<role>.md` + the stage's inputs. `config.runners.<role>` is an ordered array (homogeneous per role) whose entries pick an **execution mode**:
 
-- `{ "type": "bash", "command": …, "normalizer"?: "passthrough|claude-cli|codex-cli" }` — a CLI invocation the driver runs (the default; **the only place an LLM is named**). Placeholders substituted: `{system_file}` `{user_file}` `{output_file}` `{project_root}` `{run_dir}` `{work_dir}`.
-- `{ "type": "subagent", "model"?: "…", "normalizer"?: … }` — the host session spawns a subagent with the assembled prompt injected (no host-specific agent file; stays LLM-free). Optional `model`. For a **json** role (tester/reviewer) whose host tends to wrap output in markdown fences, set `"normalizer": "claude-cli"` (it also accepts bare JSON); `finalize-stage` defaults to `claude-cli` for handoffs anyway.
+- `{ "type": "bash", "command": …, "normalizer"?: "default|passthrough" }` — a CLI invocation the driver runs (the default; **the only place an LLM is named**). Placeholders substituted: `{system_file}` `{user_file}` `{output_file}` `{project_root}` `{run_dir}` `{work_dir}`. `normalizer` applies to **json** roles only (tester/reviewer): `default` (the default) tolerates a markdown fence or surrounding prose; `passthrough` requires clean JSON. A file role (implementor/test_implementor) has no JSON output, so a normalizer on it is rejected.
+- `{ "type": "subagent", "model"?: "…", "normalizer"?: … }` — the host session spawns a subagent with the assembled prompt injected (no host-specific agent file; stays LLM-free). Optional `model`. For a **json** role the handoff normalizer defaults to `default` (tolerates fences + bare JSON).
 - `{ "type": "main-session", "normalizer"?: … }` — the host LLM performs the role itself (after compacting the conversation). Works even on hosts without a subagent tool.
 
 For a bash runner the driver runs and validates; for a subagent/main-session runner it **hands the assembled prompt to the SKILL** to execute, then the SKILL validates a JSON result via `driver finalize-stage`. `llm.test_implementor` + `runners.test_implementor` are required only under TDD (default — set `tdd_mode:false` to omit). The `planner` has no runner — it runs conversationally in the host session.
@@ -171,7 +171,7 @@ Each role is an LLM-agnostic prose file (`agents/skills/dev-pipeline/agents/dp-<
 
 ## Reviewer
 
-`config.runners.reviewer` is an ordered array tried front-to-back. The default ships a single **claude** reviewer (`claude -p`, read-only tools). Add more entries to get automatic fallback — the next runner is used only if one fails to produce a valid `review-result.json`. A **codex** reviewer is fully supported (`codex exec -s read-only`, `normalizer: "codex-cli"`, OS-sandboxed) if you prefer it or want a second-vendor cross-check — just add it to the array. The reviewer reads the change diff against the spec's Acceptance Criteria.
+`config.runners.reviewer` is an ordered array tried front-to-back (configured via `--update-config`; a typical choice is a **claude** reviewer — `claude -p`, read-only tools). Add more entries to get automatic fallback — the next runner is used only if one fails to produce a valid `review-result.json`. A **codex** reviewer is fully supported (`codex exec -s read-only`, OS-sandboxed) if you prefer it or want a second-vendor cross-check — just add it to the array. The reviewer reads the change diff against the spec's Acceptance Criteria.
 
 ---
 

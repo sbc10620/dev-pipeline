@@ -22,14 +22,10 @@ The advance that landed here echoed `directive: run_tester`, `iter_dir`, and `td
   - **tests passed (RED not confirmed)** → `next_state: test_implementation` (re-author stronger tests), or `failed` if the budget is exhausted.
   - **environment failure** → `failed` (`halt_reason: environment`).
 
-- [Step 3] If `next_state == "test_implementation"` (RED not confirmed), append the outcome to attempt history **after** advance:
-  ```bash
-  # Write a short "tests passed with no implementation — vacuous" note to <run_dir>/.attempt-tmp.md, then:
-  python3 <driver_path> append-attempt --run <run_dir> --state red_test --outcome-file <run_dir>/.attempt-tmp.md
-  ```
+  On a RED-not-confirmed retry (`next_state: test_implementation`) the driver **records the vacuous-tests note to `attempts.md` automatically** — you do not log it yourself.
 
-- [Step 4] Follow `states/<next_state>.md`.
+- [Step 3] Follow `states/<next_state>.md`.
 
 **Checklist:**
 - [ ] `run-stage --role tester` returned `ok: true` (valid `red-test-result.json` written), **or** a `mode` handoff was executed and `finalize-stage` returned `ok: true`; else stopped/reported
-- [ ] `driver advance` called (before any `append-attempt`); followed the reported `next_state`
+- [ ] `driver advance` called; followed the reported `next_state` (the driver auto-recorded any RED-not-confirmed note)

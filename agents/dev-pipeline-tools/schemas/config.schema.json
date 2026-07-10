@@ -124,7 +124,7 @@
       "properties": {
         "type":       { "type": "string", "enum": ["bash"] },
         "command":    { "type": "string", "minLength": 1 },
-        "normalizer": { "type": "string", "enum": ["passthrough", "claude-cli", "codex-cli"] },
+        "normalizer": { "type": "string", "enum": ["passthrough", "default"] },
         "timeout":    { "type": "integer", "minimum": 1 }
       }
     },
@@ -134,7 +134,7 @@
       "required": ["type"],
       "properties": {
         "type":       { "type": "string", "enum": ["main-session"] },
-        "normalizer": { "type": "string", "enum": ["passthrough", "claude-cli", "codex-cli"] }
+        "normalizer": { "type": "string", "enum": ["passthrough", "default"] }
       }
     },
     "subagent_runner": {
@@ -144,7 +144,7 @@
       "properties": {
         "type":       { "type": "string", "enum": ["subagent"] },
         "model":      { "type": "string", "minLength": 1 },
-        "normalizer": { "type": "string", "enum": ["passthrough", "claude-cli", "codex-cli"] }
+        "normalizer": { "type": "string", "enum": ["passthrough", "default"] }
       }
     }
   }

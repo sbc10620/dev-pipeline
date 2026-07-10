@@ -17,14 +17,10 @@ The advance that landed here echoed `directive: run_tester` and `iter_dir`. The 
   ```bash
   python3 <driver_path> advance --run <run_dir>
   ```
+  On a code-failure retry (`next_state == "implementation"`) the driver **records the failure to `attempts.md` automatically** (`failure_details` + `log_excerpt`) — you do not log it yourself.
 
-- [Step 3] If `next_state == "implementation"` (test failed, retry), append the failure to attempt history **after** advance. Write `failure_details` (+ `log_excerpt`) from `<iter_dir>/test-result.json` to a temp file first:
-  ```bash
-  python3 <driver_path> append-attempt --run <run_dir> --state test --outcome-file <run_dir>/.attempt-tmp.md
-  ```
-
-- [Step 4] Follow `states/<next_state>.md` (`review` on pass, `implementation` on a code failure, `failed` if exhausted/environment).
+- [Step 3] Follow `states/<next_state>.md` (`review` on pass, `implementation` on a code failure, `failed` if exhausted/environment).
 
 **Checklist:**
 - [ ] `run-stage --role tester` returned `ok: true` (valid `test-result.json` written), **or** a `mode` handoff was executed and `finalize-stage` returned `ok: true`; else stopped/reported
-- [ ] `driver advance` called before any `append-attempt`; followed the reported `next_state`
+- [ ] `driver advance` called; followed the reported `next_state` (the driver auto-recorded any retry failure)

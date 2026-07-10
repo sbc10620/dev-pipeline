@@ -11,7 +11,6 @@ Usage:
   python3 driver.py validate-config  --config <path> [--plan <path>]
   python3 driver.py validate-result  --type test|review --file <path>
   python3 driver.py normalize-review --source codex --in <file> --out <file>
-  python3 driver.py append-attempt   --run <run_dir> --state <test_implementation|red_test|test|review> --outcome <text-or-file>
   python3 driver.py check-boundary   --run <run_dir> --role <test_implementation|implementation> --changed <file...>
   python3 driver.py record-changes   --run <run_dir> --changed <file...>
   python3 driver.py run-stage        --run <run_dir> --role <role> [--stage-input <file>]
@@ -288,6 +287,12 @@ def _runner_shape_errors(cfg: dict) -> list:
             elif t in ("main-session", "subagent") and "command" in r:
                 errors.append(f"runners.{role}[{i}]: a {t} runner must not have a `command` "
                               "(the host session/subagent runs it, not a shell)")
+            # A normalizer only applies to a JSON role's output. File roles
+            # (implementor/test_implementor) produce a git delta, not JSON, so a
+            # normalizer on them is a config mistake — reject it with a clear reason.
+            if ROLE_META.get(role, {}).get("category") == "file" and "normalizer" in r:
+                errors.append(f"runners.{role}[{i}]: a `normalizer` is meaningless for the {role} "
+                              "(a file role has no JSON output — its result is the git delta); remove it")
     return errors
 
 
@@ -714,6 +719,55 @@ def cmd_init(args) -> None:
 # Subcommand: advance
 # ---------------------------------------------------------------------------
 
+def _append_attempt_entry(attempts_path: pathlib.Path, state_label: str, iters: dict, text: str) -> None:
+    """Append a formatted failure entry to attempts.md (replacing the initial
+    placeholder). Called by `cmd_advance` when it routes a failure back to a retry,
+    so the retry context (test log / review findings / vacuous-test note) is
+    recorded deterministically — no separate SKILL step to forget. The label uses
+    the POST-increment counters, matching the attempt about to be retried."""
+    text = (text or "").strip()
+    if not text:
+        return
+    ti_n = iters.get("test_implementation", 0)
+    test_n = iters.get("test", 0)
+    review_n = iters.get("review", 0)
+    label = (f"### Attempt — state={state_label}, test_implementation_iter={ti_n}, "
+             f"test_iter={test_n}, review_iter={review_n} ({now_iso()})")
+    entry = f"\n{label}\n\n{text}\n"
+    current = attempts_path.read_text(encoding="utf-8") if attempts_path.exists() else ""
+    if "_No attempts recorded yet._" in current:
+        current = current.replace("_No attempts recorded yet._", "").rstrip()
+    attempts_path.write_text(current + entry + "\n", encoding="utf-8")
+
+
+def _test_failure_text(result: dict) -> str:
+    """Human-readable retry context from a failing test-result.json."""
+    parts = [result.get("failure_details", "").strip()]
+    excerpt = result.get("log_excerpt", "").strip()
+    if excerpt:
+        parts.append("Log excerpt:\n" + excerpt)
+    return "\n\n".join(p for p in parts if p)
+
+
+def _review_failure_text(result: dict) -> str:
+    """Human-readable retry context from a blocking review-result.json."""
+    parts = []
+    if result.get("verdict"):
+        parts.append(f"Verdict: {result['verdict']}")
+    if result.get("summary"):
+        parts.append(f"Summary: {result['summary'].strip()}")
+    findings = result.get("findings") or []
+    if findings:
+        lines = ["Findings:"]
+        for f in findings[:8]:
+            sev = f.get("severity", "?")
+            loc = f" ({f['file']})" if f.get("file") else ""
+            title = (f.get("title") or "").strip()
+            lines.append(f"- [{sev}]{loc} {title}")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
 def cmd_advance(args) -> None:
     run_dir = pathlib.Path(args.run).resolve()
     if not run_dir.exists():
@@ -892,6 +946,10 @@ def cmd_advance(args) -> None:
                                                      "(RED never confirmed). Tests are likely vacuous."})
             else:
                 iter_dir = ensure_iter_dir(run_dir, state)
+                _append_attempt_entry(
+                    pathlib.Path(attempts_path), "red_test", state["iterations"],
+                    "The authored tests PASSED with no implementation present. They are "
+                    "vacuous — strengthen them so they fail until the feature exists.")
                 transition("test_implementation", "red_not_confirmed",
                            extra={"directive": "run_test_implementor",
                                   "test_implementation_iter": state["iterations"]["test_implementation"],
@@ -950,6 +1008,8 @@ def cmd_advance(args) -> None:
                                   "failure_details": result.get("failure_details", "")})
             else:
                 iter_dir = ensure_iter_dir(run_dir, state)
+                _append_attempt_entry(pathlib.Path(attempts_path), "test",
+                                      state["iterations"], _test_failure_text(result))
                 transition("implementation", "test_fail_retry", failure_type="code",
                            extra={"directive": "run_implementor",
                                   "test_iter": state["iterations"]["test"],
@@ -1015,6 +1075,8 @@ def cmd_advance(args) -> None:
                          "next_steps": result.get("next_steps", [])}
                 if touches_tests:
                     extra["test_implementor_config"] = cfg["llm"].get("test_implementor", {})
+                _append_attempt_entry(pathlib.Path(attempts_path), "review",
+                                      state["iterations"], _review_failure_text(result))
                 transition(target, "review_fail_retry", extra=extra)
 
     elif current in ("done", "failed"):
@@ -1326,43 +1388,6 @@ def cmd_normalize_review(args) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Subcommand: append-attempt
-# ---------------------------------------------------------------------------
-
-def cmd_append_attempt(args) -> None:
-    run_dir = pathlib.Path(args.run).resolve()
-    attempts_path = run_dir / "attempts.md"
-    state = load_state(run_dir)
-    iters = state["iterations"]
-    test_n = iters["test"]
-    review_n = iters["review"]
-    ti_n = iters.get("test_implementation", 0)
-
-    if args.outcome_file:
-        outcome_path = pathlib.Path(args.outcome_file).resolve()
-        if not outcome_path.exists():
-            die(f"--outcome-file not found: {outcome_path}")
-        outcome_text = outcome_path.read_text(encoding="utf-8")
-    else:
-        outcome_text = args.outcome or ""
-
-    if not outcome_text.strip():
-        die("append-attempt requires non-empty content via --outcome or --outcome-file")
-
-    ts = now_iso()
-    label = (f"### Attempt — state={args.state}, test_implementation_iter={ti_n}, "
-             f"test_iter={test_n}, review_iter={review_n} ({ts})")
-    entry = f"\n{label}\n\n{outcome_text.strip()}\n"
-
-    current_content = attempts_path.read_text(encoding="utf-8") if attempts_path.exists() else ""
-    if "_No attempts recorded yet._" in current_content:
-        current_content = current_content.replace("_No attempts recorded yet._", "").rstrip()
-    attempts_path.write_text(current_content + entry + "\n", encoding="utf-8")
-
-    emit({"appended": True, "attempts_path": str(attempts_path)})
-
-
-# ---------------------------------------------------------------------------
 # Subcommand: check-boundary (TDD role isolation)
 # ---------------------------------------------------------------------------
 
@@ -1566,10 +1591,10 @@ def assemble_prompt(role: str, stage_input: dict) -> "tuple[str, str]":
 
 def _normalize_output(raw: str, normalizer: str) -> "dict | None":
     """Map a runner's output-file content to a canonical JSON object.
-    `passthrough` parses it directly; the *-cli variants tolerate a markdown
-    fence or surrounding prose by extracting the outermost JSON object."""
+    `passthrough` parses it directly; `default` (the LLM-agnostic default) tolerates
+    a markdown fence or surrounding prose by extracting the outermost JSON object."""
     raw = raw.strip()
-    if normalizer in ("claude-cli", "codex-cli"):
+    if normalizer == "default":
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
             raw = re.sub(r"\n```\s*$", "", raw).strip()
@@ -1738,7 +1763,12 @@ def cmd_run_stage(args) -> None:
             "This is a fresh role assignment: disregard any prior role, plan, or "
             "conversation context in this session. The instructions below and the "
             "inputs you are given are your ONLY source of truth — follow them and "
-            "nothing else.\n\n---\n\n"
+            "nothing else.\n\n"
+            "Do ONLY this role's work as defined below, then STOP and hand back. The "
+            "other pipeline stages (authoring tests, running the build/test suite, "
+            "reviewing) are SEPARATE roles run elsewhere — do NOT perform them "
+            "yourself (e.g. as the implementor you write code and stop; you do NOT "
+            "run the tests).\n\n---\n\n"
         )
         system_file.write_text(persona + system_text, encoding="utf-8")
         directive = ""
@@ -1778,7 +1808,7 @@ def cmd_run_stage(args) -> None:
         # json role — shared normalize → schema → persist-canonical (same path a
         # subagent/main-session result takes via cmd_finalize_stage).
         src = _SOURCE_BY_MODE["bash"] if role == "reviewer" else None
-        problem = _finalize_json(output_file, runner.get("normalizer", "passthrough"), meta["schema"], source=src)
+        problem = _finalize_json(output_file, runner.get("normalizer", "default"), meta["schema"], source=src)
         if problem:
             # keep the stderr tail visible for produce/parse failures, as before
             return (problem if problem.startswith("schema:") else problem + err), proc.returncode
@@ -1848,10 +1878,10 @@ def cmd_finalize_stage(args) -> None:
     output_file = pathlib.Path(stage_input["output_file"]) if stage_input.get("output_file") else (work / f"{role}-output.json")
     runners = cfg.get("runners", {}).get(role, [])
     first = runners[0] if runners and isinstance(runners[0], dict) else {}
-    # Default the handoff normalizer to claude-cli (tolerates a fence AND bare JSON):
+    # Default the handoff normalizer to `default` (tolerates a fence AND bare JSON):
     # a host model may fence its output despite the "no fences" directive, and a
     # too-strict passthrough would dead-end the run.
-    normalizer = first.get("normalizer", "claude-cli")
+    normalizer = first.get("normalizer", "default")
     src = _SOURCE_BY_MODE.get(first.get("type")) if role == "reviewer" else None
     problem = _finalize_json(output_file, normalizer, meta["schema"], source=src)
     if problem:
@@ -1939,7 +1969,6 @@ DRIVER CLI
   validate-config  Check config completeness and schema   [--plan <path>]
   validate-result  Check a test-result or review-result file
   normalize-review Convert codex --json payload → canonical review-result JSON
-  append-attempt   Log a failed attempt to attempts.md for implementor context
   check-boundary   (TDD) verify a role only touched files it is allowed to
   record-changes   Accumulate pipeline-produced files into changed-manifest.txt
   run-stage        Execute a role via its configured runner (bash), or hand off (main-session/subagent)
@@ -2027,13 +2056,6 @@ def main() -> None:
     p_nr.add_argument("--in", dest="input", required=True)
     p_nr.add_argument("--out", dest="output", required=True)
 
-    p_aa = sub.add_parser("append-attempt")
-    p_aa.add_argument("--run", required=True)
-    p_aa.add_argument("--state", required=True,
-                      choices=["test_implementation", "red_test", "test", "review"])
-    p_aa.add_argument("--outcome", default="")
-    p_aa.add_argument("--outcome-file", dest="outcome_file", default="")
-
     p_cb = sub.add_parser("check-boundary")
     p_cb.add_argument("--run", required=True)
     p_cb.add_argument("--role", required=True, choices=["test_implementation", "implementation"])
@@ -2069,7 +2091,6 @@ def main() -> None:
         "validate-config":  cmd_validate_config,
         "validate-result":  cmd_validate_result,
         "normalize-review": cmd_normalize_review,
-        "append-attempt":   cmd_append_attempt,
         "check-boundary":   cmd_check_boundary,
         "record-changes":   cmd_record_changes,
         "run-stage":        cmd_run_stage,
