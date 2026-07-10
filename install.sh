@@ -99,7 +99,7 @@ cp "${SOURCE_SKILL}/SKILL.md" "${SKILLS_DST}/SKILL.md"
 echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/SKILL.md"
 
 # Copy per-state orchestration files (the SKILL reads states/<state>.md per transition)
-for f in update_config planning init test_implementation red_test implementation test review done failed; do
+for f in resume update_config planning init test_implementation red_test implementation test review done failed; do
   src="${SOURCE_SKILL}/states/${f}.md"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Source file not found: ${src}"
@@ -107,7 +107,7 @@ for f in update_config planning init test_implementation red_test implementation
   fi
   cp "${src}" "${SKILLS_DST}/states/${f}.md"
 done
-echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/states/ (10 files)"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/states/ (11 files)"
 
 # Copy driver script (must be co-located with schemas for standalone operation)
 cp "${SOURCE_TOOLS}/driver.py" "${SKILLS_DST}/driver.py"

@@ -9,6 +9,21 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.1.0] - 2026-07-10
+
+Re-introduces `--resume`, removes an orphaned subcommand, and folds Karpathy-style discipline into the authoring role prompts.
+
+### Added
+- **`--resume [<run_dir>]` / `driver resume`** — continue an **interrupted** run from the state it stopped in, without re-running `init` (which starts a NEW run) or redoing completed stages. Every `advance` now persists its full landing echo to `<run_dir>/last-advance.json` (written **before** `state.json`, so a crash between the two is disambiguable); `driver resume` replays it. Handles: parked-at-init (→ advance), normal replay (re-emits the exact echo incl. runner arrays + re-persists a byte-identical `stage-input.json`), the crash window (advance died before persisting → re-run advance, idempotent), terminal states (replays the full `done`/`failed` echo for idempotent finalization), a best-effort `possibly_live` concurrency flag, and a precise manual recipe for a run with no `last-advance.json`. `states/resume.md` adds the SKILL-side delta recovery (worktree-vs-index minus the manifest, boundary-checked, `record-changes`d) so a pre-crash authoring edit is never silently dropped. Ported from the parked 5.3.0 branch and adapted to the 6.0.0 flow (no header; attempts are auto-recorded by advance).
+- **Karpathy-style discipline in the authoring prompts** — `dp-implementor.md` sharpens its scope rule to **minimum, surgical changes** (nothing speculative; touch only what the contract requires; do not refactor unrelated code or delete pre-existing dead code) and to **surface assumptions instead of guessing** when the contract is ambiguous. `dp-test-implementor.md` frames each test as the **executable success criterion** for its Acceptance Criterion and adds a **test-only-what-is-specified** rule (no speculative/redundant tests).
+
+### Removed
+- **The orphaned `normalize-review --source codex` subcommand** — its only caller, the pre-3.0.0 `codex-adversarial-review` runner type, was removed in 3.0.0; no state file, runner, or doc referenced it. (A codex reviewer is still fully supported as a bash runner emitting plain review-result JSON through the `default`/`passthrough` normalizer.)
+
+### Changed
+- Conservative MD pass: trimmed a couple of clearly-redundant restatements (the files are deliberately dense LLM-executed prose, so load-bearing rules/checklists/structure were preserved).
+- Provider-neutrality: replaced the Claude-Code-specific `/advisor` reference in `done.md`/`dp-tester.md` with host-agnostic wording ("a dedicated advisory/code-review capability").
+
 ## [6.0.0] - 2026-07-10
 
 Config/plan flow redesign: the `plan.md` config header is **removed**, config lives solely in `config.json` and is written by a new conversational **`--update-config`** flow, and `main-session`/`subagent` handoffs get a firm single-role persona preamble. Also: `advance` records retry context to `attempts.md` itself (the `append-attempt` subcommand is gone), and the LLM-named `claude-cli`/`codex-cli` normalizers are replaced by a single `default`. Folds in the reviewer-independence guidance drafted for 5.4.1. **Breaking** — existing installs must reconfigure.

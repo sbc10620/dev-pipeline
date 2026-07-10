@@ -33,11 +33,12 @@ The `plan.md` is a pure **spec body** (Requirements, Acceptance Criteria, Interf
 The per-state procedures live in separate files under `states/` so this file stays small and each state is self-contained. The loop is:
 
 1. Do **[Step 0]** below once (arguments, driver location, config bootstrap, clean-tree reminder).
-2. If invoked with `--update-config`, run **only** the config-setup state by following `states/update_config.md` (with `plan_path` if one was given), then **stop** (report the config is ready; the user re-invokes with `--plan`/`--request` to run the pipeline).
-3. If invoked with `--request`, run the **planning** state by following `states/planning.md` (build + approve the `plan.md` spec). With `--plan`, skip straight to the config gate.
-4. **Config gate:** if Step 0 reported `config_complete: false`, run the config-setup state by following `states/update_config.md` (using `plan_path`) before continuing. If `config_complete` was true, skip it.
-5. Run the **init** state by following `states/init.md`.
-6. After **every** `driver advance`, read its JSON output, take `next_state`, and **open and follow `states/<next_state>.md`** (e.g. `next_state: "red_test"` → follow `states/red_test.md`). Repeat until `next_state` is `done` or `failed`.
+2. If invoked with `--resume`, follow `states/resume.md` to continue an interrupted run from where it stopped (no new run, no planning/config-gate/init), then run the normal advance loop (step 6) from the recovered state.
+3. If invoked with `--update-config`, run **only** the config-setup state by following `states/update_config.md` (with `plan_path` if one was given), then **stop** (report the config is ready; the user re-invokes with `--plan`/`--request` to run the pipeline).
+4. If invoked with `--request`, run the **planning** state by following `states/planning.md` (build + approve the `plan.md` spec). With `--plan`, skip straight to the config gate.
+5. **Config gate:** if Step 0 reported `config_complete: false`, run the config-setup state by following `states/update_config.md` (using `plan_path`) before continuing. If `config_complete` was true, skip it.
+6. Run the **init** state by following `states/init.md`.
+7. After **every** `driver advance`, read its JSON output, take `next_state`, and **open and follow `states/<next_state>.md`** (e.g. `next_state: "red_test"` → follow `states/red_test.md`). Repeat until `next_state` is `done` or `failed`. (This is also where `--resume` rejoins the loop.)
 
 ### Run Context (the only state you carry between steps)
 
@@ -48,9 +49,9 @@ State files depend ONLY on (a) the **Run Context** below and (b) the **fields ec
 - `plan_path` — the plan.md path: written by the planner (`--request`), or given by the user (`--plan` / `--update-config`).
 - `auto_run` — whether `--auto-run` was passed (skips the post-plan approval gate; planning-phase questions still happen).
 - `config_complete` — boolean from `bootstrap-config` (Step 0): true when `config.json` is ready to run (runners configured, no placeholders). When false, the config gate runs `states/update_config.md` before init.
-- `run_dir`, `contract_path` — returned by `driver init` (`contract_path` = the plan body the roles read; **`plan_path` is NOT fed to the roles**).
+- `run_dir`, `contract_path` — returned by `driver init` (`contract_path` = the plan body the roles read; **`plan_path` is NOT fed to the roles**). On `--resume`, `driver resume` returns these (plus `project_dir`, `plan_path`, `tdd_mode`) from `state.json` — it replays the current state's landing echo, persisted to `<run_dir>/last-advance.json` on every transition.
 - `tdd_mode` — boolean returned by `driver init` **and re-echoed by every `driver advance`** (the frozen run flag). Prefer the latest echo; never recover it from `config.snapshot.json`.
-- `config_snapshot_path = <run_dir>/config.snapshot.json` — **audit record only.** Do not read it for control flow or prompt construction (Global Rule 9); every value a state needs is echoed by the relevant advance.
+- `config_snapshot_path = <run_dir>/config.snapshot.json` — **audit record only;** do not read it for control flow or prompt construction (Global Rule 9).
 - `iter_dir` — **re-read from each advance output that includes it**; the agent/result for that state is written there. Never carry an old `iter_dir` across an advance.
 
 Each advance echoes a `directive` (e.g. `run_test_implementor`, `run_tester`, `run_implementor`, `run_reviewer`, `finalize`, `halt_and_ask`, `report_failure`) telling you which role to run next, plus `tdd_mode` (always) and `run_self_evolution` (at `done`). **The driver also persists the same context to `<iter_dir>/stage-input.json`; `run-stage` reads that file to build the prompt — you just pass its path.** You do not assemble prompts or read runner arrays; the driver does. You use the echoed `iter_dir` for the stage-input path and the git bookkeeping.
@@ -59,6 +60,7 @@ Each advance echoes a `directive` (e.g. `run_test_implementor`, `run_tester`, `r
 
 | next_state            | follow                          |
 |-----------------------|---------------------------------|
+| `resume`              | `states/resume.md` (`--resume` only) |
 | `update_config`       | `states/update_config.md` (`--update-config`, or the config gate) |
 | `planning`            | `states/planning.md` (`--request` only) |
 | `init`                | `states/init.md`                |
@@ -92,14 +94,15 @@ After the role completes and validates, **you are the orchestrator again** — r
 
 ## ⚙️ [Step 0] Parse arguments and prerequisites
 
-**Accepted arguments** (exactly one entry mode: `--request`, `--plan`, or `--update-config`):
+**Accepted arguments** (exactly one entry mode: `--request`, `--plan`, `--update-config`, or `--resume`):
 - `--request "<goal>"` — build a `plan.md` spec conversationally from the goal (planning state), then run the pipeline.
 - `--plan <path>` — run an already-written `plan.md` (a pure spec body).
 - `--update-config [<plan>]` — recommend + write `config.json` (runners, tester/test_implementor instructions, gate keys), then stop. A plan path is **optional** (it sharpens the recommendations — framework, test_paths, commands — from that plan; omit it to reconfigure from the repo + the current config). This is the only way config is written; `--plan`/`--request` auto-run it (with their plan) when the config is incomplete.
+- `--resume [<run_dir>]` — continue an **interrupted** run from where it stopped (default `<project_root>/.dev-pipeline/latest`). No new run is created; the run's config/contract are already frozen, so planning, the config gate, and init are all skipped. See `states/resume.md`. `--auto-run` does not apply.
 - `--auto-run` — optional (`--request`/`--plan`). Skip the post-plan approval gate and run end-to-end. Planning-phase and config-setup questions are still asked.
 - `--help` — print skill usage summary and stop.
 
-`--request`, `--plan`, and `--update-config` are mutually exclusive; exactly one is required. If more than one/none, or any unknown argument is present, report an error and stop.
+`--request`, `--plan`, `--update-config`, and `--resume` are mutually exclusive; exactly one is required. If more than one/none, or any unknown argument is present, report an error and stop.
 
 - [Step 1] If `--help` is present, print the following and stop:
   ```
@@ -109,12 +112,14 @@ After the role completes and validates, **you are the orchestrator again** — r
     /dev-pipeline --request "<what to build>" [--auto-run]
     /dev-pipeline --plan <path-to-plan.md>   [--auto-run]
     /dev-pipeline --update-config [<path-to-plan.md>]
+    /dev-pipeline --resume [<run_dir>]
     /dev-pipeline --help
 
   Parameters:
     --request "<goal>"        Build plan.md spec conversationally (planner), then run.
     --plan <path>             Run an existing plan.md (a pure spec body).
     --update-config [<plan>]  Recommend + write config.json (plan optional), then stop.
+    --resume [<run_dir>]      Continue an interrupted run (default .dev-pipeline/latest).
     --auto-run              Skip the post-plan approval gate; run end-to-end.
     --help                  Show this help message.
 
@@ -151,6 +156,7 @@ After the role completes and validates, **you are the orchestrator again** — r
   - `--plan <path>`: verify the plan file exists; save it as `plan_path`.
   - `--update-config [<path>]`: a plan path is optional — if given, verify it exists and save it as `plan_path`; if omitted, leave `plan_path` unset (reconfigure from the repo + current config).
   - `--request "<goal>"`: note the goal; `plan_path` will be set during planning.
+  - `--resume [<run_dir>]`: save `resume_run` (the given path, or unset → default to `latest` inside `states/resume.md`). The run is already frozen, so **skip the config-bootstrap/gate/clean-tree steps below**: after Step 4 locates `project_root` (do NOT bootstrap), go straight to `states/resume.md`. If the walk finds no project and `resume_run` is an explicit path, take `project_root` from `driver resume`'s `project_dir` instead; if neither yields a project, stop: "No run to resume."
 
 - [Step 4] Locate the project root: the directory containing `.dev-pipeline/dev-pipeline.config.json`, walking upward:
   ```bash
@@ -171,12 +177,12 @@ After the role completes and validates, **you are the orchestrator again** — r
 - [Step 5] Remind the user: **"For accurate role-boundary checks and review, start this pipeline with a clean working tree. In particular, the installed dev-pipeline files (the canonical `.agents/skills/dev-pipeline/` tree, the `.claude/skills/dev-pipeline/` copy, and the `.clinerules/workflows/dev-pipeline.md` pointer) should already be committed."** (The commit and the review diff are both scoped to the change manifest, so stray untracked files are neither committed nor reviewed; only a codex reviewer runner, if you configure one, scans the working tree. A clean tree still keeps role-boundary checks accurate. Because the commit stages only files the pipeline produced, any **unrelated edits you already had** in the working tree will NOT be included in the pipeline's commit — commit or stash them first if you want them kept separately.)
 
 **Step 0 checklist:**
-- [ ] Exactly one of `--request` / `--plan` / `--update-config`; `--auto-run` noted as `auto_run`; unknown args rejected
+- [ ] Exactly one of `--request` / `--plan` / `--update-config` / `--resume`; `--auto-run` noted as `auto_run`; unknown args rejected
 - [ ] `driver.py` found at `<skill_dir>/driver.py`
-- [ ] Project root identified; `config_complete` read from `bootstrap-config` (both found and bootstrapped paths) and saved to the Run Context
-- [ ] User notified about clean working tree
+- [ ] Project root identified; (non-`--resume`) `config_complete` read from `bootstrap-config` (both found and bootstrapped paths) and saved to the Run Context
+- [ ] User notified about clean working tree (skipped for `--resume`)
 
-Now: `--update-config` → follow `states/update_config.md` and stop; `--request` → follow `states/planning.md`; `--plan` → the config gate (`states/update_config.md` if `config_complete` is false) then `states/init.md`.
+Now: `--resume` → follow `states/resume.md`; `--update-config` → follow `states/update_config.md` and stop; `--request` → follow `states/planning.md`; `--plan` → the config gate (`states/update_config.md` if `config_complete` is false) then `states/init.md`.
 
 ---
 

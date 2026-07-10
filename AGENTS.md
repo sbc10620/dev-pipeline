@@ -27,6 +27,10 @@ python3 agents/dev-pipeline-tools/driver.py init --plan plan.md --config <projec
 # Manually advance state (normally called by the SKILL, not the user)
 python3 agents/dev-pipeline-tools/driver.py advance --run <run_dir>
 
+# Re-emit the current state's landing echo to continue an INTERRUPTED run (no new
+# init, no redone stages); replays <run_dir>/last-advance.json (written every advance)
+python3 agents/dev-pipeline-tools/driver.py resume --run <run_dir>
+
 # Run a role via its configured bash runner (assemble prompt, run LLM CLI, validate)
 python3 agents/dev-pipeline-tools/driver.py run-stage --run <run_dir> --role implementor --stage-input <iter_dir>/stage-input.json
 
@@ -181,8 +185,9 @@ After editing, skim a sibling file side-by-side and confirm headings, step forma
 └── runs/<YYYYMMDD-HHMMSS>/
 ├── state.json           # driver owns this
 ├── contract.md          # the plan body (whole plan.md), written by init; the contract for test author, implementor + reviewer (TDD: incl. ## Interface)
-├── attempts.md          # failure log appended on every test_implementation/test/review failure; passed to authors on retry
+├── attempts.md          # failure log appended by `advance` on every test_implementation/test/review retry; passed to authors
 ├── changed-manifest.txt # files the authoring agents produced (record-changes); commit + review diff use only these
+├── last-advance.json    # the most recent advance's full landing echo; `driver resume` replays it to continue an interrupted run
 ├── config.snapshot.json
 └── iterations/<n>/
     ├── red-test-result.json   # TDD red_test result (validated against the test-result schema)

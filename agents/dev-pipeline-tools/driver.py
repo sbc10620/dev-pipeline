@@ -7,10 +7,10 @@ Usage:
   python3 driver.py apply-config     --config <path> --values-file <path>
   python3 driver.py init             --plan <path> [--config <path>] [--project <dir>]
   python3 driver.py advance          --run <run_dir>
+  python3 driver.py resume           --run <run_dir>
   python3 driver.py status           --run <run_dir>
   python3 driver.py validate-config  --config <path> [--plan <path>]
   python3 driver.py validate-result  --type test|review --file <path>
-  python3 driver.py normalize-review --source codex --in <file> --out <file>
   python3 driver.py check-boundary   --run <run_dir> --role <test_implementation|implementation> --changed <file...>
   python3 driver.py record-changes   --run <run_dir> --changed <file...>
   python3 driver.py run-stage        --run <run_dir> --role <role> [--stage-input <file>]
@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "6.0.0"
+__version__ = "6.1.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -853,7 +853,6 @@ def cmd_advance(args) -> None:
         state["state"] = new_state
         if halt_reason is not None:
             state["halt_reason"] = halt_reason
-        save_state(run_dir, state)
         result = {
             "previous_state": current,
             "next_state": new_state,
@@ -868,6 +867,15 @@ def cmd_advance(args) -> None:
         result.update(dest_echoes(new_state))
         if extra:
             result.update(extra)
+        # Persist the full landing echo for `driver resume` to replay, and do it
+        # BEFORE save_state so a crash between the two writes is disambiguable: the
+        # only possible mismatch is last-advance.next_state == new_state while
+        # state.json still holds `current` (== the echo's previous_state), i.e. the
+        # advance died mid-flight and persisted no state change (counters/history
+        # mutate in memory and are persisted only by save_state below). cmd_resume
+        # detects that window and re-runs advance instead of dead-ending.
+        save_json(run_dir / "last-advance.json", result)
+        save_state(run_dir, state)
         # Persist a stage-input.json next to the iteration so `driver run-stage`
         # (bash-runner mode) can consume the same context the SKILL echo carries.
         si = build_stage_input(result, state.get("project_dir", ""))
@@ -1119,6 +1127,149 @@ def cmd_advance(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: resume
+# ---------------------------------------------------------------------------
+
+# State → the run-stage role that runs in that state. Used only for the pre-resume
+# manual-recipe hint (a landing echo already carries the directive otherwise).
+_STATE_ROLE = {
+    "test_implementation": "test_implementor",
+    "red_test":            "tester",
+    "implementation":      "implementor",
+    "test":                "tester",
+    "review":              "reviewer",
+}
+
+
+def _resume_live_window(run_dir: pathlib.Path) -> int:
+    """Seconds after the last state write within which a run might still belong to a
+    LIVE session (a runner subprocess could still be executing). A stage runs ONE
+    role's runners sequentially (fallback tries them front-to-back), so the bound is
+    the largest per-role SUM of runner timeouts (default 600s each) plus a margin.
+    This is a best-effort heuristic, not a lock — updated_at is stamped at the
+    landing advance, so a wedged run can still read as old."""
+    try:
+        cfg = load_json(run_dir / "config.snapshot.json")
+        per_role = [sum(r.get("timeout", 600) for r in runners if isinstance(r, dict))
+                    for runners in cfg.get("runners", {}).values()]
+        longest = max(per_role) if per_role else 600
+    except SystemExit:
+        raise
+    except Exception:
+        longest = 600
+    return int(longest) + 120
+
+
+def cmd_resume(args) -> None:
+    """Re-emit the landing echo for a run's CURRENT state so an interrupted run
+    resumes from where it stopped — without re-running init (which starts a NEW
+    run) and without redoing completed stages. The driver makes NO transition here;
+    it only replays what the advance that landed in the current state emitted
+    (persisted to last-advance.json). The SKILL-side choreography — including the
+    delta reconstruction an authoring state needs before re-entry so a pre-crash
+    edit is not silently dropped — lives in states/resume.md."""
+    run_dir = pathlib.Path(args.run).resolve()
+    sp = state_path(run_dir)
+    if not sp.exists():
+        die(f"Not a resumable run: {sp} does not exist. The run may have been "
+            f"deleted, or this is not a run directory. Pass --run <run_dir> "
+            f"(e.g. .dev-pipeline/latest) explicitly, or start a new run.")
+    state = load_state(run_dir)
+    current = state.get("state")
+    if not current:
+        die(f"Corrupt state.json (no 'state' field) at {sp}. Cannot resume; "
+            f"inspect the run or start a new one.")
+
+    # Context a resuming SKILL session needs but that a landing echo does not carry:
+    # project root, the source plan (provenance), the contract, the run dir.
+    ctx = {
+        "run_dir": str(run_dir),
+        "project_dir": state.get("project_dir", ""),
+        "plan_path": state.get("plan_path", ""),
+        "contract_path": state.get("contract_path") or state.get("spec_path", ""),
+        # tdd_mode is in every replayed landing echo, but the init/H1 branches emit
+        # only ctx — carry it here so resume.md can always restore it.
+        "tdd_mode": state.get("tdd_mode", False),
+    }
+
+    # Concurrency guard (best-effort): a state.json touched more recently than a
+    # runner could still be executing may belong to a live session — flag it so the
+    # SKILL asks. now_iso() writes a trailing "Z"; fromisoformat only accepts it on
+    # Python 3.11+, so normalize to "+00:00" to keep this working on 3.9/3.10.
+    possibly_live = False
+    updated = state.get("updated_at")
+    if updated:
+        try:
+            parsed = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - parsed).total_seconds()
+            possibly_live = age < _resume_live_window(run_dir)
+        except ValueError:
+            pass
+
+    def out(payload: dict) -> None:
+        payload.update(ctx)
+        payload["resumed"] = True
+        if possibly_live:
+            payload["possibly_live"] = True
+        emit(payload)
+
+    # Parked at init: no stage has run yet — just advance into the first working
+    # state (advance carries every echo from there).
+    if current == "init":
+        out({"next_state": "init", "directive": "advance",
+             "message": "run is at init — call `driver advance` to proceed"})
+        return
+
+    la_path = run_dir / "last-advance.json"
+    if la_path.exists():
+        echo = load_json(la_path)
+        if echo.get("next_state") == current:
+            # Normal replay — hand back the exact landing echo (terminal states too:
+            # done/failed carry run_self_evolution/halt_reason that finalization
+            # needs; never gut the echo). Re-persist stage-input from the PRISTINE
+            # echo (before injecting resume metadata) so it is byte-identical to the
+            # original the interrupted advance wrote.
+            si = build_stage_input(echo, state.get("project_dir", ""))
+            if si and si.get("work_dir") and si["work_dir"] != ".":
+                save_json(pathlib.Path(si["work_dir"]) / "stage-input.json", si)
+            out(dict(echo))
+            return
+        if echo.get("previous_state") == current:
+            # Crash window: advance died between writing last-advance.json and
+            # save_state, so state.json never moved past `current`. Re-run advance —
+            # idempotent, since the result files it reads are still on disk.
+            out({"next_state": current, "directive": "advance",
+                 "resume_note": "the last transition was interrupted before it "
+                                "persisted — re-run `driver advance`"})
+            return
+        die(f"last-advance.json is inconsistent (next_state="
+            f"{echo.get('next_state')!r} / previous_state="
+            f"{echo.get('previous_state')!r} vs state.json {current!r}). Cannot "
+            f"safely resume automatically; inspect the run.")
+
+    # No landing record (a run created before resume support, or the record was
+    # lost). Give the EXACT manual recipe — including the delta-recording step,
+    # without which re-running an authoring stage silently drops pre-crash edits.
+    role = _STATE_ROLE.get(current)
+    iter_dir = get_iter_path(run_dir, state)
+    proj = ctx["project_dir"] or "<project_root>"
+    lines = [f"python3 driver.py status --run {run_dir}"]
+    if role:
+        lines.append(f"python3 driver.py run-stage --run {run_dir} --role {role} "
+                     f"--stage-input {iter_dir}/stage-input.json")
+    lines.append("# record everything the run has produced (else `done` commits an "
+                 "incomplete change set):")
+    lines.append(f"#   git -C {proj} diff HEAD --name-only --relative   (plus untracked)")
+    lines.append(f"python3 driver.py record-changes --run {run_dir} --changed <those paths>")
+    lines.append(f"python3 driver.py advance --run {run_dir}")
+    die("This run predates resume support (no last-advance.json). Finish it "
+        "manually, then advance:\n  " + "\n  ".join(lines) +
+        "\n(Or start a new run.) WARNING: re-running an authoring stage without "
+        "first recording the outstanding `git diff HEAD` delta can silently drop "
+        "pre-crash edits from the commit and review.")
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: status
 # ---------------------------------------------------------------------------
 
@@ -1360,80 +1511,6 @@ def cmd_validate_result(args) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Subcommand: normalize-review
-# ---------------------------------------------------------------------------
-
-def cmd_normalize_review(args) -> None:
-    """Convert codex --json payload → canonical review-result JSON."""
-    in_path = pathlib.Path(args.input).resolve()
-    out_path = pathlib.Path(args.output).resolve()
-
-    raw = load_json(in_path)
-
-    # Detect failure conditions
-    parse_error = raw.get("parseError")
-    codex_status = (raw.get("codex") or {}).get("status")
-    result_data = raw.get("result")
-
-    if parse_error:
-        die(f"codex parseError: {parse_error}")
-    if codex_status not in (None, 0, "0"):
-        die(f"codex non-zero exit status: {codex_status}")
-    if not result_data or not isinstance(result_data, dict):
-        die("codex payload.result is missing or not an object")
-
-    verdict = result_data.get("verdict", "").strip()
-    if verdict not in ("approve", "needs-attention"):
-        die(f"codex payload.result.verdict is invalid: {verdict!r}")
-
-    def norm_finding(f: dict, idx: int) -> dict:
-        sev = f.get("severity", "low")
-        if sev not in VALID_SEVERITIES:
-            sev = "low"
-        ls = f.get("line_start")
-        le = f.get("line_end")
-        conf = f.get("confidence")
-        if conf is None or not isinstance(conf, (int, float)):
-            conf = 0.5
-        conf = max(0.0, min(1.0, float(conf)))
-        return {
-            "severity":       sev,
-            "title":          str(f.get("title") or f"Finding {idx + 1}").strip() or f"Finding {idx + 1}",
-            "body":           str(f.get("body") or "No details provided.").strip() or "No details provided.",
-            "file":           str(f.get("file") or "unknown").strip() or "unknown",
-            "line_start":     int(ls) if isinstance(ls, int) and ls >= 1 else None,
-            "line_end":       int(le) if isinstance(le, int) and le >= 1 else None,
-            "confidence":     conf,
-            "recommendation": str(f.get("recommendation") or "").strip(),
-        }
-
-    findings_raw = result_data.get("findings")
-    if findings_raw is None:
-        findings_raw = []
-    elif not isinstance(findings_raw, list):
-        die(f"codex payload.result.findings is not an array: {type(findings_raw).__name__}")
-    findings = [norm_finding(f, i) for i, f in enumerate(findings_raw) if isinstance(f, dict)]
-
-    next_steps_raw = result_data.get("next_steps") or []
-    next_steps = [str(s).strip() for s in next_steps_raw if isinstance(s, str) and str(s).strip()]
-
-    review_result = {
-        "verdict":    verdict,
-        "summary":    str(result_data.get("summary") or "").strip() or "No summary provided.",
-        "findings":   findings,
-        "next_steps": next_steps,
-        "source":     "codex-adversarial-review",
-    }
-
-    errors = validate_against_schema(review_result, "review-result.schema.json")
-    if errors:
-        die("Normalized review-result failed schema validation:\n" + "\n".join(f"  - {e}" for e in errors))
-
-    save_json(out_path, review_result)
-    emit({"normalized": True, "verdict": verdict, "findings_count": len(findings), "out": str(out_path)})
-
-
-# ---------------------------------------------------------------------------
 # Subcommand: check-boundary (TDD role isolation)
 # ---------------------------------------------------------------------------
 
@@ -1563,6 +1640,11 @@ _STAGE_INPUT_CONTROL = {
     "directive", "iter_dir", "previous_state", "next_state", "iterations",
     "halt_reason", "tdd_mode", "result_filename", "red_test",
     "implementor_runners", "test_implementor_runners", "tester_runners",
+    # resume-injected metadata — must never reach a role's prompt. cmd_resume also
+    # builds stage-input from the pristine echo (before injecting these), so this
+    # is defense-in-depth for a byte-identical re-persist.
+    "resumed", "resume_note", "message", "possibly_live",
+    "run_dir", "project_dir", "plan_path",
 }
 
 
@@ -2023,10 +2105,10 @@ DRIVER CLI
   apply-config     Merge a values file into config.json (validated, atomic; --update-config)
   init             Create a new run from a plan + config
   advance          Compute and apply the next state transition
+  resume           Re-emit the current state's landing echo to continue an interrupted run
   status           Print current run state
   validate-config  Check config completeness and schema   [--plan <path>]
   validate-result  Check a test-result or review-result file
-  normalize-review Convert codex --json payload → canonical review-result JSON
   check-boundary   (TDD) verify a role only touched files it is allowed to
   record-changes   Accumulate pipeline-produced files into changed-manifest.txt
   run-stage        Execute a role via its configured runner (bash), or hand off (main-session/subagent)
@@ -2096,6 +2178,9 @@ def main() -> None:
     p_adv = sub.add_parser("advance")
     p_adv.add_argument("--run", required=True)
 
+    p_res = sub.add_parser("resume")
+    p_res.add_argument("--run", required=True)
+
     p_sta = sub.add_parser("status")
     p_sta.add_argument("--run", required=True)
 
@@ -2108,11 +2193,6 @@ def main() -> None:
     p_vr = sub.add_parser("validate-result")
     p_vr.add_argument("--type", required=True, choices=["test", "review"])
     p_vr.add_argument("--file", required=True)
-
-    p_nr = sub.add_parser("normalize-review")
-    p_nr.add_argument("--source", required=True, choices=["codex"])
-    p_nr.add_argument("--in", dest="input", required=True)
-    p_nr.add_argument("--out", dest="output", required=True)
 
     p_cb = sub.add_parser("check-boundary")
     p_cb.add_argument("--run", required=True)
@@ -2145,10 +2225,10 @@ def main() -> None:
         "apply-config":     cmd_apply_config,
         "init":             cmd_init,
         "advance":          cmd_advance,
+        "resume":           cmd_resume,
         "status":           cmd_status,
         "validate-config":  cmd_validate_config,
         "validate-result":  cmd_validate_result,
-        "normalize-review": cmd_normalize_review,
         "check-boundary":   cmd_check_boundary,
         "record-changes":   cmd_record_changes,
         "run-stage":        cmd_run_stage,

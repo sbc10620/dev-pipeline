@@ -652,85 +652,6 @@ class TestValidateResult(PipelineTestCase):
         self.assertNotEqual(r.returncode, 0)
 
 
-class TestNormalizeReview(PipelineTestCase):
-    def _normalize(self, raw):
-        in_tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, encoding="utf-8")
-        json.dump(raw, in_tmp)
-        in_tmp.close()
-        out_path = in_tmp.name + ".out"
-        r = run_driver("normalize-review", "--source", "codex",
-                       "--in", in_tmp.name, "--out", out_path)
-        return r, out_path
-
-    def test_happy_mapping(self):
-        raw = {
-            "codex": {"status": 0},
-            "result": {
-                "verdict": "needs-attention",
-                "summary": "found issues",
-                "findings": [
-                    {"severity": "high", "title": "Bug", "body": "details",
-                     "file": "a.py", "line_start": 3, "line_end": 4,
-                     "confidence": 0.8, "recommendation": "fix"},
-                ],
-                "next_steps": ["do x"],
-            },
-        }
-        r, out_path = self._normalize(raw)
-        self.assertEqual(r.returncode, 0)
-        self.assertEqual(r.json["verdict"], "needs-attention")
-        self.assertEqual(r.json["findings_count"], 1)
-
-        out = json.loads(pathlib.Path(out_path).read_text())
-        self.assertEqual(out["source"], "codex-adversarial-review")
-        self.assertEqual(out["findings"][0]["severity"], "high")
-
-    def test_confidence_clamped_and_defaulted(self):
-        raw = {
-            "codex": {"status": 0},
-            "result": {
-                "verdict": "needs-attention",
-                "summary": "s",
-                "findings": [
-                    {"title": "no conf", "body": "b", "file": "f"},  # conf missing
-                    {"title": "over", "body": "b", "file": "f",
-                     "confidence": 5.0},  # > 1, clamp to 1
-                ],
-            },
-        }
-        r, out_path = self._normalize(raw)
-        self.assertEqual(r.returncode, 0)
-        out = json.loads(pathlib.Path(out_path).read_text())
-        self.assertEqual(out["findings"][0]["confidence"], 0.5)
-        self.assertEqual(out["findings"][1]["confidence"], 1.0)
-        # missing severity defaults to low
-        self.assertEqual(out["findings"][0]["severity"], "low")
-
-    def test_parse_error_dies(self):
-        r, _ = self._normalize({"parseError": "bad json from codex"})
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("parseError", r.stderr)
-
-    def test_nonzero_codex_status_dies(self):
-        r, _ = self._normalize({"codex": {"status": 1}, "result": {}})
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("non-zero", r.stderr)
-
-    def test_missing_result_dies(self):
-        r, _ = self._normalize({"codex": {"status": 0}})
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("result", r.stderr)
-
-    def test_invalid_verdict_dies(self):
-        r, _ = self._normalize({
-            "codex": {"status": 0},
-            "result": {"verdict": "lgtm", "summary": "s"},
-        })
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("verdict", r.stderr)
-
-
 class TestAttemptAutoRecord(PipelineTestCase):
     """6.0.0: `advance` records the retry context to attempts.md itself when it
     routes a failure back to a retry — no separate append-attempt step to forget."""
@@ -790,6 +711,155 @@ class TestAttemptAutoRecord(PipelineTestCase):
         body = (p.run_dir / "attempts.md").read_text(encoding="utf-8")
         self.assertIn("vacuous", body)
         self.assertIn("state=red_test", body)
+
+
+class TestResume(PipelineTestCase):
+    """`driver resume` re-emits the current state's landing echo so an interrupted
+    run continues without a new init or redoing completed stages (6.1.0)."""
+
+    def _resume(self, p):
+        return run_driver("resume", "--run", str(p.run_dir))
+
+    def test_advance_persists_last_advance(self):
+        # Every transition writes last-advance.json, matching the current state.
+        p = self.started(tdd_mode=False)
+        r = p.advance()  # init -> implementation
+        la = p.run_dir / "last-advance.json"
+        self.assertTrue(la.exists())
+        echo = json.loads(la.read_text(encoding="utf-8"))
+        self.assertEqual(echo["next_state"], r.json["next_state"])
+        self.assertEqual(echo["next_state"], "implementation")
+
+    def test_resume_replays_landing_echo(self):
+        p = self.started(tdd_mode=False)
+        adv = p.advance()  # -> implementation
+        before = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        # same landing echo, incl. the runner array the SKILL replays
+        self.assertEqual(res.json["next_state"], "implementation")
+        self.assertEqual(res.json["directive"], adv.json["directive"])
+        self.assertEqual(res.json["implementor_runners"], adv.json["implementor_runners"])
+        self.assertTrue(res.json["resumed"])
+        # context restored from state.json
+        self.assertTrue(res.json["project_dir"])
+        self.assertTrue(res.json["contract_path"])
+        # the driver made NO transition
+        after = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(after["state"], before["state"])
+        self.assertEqual(after["iterations"], before["iterations"])
+        self.assertEqual(len(after["history"]), len(before["history"]))
+
+    def test_resume_at_init(self):
+        # Parked at init (no stage run yet) → tell the SKILL to just advance.
+        p = self.started(tdd_mode=False)
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["next_state"], "init")
+        self.assertEqual(res.json["directive"], "advance")
+
+    def test_resume_stale_window_reruns_advance(self):
+        # A REAL crash window — advance wrote last-advance.json, then died before
+        # save_state. Reconstruct it by snapshotting state.json before an advance and
+        # restoring it after; resume must re-run advance (not die), and re-running it
+        # must converge exactly (no doubled history).
+        p = self.started(tdd_mode=False)
+        p.advance()  # init -> implementation
+        window = (p.run_dir / "state.json").read_bytes()  # state == implementation
+        p.advance()  # implementation -> test; writes last-advance {prev:impl, next:test}
+        (p.run_dir / "state.json").write_bytes(window)     # roll state.json back to the window
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["next_state"], "implementation")
+        self.assertEqual(res.json["directive"], "advance")   # re-run advance, not a die
+        self.assertIn("resume_note", res.json)
+        # convergence: re-running advance reproduces the clean run exactly.
+        adv = p.advance()
+        self.assertEqual(adv.json["next_state"], "test")
+        st = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(st["state"], "test")
+        self.assertEqual([h["state"] for h in st["history"]],
+                         ["init", "init", "implementation"])
+
+    def test_resume_replays_tdd_state(self):
+        # A TDD run replays a JSON-role echo (red_test) with its tester runners.
+        p = self.started(tdd_mode=True)
+        p.advance()        # init -> test_implementation
+        adv = p.advance()  # test_implementation -> red_test
+        self.assertEqual(adv.json["next_state"], "red_test")
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["next_state"], "red_test")
+        self.assertEqual(res.json["directive"], adv.json["directive"])
+        self.assertTrue(res.json["tdd_mode"])
+        self.assertEqual(res.json.get("result_filename"), adv.json.get("result_filename"))
+        self.assertEqual(res.json.get("tester_runners"), adv.json.get("tester_runners"))
+
+    def test_resume_possibly_live_flag(self):
+        # A freshly-written run is flagged possibly_live; an ancient one is not.
+        # Also guards the fromisoformat "Z" parse (broken on 3.9/3.10 without the
+        # normalize) — if the parse silently failed, the first assert would fail.
+        p = self.started(tdd_mode=False)
+        p.advance()  # implementation; updated_at just written -> within the live window
+        self.assertTrue(self._resume(p).json.get("possibly_live"))
+        st = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        st["updated_at"] = "2000-01-01T00:00:00Z"  # ancient
+        (p.run_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
+        self.assertNotIn("possibly_live", self._resume(p).json)
+
+    def test_resume_terminal_replays_full_echo(self):
+        # A run that reached done replays its FULL landing echo (with
+        # run_self_evolution), not a gutted "nothing to resume".
+        p = self.started(tdd_mode=False, run_self_evolution=True)
+        p.advance()  # implementation
+        p.advance()  # test
+        p.write_test_result(status="pass")
+        p.advance()  # review
+        p.write_review_result(verdict="approve")
+        done = p.advance()  # done
+        self.assertEqual(done.json["next_state"], "done")
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["next_state"], "done")
+        self.assertIn("run_self_evolution", res.json)
+        self.assertTrue(res.json["resumed"])
+
+    def test_resume_stage_input_byte_equal(self):
+        # The re-persisted stage-input.json is byte-identical to the original
+        # (resume metadata never leaks into it).
+        p = self.started(tdd_mode=False)
+        p.advance()  # implementation writes iterations/0/stage-input.json
+        si = p.run_dir / "iterations" / "0" / "stage-input.json"
+        self.assertTrue(si.exists())
+        before = si.read_bytes()
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(si.read_bytes(), before)
+        self.assertNotIn("resumed", json.loads(si.read_text(encoding="utf-8")).get("inputs", {}))
+
+    def test_resume_missing_record_errors(self):
+        # A run with no last-advance.json gets a precise manual recipe (incl.
+        # record-changes), not a crash.
+        p = self.started(tdd_mode=False)
+        p.advance()  # implementation
+        (p.run_dir / "last-advance.json").unlink()
+        res = self._resume(p)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("record-changes", res.stderr)
+        self.assertIn("predates resume", res.stderr)
+
+    def test_resume_missing_run_errors(self):
+        # A not-a-run path fails cleanly with guidance.
+        res = run_driver("resume", "--run", "/nonexistent/run-dir")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Not a resumable run", res.stderr)
+
+    def test_save_json_atomic_leaves_no_tmp(self):
+        # Atomic writes must not leave .tmp files behind in the run dir.
+        p = self.started(tdd_mode=False)
+        p.advance()
+        tmps = list(p.run_dir.rglob("*.tmp"))
+        self.assertEqual(tmps, [], f"stray temp files: {tmps}")
 
 
 class TestBootstrapConfig(unittest.TestCase):

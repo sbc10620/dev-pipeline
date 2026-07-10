@@ -9,7 +9,7 @@ Give it a goal — a **conversational planner** writes a single `plan.md` (a tes
 ## How it works
 
 ```
-/dev-pipeline --request "<goal>"   (planner writes plan.md)   |   --plan plan.md   |   --update-config [<plan>]
+/dev-pipeline --request "<goal>"   (planner writes plan.md)   |   --plan plan.md   |   --update-config [<plan>]   |   --resume [<run_dir>]
    │
    ▼
  [update_config] (--update-config, or auto when config is incomplete)  →  recommend runners + instructions + gate keys, you approve, apply-config writes config.json
@@ -217,6 +217,7 @@ python3 agents/dev-pipeline-tools/driver.py bootstrap-config --project .
 python3 agents/dev-pipeline-tools/driver.py apply-config --config .dev-pipeline/dev-pipeline.config.json --values-file values.json
 python3 agents/dev-pipeline-tools/driver.py validate-config --config .dev-pipeline/dev-pipeline.config.json
 python3 agents/dev-pipeline-tools/driver.py status --run .dev-pipeline/latest
+python3 agents/dev-pipeline-tools/driver.py resume --run .dev-pipeline/latest
 python3 agents/dev-pipeline-tools/driver.py migrate-config --config .dev-pipeline/dev-pipeline.config.json
 ```
 
