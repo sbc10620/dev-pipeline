@@ -9,7 +9,7 @@ Give it a goal — a **conversational planner** writes a single `plan.md` (a tes
 ## How it works
 
 ```
-/dev-pipeline --request "<goal>"   (planner writes plan.md)   |   --plan plan.md   |   --update-config <plan>
+/dev-pipeline --request "<goal>"   (planner writes plan.md)   |   --plan plan.md   |   --update-config [<plan>]
    │
    ▼
  [update_config] (--update-config, or auto when config is incomplete)  →  recommend runners + instructions + gate keys, you approve, apply-config writes config.json
@@ -57,7 +57,7 @@ bash /path/to/dev-pipeline/install.sh /path/to/your/project
 
 This copies the skill (incl. `states/` and the role prompts under `agents/`), `driver.py`, schemas, and the config template into the canonical `<project>/.agents/skills/dev-pipeline/` (the open Agent Skills standard, read by Codex/Gemini/Cursor/…), plus a real `.claude/skills/` copy for Claude Code and a `.clinerules/workflows/` pointer for Cline. It does NOT create the config — the skill bootstraps `dev-pipeline.config.json` from the template (via `driver bootstrap-config`) into the gitignored `<project>/.dev-pipeline/` directory on the first run (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
 
-The bootstrapped config starts **incomplete** (runners are the `unconfigured` sentinel; tester instructions are placeholders). The `--update-config` step fills it in: the skill recommends a runner (execution mode + model) per role plus the `llm.*` instructions and `driver` gate keys with its reasoning — confirm or correct in one turn, and it writes them via `driver apply-config`. `--plan`/`--request` run this automatically when the config is incomplete; you can also run `/dev-pipeline --update-config <plan>` any time to reconfigure.
+The bootstrapped config starts **incomplete** (runners are the `unconfigured` sentinel; tester instructions are placeholders). The `--update-config` step fills it in: the skill recommends a runner (execution mode + model) per role plus the `llm.*` instructions and `driver` gate keys with its reasoning — confirm or correct in one turn, and it writes them via `driver apply-config`. `--plan`/`--request` run this automatically when the config is incomplete; you can also run `/dev-pipeline --update-config` any time to reconfigure (an optional plan path sharpens the recommendations).
 
 ---
 

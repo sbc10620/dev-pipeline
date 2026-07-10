@@ -65,7 +65,7 @@ This repo is a **provider-neutral agent plugin** — it installs a skill (with i
 ### Execution model
 
 ```
-User: /dev-pipeline --request "<goal>" [--auto-run]  |  --plan plan.md  |  --update-config <plan>
+User: /dev-pipeline --request "<goal>" [--auto-run]  |  --plan plan.md  |  --update-config [<plan>]
          │
          ▼
   SKILL.md (thin orchestrator, main session) — reads states/<state>.md per transition

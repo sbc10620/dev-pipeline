@@ -1,6 +1,6 @@
 ---
 name: dev-pipeline
-description: Turns a goal into a plan.md and drives the (TDD) test → implement → review pipeline. Usage: /dev-pipeline --request "<goal>" [--auto-run] | --plan <path> | --update-config <plan>
+description: Turns a goal into a plan.md and drives the (TDD) test → implement → review pipeline. Usage: /dev-pipeline --request "<goal>" [--auto-run] | --plan <path> | --update-config [<plan>]
 user-invocable: true
 allowed-tools: Read, Write, Bash, Grep, Glob, Task
 ---
@@ -33,7 +33,7 @@ The `plan.md` is a pure **spec body** (Requirements, Acceptance Criteria, Interf
 The per-state procedures live in separate files under `states/` so this file stays small and each state is self-contained. The loop is:
 
 1. Do **[Step 0]** below once (arguments, driver location, config bootstrap, clean-tree reminder).
-2. If invoked with `--update-config`, run **only** the config-setup state by following `states/update_config.md` with the given plan, then **stop** (report the config is ready; the user re-invokes with `--plan`/`--request` to run the pipeline).
+2. If invoked with `--update-config`, run **only** the config-setup state by following `states/update_config.md` (with `plan_path` if one was given), then **stop** (report the config is ready; the user re-invokes with `--plan`/`--request` to run the pipeline).
 3. If invoked with `--request`, run the **planning** state by following `states/planning.md` (build + approve the `plan.md` spec). With `--plan`, skip straight to the config gate.
 4. **Config gate:** if Step 0 reported `config_complete: false`, run the config-setup state by following `states/update_config.md` (using `plan_path`) before continuing. If `config_complete` was true, skip it.
 5. Run the **init** state by following `states/init.md`.
@@ -80,7 +80,7 @@ Every role starts the same way — you call `driver run-stage --run <run_dir> --
 - **`mode: "subagent"`** — the driver assembled the prompt but cannot dispatch a host subagent itself. **If this host has no subagent/Task tool, STOP** and tell the user: "`config.runners.<role>` selects a subagent runner but this host cannot dispatch subagents — change that role to a `bash` or `main-session` runner." Never do the role in-session instead. Otherwise dispatch **one subagent**, passing the assembled prompt **verbatim**: its instructions = the contents of the echoed `system_file`, its task = the contents of `user_file`, its model = the echoed `model` (if given). If your host's subagent has no separate system-prompt field, pass the `system_file` contents followed by the `user_file` contents as the single task. Do not add, summarize, or edit the prompt. The subagent works under you but with the injected prompt as its only context (like a bash runner) — not your conversation.
 - **`mode: "main-session"`** — you perform the role **yourself**. The driver sets `compact_first`: **compact the conversation if your host supports model-initiated compaction; otherwise just proceed** (the cost is context size, not correctness — **except for the reviewer**, where compacting away the implementation you just did is the main lever on review independence, so compact whenever you can before a `main-session` reviewer). Then **freshly Read the echoed `system_file` every time** (it carries the persona preamble the driver just re-assembled) and `user_file`, and carry out that role exactly as written — **do not act from your memory of a previous role**. (The prompt lives on disk, so compaction loses nothing; if compaction dropped the echoed paths, **re-run the identical `run-stage` command** — the handoff is idempotent and re-emits them.)
 
-For a handoff mode the driver **prepends a firm persona-switch preamble** to the assembled `system_file` ("You are now acting SOLELY as the dev-pipeline `<role>` … disregard any prior role/context; **do ONLY this role's work then STOP — the other stages are separate roles, do not perform them**"). Pass it through unchanged and **adopt it as the only instruction for that turn** — especially in `main-session`, where you must not let the work you just did in this session bleed into the role. Concretely: a `main-session` **implementor writes code and stops — it does NOT run the tests** (a separate `test` stage does), and a reviewer must compact first so it is not grading its own fresh work.
+For a handoff mode the driver **prepends a firm persona-switch preamble** to the assembled `system_file` ("You are now acting SOLELY as the dev-pipeline `<role>` … disregard any prior role/context; **do ONLY the work THIS role's instructions define, then STOP — do not take on the other pipeline stages**"). Pass it through unchanged and **adopt it as the only instruction for that turn** — especially in `main-session`, where you must not let the work you just did in this session bleed into the role. Concretely: a `main-session` **implementor writes and build-checks its code (per its own instructions) and stops — it does NOT run the project's test suite** (a separate `test` stage does), and a reviewer must compact first so it is not grading its own fresh work.
 
 **Executing a role (subagent or main-session), by category:**
 - **file role** (`category: "file"` — implementor / test_implementor): the executor edits files in `project_root`. When it finishes, compute the delta as the state file does. **An empty delta means the role did not run** — re-execute once, stating that nothing was produced; if still empty, stop and report (the handoff equivalent of `all_runners_failed`). Then continue the state's boundary/manifest steps.
@@ -95,7 +95,7 @@ After the role completes and validates, **you are the orchestrator again** — r
 **Accepted arguments** (exactly one entry mode: `--request`, `--plan`, or `--update-config`):
 - `--request "<goal>"` — build a `plan.md` spec conversationally from the goal (planning state), then run the pipeline.
 - `--plan <path>` — run an already-written `plan.md` (a pure spec body).
-- `--update-config <plan>` — recommend + write `config.json` (runners, tester/test_implementor instructions, gate keys) for the given plan, then stop. This is the only way config is written; `--plan`/`--request` auto-run it when the config is incomplete.
+- `--update-config [<plan>]` — recommend + write `config.json` (runners, tester/test_implementor instructions, gate keys), then stop. A plan path is **optional** (it sharpens the recommendations — framework, test_paths, commands — from that plan; omit it to reconfigure from the repo + the current config). This is the only way config is written; `--plan`/`--request` auto-run it (with their plan) when the config is incomplete.
 - `--auto-run` — optional (`--request`/`--plan`). Skip the post-plan approval gate and run end-to-end. Planning-phase and config-setup questions are still asked.
 - `--help` — print skill usage summary and stop.
 
@@ -108,13 +108,13 @@ After the role completes and validates, **you are the orchestrator again** — r
   Usage:
     /dev-pipeline --request "<what to build>" [--auto-run]
     /dev-pipeline --plan <path-to-plan.md>   [--auto-run]
-    /dev-pipeline --update-config <path-to-plan.md>
+    /dev-pipeline --update-config [<path-to-plan.md>]
     /dev-pipeline --help
 
   Parameters:
-    --request "<goal>"      Build plan.md spec conversationally (planner), then run.
-    --plan <path>           Run an existing plan.md (a pure spec body).
-    --update-config <plan>  Recommend + write config.json for the plan, then stop.
+    --request "<goal>"        Build plan.md spec conversationally (planner), then run.
+    --plan <path>             Run an existing plan.md (a pure spec body).
+    --update-config [<plan>]  Recommend + write config.json (plan optional), then stop.
     --auto-run              Skip the post-plan approval gate; run end-to-end.
     --help                  Show this help message.
 
@@ -149,7 +149,7 @@ After the role completes and validates, **you are the orchestrator again** — r
 
 - [Step 3] Resolve the entry mode. Save `auto_run` (whether `--auto-run` was passed) in the Run Context.
   - `--plan <path>`: verify the plan file exists; save it as `plan_path`.
-  - `--update-config <path>`: verify the plan file exists; save it as `plan_path`.
+  - `--update-config [<path>]`: a plan path is optional — if given, verify it exists and save it as `plan_path`; if omitted, leave `plan_path` unset (reconfigure from the repo + current config).
   - `--request "<goal>"`: note the goal; `plan_path` will be set during planning.
 
 - [Step 4] Locate the project root: the directory containing `.dev-pipeline/dev-pipeline.config.json`, walking upward:

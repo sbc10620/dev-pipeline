@@ -779,6 +779,18 @@ class TestAttemptAutoRecord(PipelineTestCase):
         self.assertIn("src/a.py", body)
         self.assertIn("state=review", body)
 
+    def test_red_not_confirmed_records_vacuous_note(self):
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        self.assertEqual(p.advance().json["next_state"], "test_implementation")
+        self.assertEqual(p.advance().json["next_state"], "red_test")
+        p.write_red_test_result(status="pass")   # RED not confirmed (vacuous tests)
+        r = p.advance()                            # red_test -> test_implementation (re-author)
+        self.assertEqual(r.json["next_state"], "test_implementation")
+        body = (p.run_dir / "attempts.md").read_text(encoding="utf-8")
+        self.assertIn("vacuous", body)
+        self.assertIn("state=red_test", body)
+
 
 class TestBootstrapConfig(unittest.TestCase):
     """bootstrap-config seeds the config from the template deterministically."""
@@ -1062,6 +1074,25 @@ class TestApplyConfig(unittest.TestCase):
         vals["runners"]["implementor"] = [{"type": "bash", "command": "x", "timeout": True}]
         r = self._apply(vals)
         self.assertNotEqual(r.returncode, 0)
+
+    def test_values_file_equal_config_is_not_deleted(self):
+        # A full config.json is itself a valid values file, so `--values-file` may
+        # point at the config. apply-config must NOT unlink the config it just wrote.
+        self._apply(self.FULL_VALUES)              # write a complete config
+        before = self.config.read_text(encoding="utf-8")
+        r = run_driver("apply-config", "--config", str(self.config),
+                       "--values-file", str(self.config))  # values == config
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.config.exists())      # not deleted
+        self.assertEqual(self.config.read_text(encoding="utf-8"), before)
+
+    def test_seed_failure_writes_no_config(self):
+        # An absent config + an invalid (incomplete) values file must leave NOTHING
+        # on disk — no half-seeded config — so "nothing was written" stays honest.
+        fresh = pathlib.Path(self._tmp.name) / "sub2" / ".dev-pipeline" / "dev-pipeline.config.json"
+        r = self._apply({"driver": {"tdd_mode": False}}, config=fresh)  # no runners/instructions
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(fresh.exists())
 
 
 class TestTDD(PipelineTestCase):
@@ -1597,6 +1628,34 @@ class TestRunStage(unittest.TestCase):
         self.assertNotIn("```", text)
         self.assertEqual(json.loads(text)["status"], "pass")
 
+    def test_json_role_default_normalizer_is_tolerant(self):
+        # With NO explicit normalizer the default is `default` (tolerant), so fenced
+        # output still validates. Guards against reverting the bash default to the
+        # strict `passthrough` (which would dead-end on a fenced result).
+        payload = json.dumps(test_result(status="pass"))
+        self._cfg("tester", [
+            {"type": "bash",
+             "command": "printf '```json\\n%s\\n```\\n' " + shlex.quote(payload) + " > {output_file}"},
+        ])
+        out = self.run_dir / "tr.json"
+        r = self._run("tester", self._si("tester", output_file=str(out)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["ok"])
+
+    def test_legacy_normalizer_in_snapshot_stays_lenient(self):
+        # A pre-6.0.0 frozen snapshot may carry normalizer "claude-cli". run-stage
+        # reads the snapshot UNVALIDATED, so _normalize_output must stay lenient for
+        # any non-passthrough value (not silently revert to strict mid-run).
+        payload = json.dumps(test_result(status="pass"))
+        self._cfg("tester", [
+            {"type": "bash",
+             "command": "printf '```json\\n%s\\n```\\n' " + shlex.quote(payload) + " > {output_file}",
+             "normalizer": "claude-cli"}])
+        out = self.run_dir / "tr.json"
+        r = self._run("tester", self._si("tester", output_file=str(out)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["ok"])
+
     def test_json_role_invalid_then_valid(self):
         good = self.run_dir / "good.json"
         good.write_text(json.dumps(test_result(status="pass")), encoding="utf-8")
@@ -1717,6 +1776,19 @@ class TestConfigMigration(unittest.TestCase):
             {role: [{"type": "unconfigured"}] for role in
              ("implementor", "test_implementor", "tester", "reviewer")},
         )
+
+    def test_migrate_drops_removed_driver_key(self):
+        # A 5.x config with the removed driver.allow_unattended_header_merge must be
+        # repairable: migrate-config strips it (apply-config's deep-merge can't).
+        cfg = valid_config()
+        cfg["driver"]["allow_unattended_header_merge"] = True
+        cfg["runners"]["implementor"] = [{"type": "claude-subagent", "agent": "x"}]
+        p = self._write(cfg)
+        r = run_driver("migrate-config", "--config", str(p))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("allow_unattended_header_merge", r.json["dropped_driver_keys"])
+        migrated = json.loads(p.read_text(encoding="utf-8"))
+        self.assertNotIn("allow_unattended_header_merge", migrated["driver"])
 
 
 class TestPlanBody(PipelineTestCase):
@@ -1869,10 +1941,12 @@ class TestRunnerModes(unittest.TestCase):
 
     def test_validate_rejects_removed_normalizer_name(self):
         # 6.0.0: the LLM-specific `claude-cli`/`codex-cli` normalizers were replaced
-        # by `default`; an old name is now an invalid enum value.
+        # by `default`; an old name is named (not the generic oneOf) with a hint.
         r = self._vc({"reviewer": [{"type": "bash", "command": "x > {output_file}",
                                     "normalizer": "claude-cli"}]})
         self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unknown normalizer", r.stderr)
+        self.assertIn("claude-cli", r.stderr)
 
     def test_validate_rejects_normalizer_on_file_role(self):
         # A file role (implementor/test_implementor) has no JSON output, so a
@@ -1882,6 +1956,31 @@ class TestRunnerModes(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("normalizer", r.stderr)
         self.assertIn("file role", r.stderr)
+
+    def test_validate_rejects_removed_driver_key_with_hint(self):
+        # 6.0.0 dropped driver.allow_unattended_header_merge (the plan header is
+        # gone). A 5.x config carrying it is named with a migrate-config hint (it
+        # cannot be repaired by apply-config, whose deep-merge cannot delete a key).
+        cfg = valid_config()
+        cfg["driver"]["allow_unattended_header_merge"] = True
+        p = pathlib.Path(tempfile.mktemp(suffix=".json"))
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+        r = run_driver("validate-config", "--config", str(p))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("allow_unattended_header_merge", r.stderr)
+        self.assertIn("migrate-config", r.stderr)
+
+    def test_validate_rejects_non_dict_runners_cleanly(self):
+        # A malformed runners section must give an actionable message, not a raw
+        # AttributeError traceback from the per-role helpers.
+        cfg = valid_config()
+        cfg["runners"] = "oops"
+        p = pathlib.Path(tempfile.mktemp(suffix=".json"))
+        p.write_text(json.dumps(cfg), encoding="utf-8")
+        r = run_driver("validate-config", "--config", str(p))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("runners: must be an object", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
     # -- run-stage handoff + finalize-stage ------------------------------------
 
@@ -1928,7 +2027,7 @@ class TestRunnerModes(unittest.TestCase):
         # the driver prepends the persona preamble (role-switch + single-role scope)
         sys_text = pathlib.Path(r.json["system_file"]).read_text(encoding="utf-8")
         self.assertIn("acting SOLELY as the dev-pipeline tester", sys_text)
-        self.assertIn("Do ONLY this role's work", sys_text)
+        self.assertIn("do NOT take on the OTHER pipeline stages", sys_text)
 
     def test_finalize_stage_normalizes_fenced_json(self):
         run_dir, proj, work, sp = self._setup("tester", [{"type": "subagent", "normalizer": "default"}])

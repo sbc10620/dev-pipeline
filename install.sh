@@ -241,7 +241,7 @@ echo "       /dev-pipeline --plan plan.md                 (run an existing plan.
 echo "     The first run creates ${RUNTIME_DIR}/dev-pipeline.config.json from the template."
 echo ""
 echo "  2. Config (runners + tester/test_implementor instructions + gate keys) is set by"
-echo "       /dev-pipeline --update-config <plan>, which recommends the values and writes them."
+echo "       /dev-pipeline --update-config [<plan>], which recommends the values and writes them."
 echo "       --plan/--request auto-run it when the config is incomplete."
 echo "       config: llm.tester.build_instruction / install_instruction / test_instruction;"
 echo "       TDD on by default → llm.test_implementor.framework_instruction + test_paths"

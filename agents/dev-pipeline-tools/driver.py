@@ -219,6 +219,9 @@ def _is_placeholder(val) -> bool:
 
 
 RUNNER_TYPES = ("bash", "main-session", "subagent")
+# json-role output normalizers. `default` (LLM-agnostic, tolerant) replaced the
+# pre-6.0.0 `claude-cli`/`codex-cli`; `passthrough` is the strict opt-in.
+VALID_NORMALIZERS = ("passthrough", "default")
 
 # The four roles every config's `runners` section must configure. Defined once,
 # ahead of both cmd_bootstrap_config (seeds them as "unconfigured") and ROLE_META
@@ -290,13 +293,42 @@ def _runner_shape_errors(cfg: dict) -> list:
             # A normalizer only applies to a JSON role's output. File roles
             # (implementor/test_implementor) produce a git delta, not JSON, so a
             # normalizer on them is a config mistake — reject it with a clear reason.
-            if ROLE_META.get(role, {}).get("category") == "file" and "normalizer" in r:
-                errors.append(f"runners.{role}[{i}]: a `normalizer` is meaningless for the {role} "
-                              "(a file role has no JSON output — its result is the git delta); remove it")
+            if "normalizer" in r:
+                if ROLE_META.get(role, {}).get("category") == "file":
+                    errors.append(f"runners.{role}[{i}]: a `normalizer` is meaningless for the {role} "
+                                  "(a file role has no JSON output — its result is the git delta); remove it")
+                elif r["normalizer"] not in VALID_NORMALIZERS:
+                    # Name a removed/unknown normalizer (esp. the pre-6.0.0
+                    # claude-cli/codex-cli) instead of the generic oneOf error.
+                    errors.append(f"runners.{role}[{i}]: unknown normalizer {r['normalizer']!r} — "
+                                  f"use one of {list(VALID_NORMALIZERS)} (`default` replaced the "
+                                  "pre-6.0.0 claude-cli/codex-cli).")
     return errors
 
 
+_REMOVED_DRIVER_KEYS = ("allow_unattended_header_merge",)
+
+
 def validate_config_data(cfg: dict) -> list[str]:
+    # Fail closed on a malformed `runners` section (a non-dict would crash the
+    # per-role helpers below with a raw traceback) before anything else.
+    runners = cfg.get("runners")
+    if runners is not None and not isinstance(runners, dict):
+        return [f"runners: must be an object mapping each role to a runner array, got "
+                f"{type(runners).__name__}."]
+
+    # 6.0.0 removed `driver.allow_unattended_header_merge` (the plan header is gone).
+    # A 5.x config still carrying it would fail the generic additionalProperties
+    # check AND be unrepairable via apply-config (deep-merge cannot delete a key) —
+    # so name it with a migrate hint that DOES drop it.
+    drv = cfg.get("driver")
+    if isinstance(drv, dict):
+        stale = [k for k in _REMOVED_DRIVER_KEYS if k in drv]
+        if stale:
+            return [f"driver.{', '.join(stale)}: removed in 6.0.0. Run "
+                    "`driver migrate-config --config <path>` to drop it (then reconfigure "
+                    "with `/dev-pipeline --update-config`)."]
+
     # 3.0.0 migration: surface removed runner types with an actionable message
     # BEFORE the generic schema enum error.
     legacy = _legacy_runner_roles(cfg)
@@ -312,7 +344,7 @@ def validate_config_data(cfg: dict) -> list[str]:
     unconfigured = _unconfigured_runner_roles(cfg)
     if unconfigured:
         return [f"runners.{', '.join(unconfigured)}: not configured yet. Run "
-                "`/dev-pipeline --update-config <plan>` (it recommends runners + instructions and "
+                "`/dev-pipeline --update-config` (it recommends runners + instructions and "
                 "writes them via `driver apply-config`)."]
 
     # spec_author was removed in 5.0.0 (the plan.md body is the contract now). A
@@ -1215,7 +1247,7 @@ def cmd_bootstrap_config(args) -> None:
             "llm.test_implementor.framework_instruction",
             "llm.test_implementor.test_paths",
         ],
-        "next_action": "Run `/dev-pipeline --update-config <plan>`: recommend a runner (execution "
+        "next_action": "Run `/dev-pipeline --update-config`: recommend a runner (execution "
                        "mode + LLM/model) per role AND the llm.* instructions + driver gate keys, "
                        "confirm with the user, then call `driver apply-config` to write them into "
                        "config.json. Placeholder <...> values are rejected. To skip TDD, set "
@@ -1232,17 +1264,19 @@ def cmd_apply_config(args) -> None:
     one-time set-runners it is re-runnable (config only ever changes here). Seeds
     the config from the template first if it does not exist yet."""
     config_path = pathlib.Path(args.config).resolve()
-    seeded = False
-    if not config_path.exists():
-        if getattr(args, "project", None):
-            project_root = pathlib.Path(args.project).resolve()
-        else:
-            # Default layout is <root>/.dev-pipeline/dev-pipeline.config.json.
-            project_root = config_path.parent.parent
-        _seed_config_from_template(config_path, project_root)
-        seeded = True
 
-    cfg = load_json(config_path)
+    # Build the merge BASE in memory (do NOT write yet): an existing config, or a
+    # fresh template with unconfigured runners. This way a validation failure on an
+    # absent config leaves NOTHING on disk (the message "nothing was written" stays
+    # honest), and the .gitignore/dir side effects only happen on a successful write.
+    seeded = not config_path.exists()
+    if seeded:
+        if not EXAMPLE_PATH.exists():
+            die(f"Config template not found: {EXAMPLE_PATH}\n  Re-run install.sh to repair the installation.")
+        base = load_json(EXAMPLE_PATH)
+        base["runners"] = {role: [{"type": "unconfigured"}] for role in UNCONFIGURABLE_ROLES}
+    else:
+        base = load_json(config_path)
 
     values_path = pathlib.Path(args.values_file).resolve()
     values = load_json(values_path)
@@ -1254,15 +1288,27 @@ def cmd_apply_config(args) -> None:
     if extra:
         die(f"{values_path}: unexpected top-level key(s) {extra}; only {sorted(allowed_top)} may be set.")
 
-    merged = json.loads(json.dumps(cfg))  # deep copy so a validation failure writes nothing
+    merged = json.loads(json.dumps(base))  # deep copy so a validation failure writes nothing
     _deep_merge(merged, values)
 
     errors = validate_config_data(merged)
     if errors:
         die("Invalid merged config — nothing was written:\n  " + "\n  ".join(errors))
 
+    # All checks passed — now do the on-disk work. For a freshly seeded config also
+    # create .dev-pipeline/ and the .gitignore entry (the bootstrap side effects).
+    if seeded:
+        project_root = (pathlib.Path(args.project).resolve() if getattr(args, "project", None)
+                        else config_path.parent.parent)  # default <root>/.dev-pipeline/<file>
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        if _git_toplevel(project_root) is not None:
+            _ensure_gitignore_entry(project_root)
     save_json(config_path, merged)
-    values_path.unlink(missing_ok=True)  # clean up the scratch file on success only
+    # Clean up the scratch values file on success — but NEVER unlink the config
+    # itself (a full config.json is a valid values file, so `--values-file` could
+    # legitimately point at the config).
+    if values_path != config_path:
+        values_path.unlink(missing_ok=True)
     emit({"ok": True, "config": str(config_path), "seeded": seeded,
           "applied": sorted(values), "config_complete": True})
 
@@ -1591,10 +1637,12 @@ def assemble_prompt(role: str, stage_input: dict) -> "tuple[str, str]":
 
 def _normalize_output(raw: str, normalizer: str) -> "dict | None":
     """Map a runner's output-file content to a canonical JSON object.
-    `passthrough` parses it directly; `default` (the LLM-agnostic default) tolerates
+    `passthrough` parses it strictly; every other value (`default`, the LLM-agnostic
+    default — plus any legacy name like a pre-6.0.0 snapshot's `claude-cli`, for
+    which we stay lenient rather than silently reverting to strict mid-run) tolerates
     a markdown fence or surrounding prose by extracting the outermost JSON object."""
     raw = raw.strip()
-    if normalizer == "default":
+    if normalizer != "passthrough":
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
             raw = re.sub(r"\n```\s*$", "", raw).strip()
@@ -1764,11 +1812,13 @@ def cmd_run_stage(args) -> None:
             "conversation context in this session. The instructions below and the "
             "inputs you are given are your ONLY source of truth — follow them and "
             "nothing else.\n\n"
-            "Do ONLY this role's work as defined below, then STOP and hand back. The "
-            "other pipeline stages (authoring tests, running the build/test suite, "
-            "reviewing) are SEPARATE roles run elsewhere — do NOT perform them "
-            "yourself (e.g. as the implementor you write code and stop; you do NOT "
-            "run the tests).\n\n---\n\n"
+            "Do ONLY the work THIS role's instructions below define, then STOP and "
+            "hand back — do NOT take on the OTHER pipeline stages. (e.g. as the "
+            "implementor you write and build-check your code exactly as your "
+            "instructions say, then stop; you do NOT run the project's test suite or "
+            "review the diff — separate tester and reviewer roles do that.) Where this "
+            "note and the role instructions below seem to differ, the role "
+            "instructions win for that role's own work.\n\n---\n\n"
         )
         system_file.write_text(persona + system_text, encoding="utf-8")
         directive = ""
@@ -1897,29 +1947,37 @@ def cmd_finalize_stage(args) -> None:
 def cmd_migrate_config(args) -> None:
     """Convert an old config to the current shape: reset the whole runners section
     to the 'unconfigured' sentinel (the user then reconfigures via --update-config).
-    This also drops a removed role like the pre-5.0.0 spec_author (no longer a
-    runner). The driver and llm sections are preserved; only runners are rewritten."""
+    This also drops a removed role like the pre-5.0.0 spec_author and any removed
+    `driver` key (e.g. the pre-6.0.0 allow_unattended_header_merge). The llm section
+    is preserved; runners are reset and removed driver keys are stripped."""
     config_path = pathlib.Path(args.config).resolve()
     cfg = load_json(config_path)
-    # migrate-config converts a LEGACY (pre-3.0.0) config's runners. Refuse a freshly
-    # bootstrapped, already-unconfigured config — there is nothing to migrate.
-    if _unconfigured_runner_roles(cfg):
+    stale_driver = [k for k in _REMOVED_DRIVER_KEYS
+                    if isinstance(cfg.get("driver"), dict) and k in cfg["driver"]]
+    # migrate-config converts a LEGACY config. Refuse a freshly bootstrapped,
+    # already-unconfigured config UNLESS it still carries a removed driver key to
+    # strip (there would be nothing else to migrate).
+    if _unconfigured_runner_roles(cfg) and not stale_driver:
         die(f"{config_path}: runners are already the 'unconfigured' sentinel (a freshly "
             "bootstrapped config). migrate-config converts a legacy config's runners — it is not "
             "the setup path. Run `/dev-pipeline --update-config` to configure runners.")
     legacy = _legacy_runner_roles(cfg)
     replaced = sorted((cfg.get("runners") or {}).keys())  # ALL roles are reset wholesale
     out = pathlib.Path(args.out).resolve() if args.out else config_path
-    # Back up the original (in place only) before overwriting runners wholesale.
+    # Back up the original (in place only) before overwriting.
     if not args.out:
         save_json(out.with_suffix(out.suffix + ".bak"), cfg)
     cfg["runners"] = {role: [{"type": "unconfigured"}] for role in UNCONFIGURABLE_ROLES}
+    for k in stale_driver:
+        cfg["driver"].pop(k, None)
     save_json(out, cfg)
     emit({"migrated": True, "config": str(out),
           "legacy_roles": legacy, "replaced_roles": replaced,
+          "dropped_driver_keys": stale_driver,
           "backup": (str(out.with_suffix(out.suffix + ".bak")) if not args.out else None),
           "warning": "ALL runners were reset to the 'unconfigured' sentinel; any removed role "
-                     "(e.g. the pre-5.0.0 spec_author) is dropped and any custom runner commands "
+                     "(e.g. the pre-5.0.0 spec_author) or removed driver key (e.g. "
+                     "allow_unattended_header_merge) is dropped and any custom runner commands "
                      "were lost (see the .bak). Run `/dev-pipeline --update-config` to reconfigure."})
 
 
