@@ -2,20 +2,23 @@
 
 Automated **test-driven** development pipeline for coding agents: author tests from the contract, prove they fail (RED), write code, prove they pass (GREEN), then review.
 
-Give it a goal — a **conversational planner** writes a single `plan.md` (a `dev-pipeline-config` header + a testable spec body) — or hand it a `plan.md` you already wrote. It then drives the full development cycle using per-stage LLM runners (claude, codex, …; chosen in config), with deterministic state transitions handled by a Python driver script.
+Give it a goal — a **conversational planner** writes a single `plan.md` (a testable spec body) — or hand it a `plan.md` you already wrote. Config (runners, tester instructions, gate keys) is set separately by a conversational **`--update-config`** step and stored in `config.json`. It then drives the full development cycle using per-stage LLM runners (claude, codex, …; chosen in config), with deterministic state transitions handled by a Python driver script.
 
 ---
 
 ## How it works
 
 ```
-/dev-pipeline --request "<goal>"   (planner writes plan.md)   |   --plan plan.md
+/dev-pipeline --request "<goal>"   (planner writes plan.md)   |   --plan plan.md   |   --update-config <plan>
    │
    ▼
- [planning] (--request)  →  planner explores read-only, asks you, writes plan.md, you approve
+ [update_config] (--update-config, or auto when config is incomplete)  →  recommend runners + instructions + gate keys, you approve, apply-config writes config.json
    │
    ▼
- [init]  →  merge the plan's config header, validate config + contract, write contract.md
+ [planning] (--request)  →  planner explores read-only, asks you, writes plan.md spec, you approve
+   │
+   ▼
+ [init]  →  validate config + contract, snapshot config, write contract.md
    │
    ▼
  [test_implementation]  →  test author writes tests from the contract   ┐ TDD
@@ -36,7 +39,7 @@ Give it a goal — a **conversational planner** writes a single `plan.md` (a `de
  [done]                   [failed]
 ```
 
-- **TDD is on by default.** Set `driver.tdd_mode: false` (in the config or the plan header) to skip `test_implementation`/`red_test` and use the legacy `implement → test → review` flow.
+- **TDD is on by default.** Set `driver.tdd_mode: false` (in the config, via `--update-config`) to skip `test_implementation`/`red_test` and use the legacy `implement → test → review` flow.
 - RED not confirmed (authored tests pass with no code) → re-author tests (up to `max_test_implementation_iteration` times)
 - Test failure → retry implementation (up to `max_test_iteration` times)
 - Review failure → retry implementation, or — if the blocking finding is about a test file — re-author tests (up to `max_review_iteration` times)
@@ -54,13 +57,13 @@ bash /path/to/dev-pipeline/install.sh /path/to/your/project
 
 This copies the skill (incl. `states/` and the role prompts under `agents/`), `driver.py`, schemas, and the config template into the canonical `<project>/.agents/skills/dev-pipeline/` (the open Agent Skills standard, read by Codex/Gemini/Cursor/…), plus a real `.claude/skills/` copy for Claude Code and a `.clinerules/workflows/` pointer for Cline. It does NOT create the config — the skill bootstraps `dev-pipeline.config.json` from the template (via `driver bootstrap-config`) into the gitignored `<project>/.dev-pipeline/` directory on the first run (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
 
-The bootstrapped config's `runners` start **unconfigured**: on that first run the skill walks you through a short interactive setup, proposing a runner (execution mode + model) for each role with its reasoning — confirm or correct in one turn, and it writes them via `driver set-runners` (a one-time operation; edit the config file directly to change runners after that).
+The bootstrapped config starts **incomplete** (runners are the `unconfigured` sentinel; tester instructions are placeholders). The `--update-config` step fills it in: the skill recommends a runner (execution mode + model) per role plus the `llm.*` instructions and `driver` gate keys with its reasoning — confirm or correct in one turn, and it writes them via `driver apply-config`. `--plan`/`--request` run this automatically when the config is incomplete; you can also run `/dev-pipeline --update-config <plan>` any time to reconfigure.
 
 ---
 
 ## Configuration
 
-Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester instructions are **required** — the tester will never infer or guess commands. `runners` (shown below fully configured) starts as an `"unconfigured"` sentinel per role and is normally filled in once by the interactive setup dialog on first run (see Installation) — edit it directly here to change it afterward.
+Config lives in `.dev-pipeline/dev-pipeline.config.json`. Normally you set it through `--update-config` (see Installation), which recommends values and writes them via `driver apply-config` (validated, atomic, re-runnable). The three tester instructions are **required** — the tester will never infer or guess commands. `runners` (shown below fully configured) starts as an `"unconfigured"` sentinel per role. You can also hand-edit this file directly.
 
 ```json
 {
@@ -110,9 +113,9 @@ Edit `.dev-pipeline/dev-pipeline.config.json` in your project. The three tester 
 
 For a bash runner the driver runs and validates; for a subagent/main-session runner it **hands the assembled prompt to the SKILL** to execute, then the SKILL validates a JSON result via `driver finalize-stage`. `llm.test_implementor` + `runners.test_implementor` are required only under TDD (default — set `tdd_mode:false` to omit). The `planner` has no runner — it runs conversationally in the host session.
 
-> **Security:** `subagent`/`main-session` runners have **no hard tool sandbox** (LLM-free = no host agent files); their only containment is the role prose. For a read-only role (reviewer/tester) on untrusted code, prefer a **bash** runner with a scoped `--allowedTools`. Don't run `main-session` for the reviewer when the implementor is also `main-session` (the gate becomes self-review — use `subagent`/`bash` for at least one). `subagent`/`main-session` are host-coupled (need a host session); `bash` is the portable default.
+> **Security:** `subagent`/`main-session` runners have **no hard tool sandbox** (LLM-free = no host agent files); their only containment is the role prose. For a read-only role (reviewer/tester) on untrusted code, prefer a **bash** runner with a scoped `--allowedTools`. Prefer `subagent`/`bash` for the reviewer so it isn't the same session that wrote the code (esp. if the implementor is `main-session`); a `main-session` reviewer is a best-effort, self-review-prone gate — acceptable only when the host can run neither a bash runner nor a subagent, and then only after compacting and warning the user. `subagent`/`main-session` are host-coupled (need a host session); `bash` is the portable default.
 
-> **Security:** the default `claude` runners run headless with pre-approved tools and **no sandbox**; `plan.md`/the contract/code are untrusted input. A `plan.md` config header can set instructions, but its *executable/gate* keys (tester commands, `test_paths`, `review_block_severity`, `tdd_mode`) merge only with your approval; `runners` never merge. Run dev-pipeline in a sandboxed/throwaway environment and keep each role's `--allowedTools` minimal (read-only roles use a stdout-redirect command with no `Write`). An old config with a removed runner (e.g. `spec_author`) is rejected with a hint — run `driver migrate-config --config <path>` to convert.
+> **Security:** a bash runner (e.g. `claude -p` / `codex exec`) runs headless with only its scoped `--allowedTools`; `plan.md`/the contract/code are untrusted input, and for handoff modes the driver prepends a persona-switch preamble to keep the role focused. `config.json` is local, user-owned state — written **only** by the human-approved `--update-config` flow (`driver apply-config`, which validates before writing); the plan carries no config. Run dev-pipeline in a sandboxed/throwaway environment and keep each role's `--allowedTools` minimal (read-only roles use a stdout-redirect command with no `Write`). An old config with a removed runner (e.g. `spec_author`) is rejected with a hint — run `driver migrate-config --config <path>` to reset runners to `unconfigured`, then `--update-config`.
 
 ### Config fields
 
@@ -121,7 +124,7 @@ For a bash runner the driver runs and validates; for a subagent/main-session run
 | `driver.max_test_iteration` | Yes | Max implementation retries after test failure |
 | `driver.max_review_iteration` | Yes | Max implementation retries after review failure |
 | `driver.max_test_implementation_iteration` | No | Max test re-authoring when RED is not confirmed (default: 2) |
-| `driver.tdd_mode` | No | Author tests first (RED→GREEN). Default `true`. A `plan.md` header may set it |
+| `driver.tdd_mode` | No | Author tests first (RED→GREEN). Default `true`. Set via `--update-config` |
 | `driver.run_self_evolution` | Yes | Update installed agent .md files after done (default: false) |
 | `driver.review_block_severity` | No | Severities that block review pass (default: `["critical","high"]`). Null = use verdict gate |
 | `llm.tester.build_instruction` | **Yes** | Exact build command. Use `"no build step"` if not needed |
@@ -158,7 +161,7 @@ Each role is an LLM-agnostic prose file (`agents/skills/dev-pipeline/agents/dp-<
 
 | Role | Does | Tool envelope (set in config) |
 |---|---|---|
-| `dp-planner` | **Conversational, host session** (not a runner). Turns a goal into one `plan.md` (config header + testable spec body); read-only repo exploration | host session (read-only discipline in prose) |
+| `dp-planner` | **Conversational, host session** (not a runner). Turns a goal into one `plan.md` spec body (no config header); read-only repo exploration | host session (read-only discipline in prose) |
 | `dp-test-implementor` | (TDD) Writes tests from the contract — tests only, no production code | Read, Write, Edit (no Bash) |
 | `dp-implementor` | Writes + build-checks code from the contract; never edits tests under TDD | Read, Edit, Write, Bash |
 | `dp-tester` | Runs build/install/test — **no code inference** (used by `red_test` and `test`) | Read, Bash (read-only; no Write) |
@@ -189,11 +192,11 @@ Created at `<project>/.dev-pipeline/` (gitignored automatically).
 ├── latest -> runs/<run-id>
 └── runs/<run-id>/
     ├── state.json           # driver state (single source of truth)
-    ├── contract.md          # header-stripped plan body — the contract for test author, implementor and reviewer
+    ├── contract.md          # the plan body — the contract for test author, implementor and reviewer
     ├── attempts.md          # accumulated failure history — passed to authors on retry
     ├── config.snapshot.json
     ├── changed-manifest.txt  # files the runners produced (commit/review scope)
-    ├── stage-input.json      # spec-author stage input
+    ├── stage-input.json      # per-stage input echoed by advance
     └── iterations/<n>/
         ├── red-test-result.json   # TDD: the red_test (RED verification) result
         ├── test-result.json
@@ -211,7 +214,7 @@ Each `run-id` is a timestamp (`YYYYMMDD-HHMMSS`). Previous runs are preserved fo
 python3 agents/dev-pipeline-tools/driver.py --help
 python3 agents/dev-pipeline-tools/driver.py --version
 python3 agents/dev-pipeline-tools/driver.py bootstrap-config --project .
-python3 agents/dev-pipeline-tools/driver.py set-runners --config .dev-pipeline/dev-pipeline.config.json --runners-file runners.json
+python3 agents/dev-pipeline-tools/driver.py apply-config --config .dev-pipeline/dev-pipeline.config.json --values-file values.json
 python3 agents/dev-pipeline-tools/driver.py validate-config --config .dev-pipeline/dev-pipeline.config.json
 python3 agents/dev-pipeline-tools/driver.py status --run .dev-pipeline/latest
 python3 agents/dev-pipeline-tools/driver.py migrate-config --config .dev-pipeline/dev-pipeline.config.json

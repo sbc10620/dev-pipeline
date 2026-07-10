@@ -4,11 +4,11 @@ dev-pipeline driver — deterministic state machine for the implement→test→r
 
 Usage:
   python3 driver.py bootstrap-config [--project <dir>]
-  python3 driver.py set-runners      --config <path> --runners-file <path>
-  python3 driver.py init             --plan <path> [--config <path>] [--project <dir>] [--header-approved]
+  python3 driver.py apply-config     --config <path> --values-file <path>
+  python3 driver.py init             --plan <path> [--config <path>] [--project <dir>]
   python3 driver.py advance          --run <run_dir>
   python3 driver.py status           --run <run_dir>
-  python3 driver.py validate-config  --config <path> [--plan <path>] [--header-approved]
+  python3 driver.py validate-config  --config <path> [--plan <path>]
   python3 driver.py validate-result  --type test|review --file <path>
   python3 driver.py normalize-review --source codex --in <file> --out <file>
   python3 driver.py append-attempt   --run <run_dir> --state <test_implementation|red_test|test|review> --outcome <text-or-file>
@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "5.4.0"
+__version__ = "6.0.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -209,9 +209,9 @@ INSTRUCTION_KEYS = ["build_instruction", "install_instruction", "test_instructio
 
 
 def effective_tdd_mode(cfg: dict) -> bool:
-    """Resolve TDD mode. As of 5.0.0 the single source is config.driver.tdd_mode
-    (the plan.md `dev-pipeline-config` header sets it via the init merge); the
-    per-run --tdd/--no-tdd flags were removed. Default true when unset."""
+    """Resolve TDD mode. The single source is config.driver.tdd_mode (set via
+    --update-config / apply-config); the per-run --tdd/--no-tdd flags were removed
+    in 5.0.0. Default true when unset."""
     return bool(cfg.get("driver", {}).get("tdd_mode", True))
 
 
@@ -243,8 +243,8 @@ def _legacy_runner_roles(cfg: dict) -> list:
 
 def _unconfigured_runner_roles(cfg: dict) -> list:
     """Roles whose runners are still the bootstrap sentinel `{"type":"unconfigured"}`
-    (pre-schema detection, same tier as `_legacy_runner_roles`) — `driver
-    set-runners` has not been run yet for this config."""
+    (pre-schema detection, same tier as `_legacy_runner_roles`) — --update-config
+    (apply-config) has not configured them yet for this config."""
     unconfigured = []
     for role, arr in (cfg.get("runners") or {}).items():
         if isinstance(arr, list) and any(
@@ -302,13 +302,13 @@ def validate_config_data(cfg: dict) -> list[str]:
                 "--config <path>` to convert automatically."]
 
     # A freshly bootstrapped config's runners are the "unconfigured" sentinel until
-    # `driver set-runners` seeds them — surface that plainly before the generic
+    # the --update-config flow seeds them — surface that plainly before the generic
     # schema oneOf error (which would just say "matches none of the oneOf schemas").
     unconfigured = _unconfigured_runner_roles(cfg)
     if unconfigured:
-        return [f"runners.{', '.join(unconfigured)}: not configured yet. Run /dev-pipeline once "
-                "(it walks you through an interactive runner setup), or configure directly with "
-                "`driver set-runners --config <path> --runners-file <path>`."]
+        return [f"runners.{', '.join(unconfigured)}: not configured yet. Run "
+                "`/dev-pipeline --update-config <plan>` (it recommends runners + instructions and "
+                "writes them via `driver apply-config`)."]
 
     # spec_author was removed in 5.0.0 (the plan.md body is the contract now). A
     # config still carrying its runner is rejected with an actionable message
@@ -383,85 +383,13 @@ def validate_config_data(cfg: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# plan.md config header (5.0.0)
+# Config deep-merge helpers
 #
-# plan.md carries a leading ```dev-pipeline-config fenced JSON block. `init`
-# parses it, merges a trust-tiered whitelist into the run's config *snapshot*
-# (never config.json), and validates the header-stripped body's required
-# sections deterministically. plan.md is UNTRUSTED input, so: only whitelisted
-# leaves ever merge (never `runners`, which become shell commands); executable /
-# gate keys merge only with human approval; parsing is fail-closed.
+# Used by `apply-config` (the --update-config write path) to merge a partial
+# values file into config.json leaf-by-leaf, preserving sibling keys the caller
+# omits. (There is no plan.md config header as of 6.0.0 — config lives only in
+# config.json; the plan.md body is purely the contract.)
 # ---------------------------------------------------------------------------
-
-HEADER_INFO_STRING = "dev-pipeline-config"
-
-# Prose-guidance keys: merged on every run — they are only ever handed to an LLM
-# as data, never executed and never a hard gate.
-_HEADER_PROSE_KEYS = {
-    ("llm", "implementor", "design_instruction"),
-    ("llm", "reviewer", "focus"),
-    ("llm", "reviewer", "scope"),
-    ("llm", "test_implementor", "focus"),
-    ("llm", "test_implementor", "framework_instruction"),
-}
-# Executable / gate keys: tester.* strings are RUN as shell; test_paths is the
-# boundary + review-routing gate; review_block_severity / tdd_mode change control
-# flow. Merged from the (untrusted) header ONLY when a human approved this header
-# (init --header-approved) or the project opted in via
-# driver.allow_unattended_header_merge. Otherwise they come from config.json and
-# validation fails loudly if config.json left them as placeholders.
-_HEADER_EXEC_KEYS = {
-    ("llm", "tester", "build_instruction"),
-    ("llm", "tester", "install_instruction"),
-    ("llm", "tester", "test_instruction"),
-    ("llm", "test_implementor", "test_paths"),
-    ("driver", "review_block_severity"),
-    ("driver", "tdd_mode"),
-}
-
-
-def parse_plan_header(text: str):
-    """Fail-closed parse of a plan.md `dev-pipeline-config` header.
-
-    Returns (header_dict | None, body_text).
-      * Recognized ONLY when the file's first non-whitespace content is a fenced
-        block whose info string is exactly `dev-pipeline-config` (leading BOM
-        tolerated). This position anchor stops a dev-pipeline-config *example*
-        inside a plan body from being mis-parsed/mis-stripped.
-      * A recognized header that is not valid JSON is a HARD die — never a silent
-        fall-through to "no header" (which would run on stale config values that
-        differ per planner model). Body JSON examples are never extracted.
-      * A genuinely absent header returns (None, text); the caller must surface it.
-    """
-    # Normalize line endings once so a CRLF/CR plan.md (Windows or some LLMs) is
-    # parsed identically to LF — otherwise the trailing \r would break the fence
-    # regexes and the header would be silently dropped (fail-open). The returned
-    # body is therefore LF too, which is fine for contract.md.
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    raw = text.lstrip("﻿")
-    stripped = raw.lstrip()
-    m = re.match(r"(`{3,}|~{3,})[ \t]*([^\s`~]*)[ \t]*\n", stripped)
-    if not m or m.group(2) != HEADER_INFO_STRING:
-        return None, text
-    fence = m.group(1)
-    rest = stripped[m.end():]
-    # Closing fence: same char, at least as long as the opener, on its own line
-    # (up to 3 leading spaces allowed, per CommonMark).
-    close = re.search(r"^[ ]{0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*$",
-                      rest, re.MULTILINE)
-    if not close:
-        die("plan.md config header: opening `dev-pipeline-config` fence has no closing fence.")
-    json_text = rest[:close.start()]
-    body = rest[close.end():]
-    try:
-        header = json.loads(json_text)
-    except json.JSONDecodeError as e:
-        die(f"plan.md config header is not valid JSON: {e}. Fix the "
-            "```dev-pipeline-config block (no trailing commas, comments, or smart quotes).")
-    if not isinstance(header, dict):
-        die("plan.md config header must be a JSON object.")
-    return header, body
-
 
 def _get_nested(d: dict, path):
     cur = d
@@ -483,29 +411,15 @@ def _set_nested(d: dict, path, value) -> None:
     cur[path[-1]] = value
 
 
-def merge_plan_header(cfg: dict, header: dict, exec_allowed: bool):
-    """Per-leaf deep-merge the whitelisted header leaves into cfg (in place).
-
-    Only whitelisted leaves are copied — never `runners`, never any key outside
-    the prose/exec whitelists. Prose keys always merge; exec/gate keys merge only
-    when exec_allowed. Siblings the header omits are preserved (per-leaf, not
-    subtree replace). Returns (applied, skipped_exec) dotted-path lists for the
-    caller to report.
-    """
-    applied, skipped_exec = [], []
-    if not isinstance(header, dict):
-        return applied, skipped_exec
-    for path in sorted(_HEADER_PROSE_KEYS | _HEADER_EXEC_KEYS):
-        present, val = _get_nested(header, list(path))
-        if not present:
-            continue
-        dotted = ".".join(path)
-        if path in _HEADER_EXEC_KEYS and not exec_allowed:
-            skipped_exec.append(dotted)
-            continue
-        _set_nested(cfg, list(path), val)
-        applied.append(dotted)
-    return applied, skipped_exec
+def _deep_merge(dst: dict, src: dict) -> None:
+    """Recursively merge src into dst (in place). Dicts merge key-by-key so a
+    partial values file only overrides the leaves it names; every non-dict value
+    (including a list such as a role's whole `runners` array) replaces wholesale."""
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _deep_merge(dst[k], v)
+        else:
+            dst[k] = v
 
 
 def _strip_code_fences(text: str) -> str:
@@ -547,8 +461,8 @@ def _section_body(text: str, name: str) -> str:
 
 
 def validate_plan_body(body: str, tdd_mode: bool) -> list:
-    """Deterministic required-section + non-empty check on the header-stripped
-    plan body (replaces the old LLM `INSUFFICIENT` refusal). Same bar as the
+    """Deterministic required-section + non-empty check on the plan body (the whole
+    plan.md; replaces the old LLM `INSUFFICIENT` refusal). Same bar as the
     spec-author contract: `## Requirements` + `## Acceptance Criteria` always,
     `## Interface` additionally under TDD. Exact H2 headings, code fences ignored.
     Structure only — testability of the ACs is the planner's / user's job.
@@ -690,35 +604,28 @@ def cmd_init(args) -> None:
         pathlib.Path(args.project or ".").resolve() / ".dev-pipeline" / "dev-pipeline.config.json"
     )
     if not config_path.exists():
-        die(f"Config file not found: {config_path}\n  Run /dev-pipeline once — it bootstraps .dev-pipeline/dev-pipeline.config.json from the template on first run — then fill in the tester instructions and re-run.")
+        die(f"Config file not found: {config_path}\n  Run /dev-pipeline once — it bootstraps .dev-pipeline/dev-pipeline.config.json from the template on first run, then walks you through `--update-config` to fill it in — and re-run.")
 
     cfg = load_json(config_path)
 
-    # --- Parse + merge the plan.md config header into the in-memory cfg (which
-    #     becomes this run's config.snapshot.json). config.json on disk is NEVER
-    #     rewritten (per-run, idempotent). plan.md is untrusted: only whitelisted
-    #     leaves merge; executable/gate keys need approval (--header-approved) or
-    #     the durable driver.allow_unattended_header_merge opt-in. ---
-    plan_text = plan_path.read_text(encoding="utf-8")
-    header, body = parse_plan_header(plan_text)
-    exec_allowed = bool(getattr(args, "header_approved", False)) or \
-        bool(cfg.get("driver", {}).get("allow_unattended_header_merge", False))
-    header_applied, header_skipped_exec = [], []
-    if header is not None:
-        header_applied, header_skipped_exec = merge_plan_header(cfg, header, exec_allowed)
+    # --- The plan.md body IS the contract; there is no config header as of 6.0.0.
+    #     config lives only in config.json (set via --update-config / apply-config),
+    #     which is snapshotted per-run into config.snapshot.json. ---
+    body = plan_path.read_text(encoding="utf-8")
 
     tdd_mode = effective_tdd_mode(cfg)
 
-    # --- Validate the MERGED config AND the plan body BEFORE any disk change, so a
+    # --- Validate the config AND the plan body BEFORE any disk change, so a
     #     rejected plan never leaves a half-created run that `advance` could pick
-    #     up (the section gate must not be bypassable). ---
+    #     up (the section gate must not be bypassable). Config completeness is
+    #     enforced here as a safety net — the SKILL runs --update-config first. ---
     errors = validate_config_data(cfg)
     if errors:
         sys.stderr.write("[dev-pipeline] Config validation failed:\n")
         for e in errors:
             sys.stderr.write(f"  - {e}\n")
-        sys.stderr.write("\nFix the plan.md `dev-pipeline-config` header or "
-                         ".dev-pipeline/dev-pipeline.config.json and retry.\n")
+        sys.stderr.write("\nFix .dev-pipeline/dev-pipeline.config.json "
+                         "(run /dev-pipeline --update-config) and retry.\n")
         sys.exit(1)
 
     body_problems = validate_plan_body(body, tdd_mode)
@@ -747,9 +654,10 @@ def cmd_init(args) -> None:
     # Relative target keeps the symlink valid if the project dir is moved/remounted.
     latest_link.symlink_to(pathlib.Path("runs") / rid)
 
-    # The contract = the header-stripped plan body. It is the single artifact the
-    # downstream roles (test author, implementor, reviewer) read; there is no
-    # separate spec.md and no spec-author stage as of 5.0.0.
+    # The contract = the plan body (the whole plan.md, no header to strip as of
+    # 6.0.0). It is the single artifact the downstream roles (test author,
+    # implementor, reviewer) read; there is no separate spec.md and no
+    # spec-author stage.
     contract_path = run_dir / "contract.md"
     contract_path.write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
 
@@ -780,7 +688,8 @@ def cmd_init(args) -> None:
     }
     save_state(run_dir, state_obj)
 
-    # save the MERGED config snapshot (config.json on disk is untouched)
+    # snapshot config.json into the run (config.json on disk is untouched — it is
+    # only ever written by apply-config / the --update-config flow)
     save_json(run_dir / "config.snapshot.json", cfg)
 
     # initialise attempts.md
@@ -788,12 +697,6 @@ def cmd_init(args) -> None:
         "# Attempt History\n\n_No attempts recorded yet._\n", encoding="utf-8"
     )
 
-    notes = []
-    if header is None:
-        notes.append("No `dev-pipeline-config` header found in the plan — using config.json as-is.")
-    if header_skipped_exec:
-        notes.append("Executable/gate header keys were NOT merged (no approval): "
-                     + ", ".join(header_skipped_exec) + " — they come from config.json.")
     emit({
         "state": "init",
         "run_id": rid,
@@ -801,13 +704,9 @@ def cmd_init(args) -> None:
         "contract_path": str(contract_path),
         "plan_path": str(plan_path),
         "tdd_mode": tdd_mode,
-        "header_found": header is not None,
-        "header_applied": header_applied,
-        "header_skipped_exec": header_skipped_exec,
         "directive": "advance",
         "next_action": "advance",
-        "message": ("Init successful. " + (" ".join(notes) + " " if notes else "")
-                    + "Call `driver advance --run <run_dir>` to enter the first stage."),
+        "message": "Init successful. Call `driver advance --run <run_dir>` to enter the first stage.",
     })
 
 
@@ -897,7 +796,7 @@ def cmd_advance(args) -> None:
 
     # --- init ---
     if current == "init":
-        # The contract (header-stripped plan body) is written by `init` itself, so
+        # The contract (the plan body) is written by `init` itself, so
         # it always exists here; a fallback covers runs created before 5.0.0.
         contract_raw = state.get("contract_path") or state.get("spec_path")
         if not contract_raw or not pathlib.Path(contract_raw).exists():
@@ -1185,6 +1084,22 @@ def _ensure_gitignore_entry(project_root: pathlib.Path) -> bool:
     return True
 
 
+def _seed_config_from_template(config_path: pathlib.Path, project_root: pathlib.Path) -> bool:
+    """Seed config_path from config.example.json with `runners` left as the
+    'unconfigured' sentinel, and ensure the .gitignore entry. Returns whether
+    .gitignore was updated. Shared by bootstrap-config and apply-config."""
+    if not EXAMPLE_PATH.exists():
+        die(f"Config template not found: {EXAMPLE_PATH}\n  Re-run install.sh to repair the installation.")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    # The template already ships runners as the sentinel; re-assert it defensively
+    # so a customized template can never seed concrete (executable) runners.
+    cfg = load_json(EXAMPLE_PATH)
+    cfg["runners"] = {role: [{"type": "unconfigured"}] for role in UNCONFIGURABLE_ROLES}
+    save_json(config_path, cfg)
+    is_git_repo = _git_toplevel(project_root) is not None
+    return _ensure_gitignore_entry(project_root) if is_git_repo else False
+
+
 def cmd_bootstrap_config(args) -> None:
     """Create .dev-pipeline/dev-pipeline.config.json from the template if absent.
 
@@ -1200,39 +1115,29 @@ def cmd_bootstrap_config(args) -> None:
     config_path = project_root / ".dev-pipeline" / "dev-pipeline.config.json"
 
     if config_path.exists():
-        # Report whether runners are already configured so the SKILL can decide
-        # whether the interactive setup dialog still needs to run — a first run that
-        # bootstrapped the config then died before setup finished leaves it existing
-        # BUT unconfigured, and must still be finishable (not deadlocked).
+        # Report whether the config is ready to run so the SKILL can decide whether
+        # to run `--update-config` first — a first run that bootstrapped then died
+        # before setup finished leaves it existing BUT incomplete (unconfigured
+        # runners / placeholder instructions), and must still be finishable.
         try:
             existing = load_json(config_path)
             runners_configured = not _unconfigured_runner_roles(existing)
+            # config_complete = runners set AND no placeholders AND schema-valid, i.e.
+            # `init` would accept it as-is (no --update-config needed).
+            config_complete = not validate_config_data(existing)
         except SystemExit:
             runners_configured = None  # unreadable/invalid — let the SKILL surface it
+            config_complete = None
         emit({
             "status": "exists",
             "project_root": str(project_root),
             "config_path": str(config_path),
             "runners_configured": runners_configured,
+            "config_complete": config_complete,
         })
         return
 
-    if not EXAMPLE_PATH.exists():
-        die(f"Config template not found: {EXAMPLE_PATH}\n  Re-run install.sh to repair the installation.")
-
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    # Seed from the template, but leave `runners` UNCONFIGURED (a sentinel, not the
-    # template's concrete claude commands): the SKILL walks the user through an
-    # interactive setup dialog and writes the real choice via `driver set-runners`.
-    # The template file itself is untouched — migrate-config/e2e_llm.py/tests still
-    # read config.example.json directly for its known-good concrete bash defaults.
-    cfg = load_json(EXAMPLE_PATH)
-    cfg["runners"] = {role: [{"type": "unconfigured"}] for role in UNCONFIGURABLE_ROLES}
-    save_json(config_path, cfg)
-
-    # Only touch .gitignore when project_root is actually a git repository.
-    is_git_repo = _git_toplevel(project_root) is not None
-    gitignore_updated = _ensure_gitignore_entry(project_root) if is_git_repo else False
+    gitignore_updated = _seed_config_from_template(config_path, project_root)
 
     emit({
         "status": "created",
@@ -1240,6 +1145,7 @@ def cmd_bootstrap_config(args) -> None:
         "config_path": str(config_path),
         "gitignore_updated": gitignore_updated,
         "runners_configured": False,
+        "config_complete": False,
         "required_fields": [
             "llm.tester.build_instruction",
             "llm.tester.install_instruction",
@@ -1247,71 +1153,56 @@ def cmd_bootstrap_config(args) -> None:
             "llm.test_implementor.framework_instruction",
             "llm.test_implementor.test_paths",
         ],
-        "next_action": "First, run the interactive runner setup: propose a runner (execution "
-                       "mode + LLM/model) for each of implementor/test_implementor/tester/reviewer, "
-                       "confirm with the user, then call `driver set-runners` (see SKILL.md Step 5). "
-                       "Then fill in the tester instructions and (TDD is on by "
-                       "default) the test_implementor framework_instruction + test_paths — or let a "
-                       "plan.md `dev-pipeline-config` header supply them per run. Placeholder <...> "
-                       "values are rejected. To skip TDD, set driver.tdd_mode=false.",
+        "next_action": "Run `/dev-pipeline --update-config <plan>`: recommend a runner (execution "
+                       "mode + LLM/model) per role AND the llm.* instructions + driver gate keys, "
+                       "confirm with the user, then call `driver apply-config` to write them into "
+                       "config.json. Placeholder <...> values are rejected. To skip TDD, set "
+                       "driver.tdd_mode=false.",
     })
 
 
-def cmd_set_runners(args) -> None:
-    """Write the user-confirmed `runners` into a freshly bootstrapped config — the
-    ONE sanctioned exception to 'the SKILL never edits the user's config itself'
-    (SKILL.md Global Rule 10): a one-time interactive setup right after bootstrap,
-    not a workaround for a validation failure. Refuses to run once runners are
-    already configured (edit the config file directly after that point)."""
+def cmd_apply_config(args) -> None:
+    """Merge a partial values file into config.json — the sanctioned config-write
+    path behind the SKILL's `--update-config` flow, and the ONE exception to
+    'the SKILL never edits the user's config itself' (SKILL.md Global Rule 10).
+    Unlike a hand-edit it deep-merges only the leaves the values file names,
+    validates the merged result, and writes atomically; unlike the removed
+    one-time set-runners it is re-runnable (config only ever changes here). Seeds
+    the config from the template first if it does not exist yet."""
     config_path = pathlib.Path(args.config).resolve()
-    cfg = load_json(config_path)
-    # set-runners only seeds a config whose runners are ALL still the sentinel. Give
-    # a message that names which case failed (already/partially configured, or the
-    # role keys are missing) rather than guessing.
-    unconf = set(_unconfigured_runner_roles(cfg))
-    if unconf != set(UNCONFIGURABLE_ROLES):
-        roles = cfg.get("runners") or {}
-        if not unconf:
-            reason = "runners are already configured"
-        elif not isinstance(roles, dict) or set(roles) != set(UNCONFIGURABLE_ROLES):
-            reason = "the config is missing the expected role keys"
+    seeded = False
+    if not config_path.exists():
+        if getattr(args, "project", None):
+            project_root = pathlib.Path(args.project).resolve()
         else:
-            configured = sorted(set(UNCONFIGURABLE_ROLES) - unconf)
-            reason = f"runners are only partially unconfigured (already set: {configured})"
-        die(f"{config_path}: {reason} — set-runners only seeds a freshly bootstrapped config "
-            f"whose runners are all still the 'unconfigured' sentinel. Edit {config_path} "
-            "directly to change runners now.")
+            # Default layout is <root>/.dev-pipeline/dev-pipeline.config.json.
+            project_root = config_path.parent.parent
+        _seed_config_from_template(config_path, project_root)
+        seeded = True
 
-    runners_path = pathlib.Path(args.runners_file).resolve()
-    given = load_json(runners_path)
-    if not isinstance(given, dict):
-        die(f"{runners_path}: must be a JSON object of the form "
-            '{"implementor": [...], "test_implementor": [...], "tester": [...], "reviewer": [...]}.')
+    cfg = load_json(config_path)
 
-    errors = []
-    missing = sorted(r for r in UNCONFIGURABLE_ROLES if r not in given)
-    if missing:
-        errors.append(f"runners file is missing role(s): {missing}")
-    extra = sorted(r for r in given if r not in UNCONFIGURABLE_ROLES)
+    values_path = pathlib.Path(args.values_file).resolve()
+    values = load_json(values_path)
+    if not isinstance(values, dict):
+        die(f"{values_path}: must be a JSON object with any of the keys "
+            '{"driver": {...}, "llm": {...}, "runners": {...}}.')
+    allowed_top = {"driver", "llm", "runners"}
+    extra = sorted(set(values) - allowed_top)
     if extra:
-        errors.append(f"runners file has unknown role(s): {extra}")
-    if not errors:
-        # Validate only the runners themselves. Run the precise business rules FIRST
-        # (they name the exact type/command/key problem — the 3-attempt SKILL repair
-        # loop needs an actionable message), then the schema shape (normalizer enum,
-        # timeout type, unexpected keys) via the same _validate/$ref the full config
-        # check uses. Both reused as-is from validate_config_data.
-        errors.extend(_runner_shape_errors({"runners": given}))
-        config_schema = load_json(SCHEMA_DIR / "config.schema.json")
-        for role, arr in given.items():
-            errors.extend(_validate(arr, {"$ref": "#/$defs/runner_array"}, f"runners.{role}", config_schema))
-    if errors:
-        die("Invalid runners — nothing was written:\n  " + "\n  ".join(errors))
+        die(f"{values_path}: unexpected top-level key(s) {extra}; only {sorted(allowed_top)} may be set.")
 
-    cfg["runners"] = given
-    save_json(config_path, cfg)
-    runners_path.unlink(missing_ok=True)  # only clean up the scratch file on success
-    emit({"ok": True, "config": str(config_path), "runners": sorted(given)})
+    merged = json.loads(json.dumps(cfg))  # deep copy so a validation failure writes nothing
+    _deep_merge(merged, values)
+
+    errors = validate_config_data(merged)
+    if errors:
+        die("Invalid merged config — nothing was written:\n  " + "\n  ".join(errors))
+
+    save_json(config_path, merged)
+    values_path.unlink(missing_ok=True)  # clean up the scratch file on success only
+    emit({"ok": True, "config": str(config_path), "seeded": seeded,
+          "applied": sorted(values), "config_complete": True})
 
 
 # ---------------------------------------------------------------------------
@@ -1323,22 +1214,14 @@ def cmd_validate_config(args) -> None:
     cfg = load_json(config_path)
     plan_path = getattr(args, "plan", None)
     body = None
-    header_applied = []
     if plan_path:
-        # Validate the config EXACTLY as `init` will see it, using the SAME
-        # exec-key trust rule: executable/gate header keys merge only when the
-        # header is approved (--header-approved, passed by the SKILL when the plan
-        # will be approved) or the durable driver.allow_unattended_header_merge is
-        # set. Mirroring init here keeps the planning pre-approval gate honest —
-        # a plan that passes this check passes init under the same approval state.
+        # Validate the plan body EXACTLY as `init` will see it: the whole plan.md
+        # is the contract (no header to strip as of 6.0.0). The config is checked
+        # as-is on disk — a plan that passes here passes init.
         pp = pathlib.Path(plan_path).resolve()
         if not pp.exists():
             die(f"Plan file not found: {pp}")
-        header, body = parse_plan_header(pp.read_text(encoding="utf-8"))
-        exec_allowed = bool(getattr(args, "header_approved", False)) or \
-            bool(cfg.get("driver", {}).get("allow_unattended_header_merge", False))
-        if header is not None:
-            header_applied, _ = merge_plan_header(cfg, header, exec_allowed)
+        body = pp.read_text(encoding="utf-8")
     errors = validate_config_data(cfg)
     if body is not None:
         errors += [f"plan body: {p}" for p in validate_plan_body(body, effective_tdd_mode(cfg))]
@@ -1348,8 +1231,7 @@ def cmd_validate_config(args) -> None:
             sys.stderr.write(f"  - {e}\n")
         sys.exit(1)
     emit({"valid": True, "config": str(config_path),
-          "plan": str(pathlib.Path(plan_path).resolve()) if plan_path else None,
-          "header_applied": header_applied})
+          "plan": str(pathlib.Path(plan_path).resolve()) if plan_path else None})
 
 
 # ---------------------------------------------------------------------------
@@ -1800,8 +1682,8 @@ def cmd_run_stage(args) -> None:
         if t not in RUNNER_TYPES:
             if t == "unconfigured":
                 die(f"config.runners.{role} is still the 'unconfigured' sentinel — this snapshot "
-                    "was created before runner setup completed. Configure runners (driver "
-                    "set-runners / the /dev-pipeline setup dialog) and start a new run.")
+                    "was created before runner setup completed. Configure runners "
+                    "(/dev-pipeline --update-config) and start a new run.")
             die(f"config.runners.{role} has an unsupported runner type {t!r} — this run was "
                 "likely created by a pre-3.0.0 driver. Start a new run (its snapshot is frozen).")
         if t == "bash" and not r.get("command"):
@@ -1845,6 +1727,20 @@ def cmd_run_stage(args) -> None:
     # so runners[0] is authoritative — no cross-type fallback here.
     mode = runners[0].get("type")
     if mode in ("main-session", "subagent"):
+        # Persona injection: a main-session/subagent executor runs inside the host
+        # session (main-session shares its live context; a subagent has only the
+        # prompt we assemble — no host agent-definition file). Neither has a bash
+        # runner's fresh subprocess + hard tool sandbox, so prepend a firm
+        # role-switch preamble to the assembled system prompt so prior-role/context
+        # bleed cannot weaken this role (esp. the reviewer's independence).
+        persona = (
+            f"You are now acting SOLELY as the dev-pipeline {role.replace('_', ' ')}. "
+            "This is a fresh role assignment: disregard any prior role, plan, or "
+            "conversation context in this session. The instructions below and the "
+            "inputs you are given are your ONLY source of truth — follow them and "
+            "nothing else.\n\n---\n\n"
+        )
+        system_file.write_text(persona + system_text, encoding="utf-8")
         directive = ""
         if meta["category"] == "json":
             directive += output_directive(runners[0])
@@ -1965,38 +1861,36 @@ def cmd_finalize_stage(args) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Subcommand: migrate-config (pre-3.0.0 → bash runners)
+# Subcommand: migrate-config (legacy runners → 'unconfigured' sentinel)
 # ---------------------------------------------------------------------------
 
 def cmd_migrate_config(args) -> None:
-    """Convert an old config to the current bash-runner shape: replace the whole
-    runners section with the canonical bash defaults. This also drops a removed
-    role like the pre-5.0.0 spec_author (no longer a runner). The driver and llm
-    sections are preserved; only runners are rewritten."""
+    """Convert an old config to the current shape: reset the whole runners section
+    to the 'unconfigured' sentinel (the user then reconfigures via --update-config).
+    This also drops a removed role like the pre-5.0.0 spec_author (no longer a
+    runner). The driver and llm sections are preserved; only runners are rewritten."""
     config_path = pathlib.Path(args.config).resolve()
     cfg = load_json(config_path)
-    # migrate-config is for converting a LEGACY (pre-3.0.0) config. Refuse a freshly
-    # bootstrapped, still-unconfigured config — replacing its sentinels with concrete
-    # bash defaults would silently bypass the interactive runner-setup dialog.
+    # migrate-config converts a LEGACY (pre-3.0.0) config's runners. Refuse a freshly
+    # bootstrapped, already-unconfigured config — there is nothing to migrate.
     if _unconfigured_runner_roles(cfg):
-        die(f"{config_path}: runners are still the 'unconfigured' sentinel (a freshly "
+        die(f"{config_path}: runners are already the 'unconfigured' sentinel (a freshly "
             "bootstrapped config). migrate-config converts a legacy config's runners — it is not "
-            "the setup path. Run /dev-pipeline (interactive setup) or `driver set-runners` instead.")
+            "the setup path. Run `/dev-pipeline --update-config` to configure runners.")
     legacy = _legacy_runner_roles(cfg)
-    replaced = sorted((cfg.get("runners") or {}).keys())  # ALL roles are replaced wholesale
-    example = load_json(EXAMPLE_PATH)
+    replaced = sorted((cfg.get("runners") or {}).keys())  # ALL roles are reset wholesale
     out = pathlib.Path(args.out).resolve() if args.out else config_path
     # Back up the original (in place only) before overwriting runners wholesale.
     if not args.out:
         save_json(out.with_suffix(out.suffix + ".bak"), cfg)
-    cfg["runners"] = example["runners"]
+    cfg["runners"] = {role: [{"type": "unconfigured"}] for role in UNCONFIGURABLE_ROLES}
     save_json(out, cfg)
     emit({"migrated": True, "config": str(out),
           "legacy_roles": legacy, "replaced_roles": replaced,
           "backup": (str(out.with_suffix(out.suffix + ".bak")) if not args.out else None),
-          "warning": "ALL runners were replaced with the current bash defaults; any removed role "
+          "warning": "ALL runners were reset to the 'unconfigured' sentinel; any removed role "
                      "(e.g. the pre-5.0.0 spec_author) is dropped and any custom runner commands "
-                     "were lost (see the .bak). Review and customize."})
+                     "were lost (see the .bak). Run `/dev-pipeline --update-config` to reconfigure."})
 
 
 # ---------------------------------------------------------------------------
@@ -2011,16 +1905,17 @@ WORKFLOW OVERVIEW
 1. Install dev-pipeline into your project:
      bash /path/to/dev-pipeline/install.sh /path/to/project
 2. Invoke the SKILL inside your agent host:
+     /dev-pipeline --update-config "<plan>"         (recommend + write config.json)
      /dev-pipeline --request "<what to build>"      (planner writes plan.md for you)
      /dev-pipeline --plan plan.md                   (run an existing plan.md)
-   A plan.md carries a leading ```dev-pipeline-config header (tester instructions,
-   tdd_mode, …) plus a spec body (Requirements, Acceptance Criteria, Interface).
-   On first run the config is bootstrapped from the template; the plan header can
-   supply the per-run instructions.
+   A plan.md is a pure spec body (Requirements, Acceptance Criteria, Interface) —
+   no config header. Config (runners, tester instructions, tdd_mode, …) lives only
+   in config.json; --update-config recommends the values and writes them. --plan /
+   --request auto-run --update-config first when the config is incomplete.
 
 STATES
 ------
-  init                → merge plan header + validate config/contract, write contract.md
+  init                → validate config + contract, snapshot config, write contract.md
   test_implementation → (TDD) test author writes tests from the contract
   red_test            → (TDD) tester proves the tests FAIL before any code exists
   implementation      → implementor agent writes code
@@ -2029,7 +1924,7 @@ STATES
   done                → commit, retrospective, (optional) self-evolution
   failed              → stopped due to exhausted iterations or environment error
 
-  TDD flow (default; disable with driver.tdd_mode=false in the config/header):
+  TDD flow (default; disable with driver.tdd_mode=false in the config):
     init → test_implementation → red_test → implementation → test → review → done
   Legacy flow (tdd off):
     init → implementation → test → review → done
@@ -2037,8 +1932,8 @@ STATES
 DRIVER CLI
 ----------
   bootstrap-config Seed .dev-pipeline/dev-pipeline.config.json (runners left unconfigured)
-  set-runners      One-time write of the user-confirmed runners into a fresh config
-  init             Create a new run from a plan + config  [--header-approved]
+  apply-config     Merge a values file into config.json (validated, atomic; --update-config)
+  init             Create a new run from a plan + config
   advance          Compute and apply the next state transition
   status           Print current run state
   validate-config  Check config completeness and schema   [--plan <path>]
@@ -2049,7 +1944,7 @@ DRIVER CLI
   record-changes   Accumulate pipeline-produced files into changed-manifest.txt
   run-stage        Execute a role via its configured runner (bash), or hand off (main-session/subagent)
   finalize-stage   Normalize + schema-validate a json result the SKILL got from a main-session/subagent runner
-  migrate-config   Convert an old config's runners to the current bash defaults
+  migrate-config   Reset an old config's runners to the 'unconfigured' sentinel
   --version        Print the dev-pipeline version and exit
   --help           Show this message
 
@@ -2062,11 +1957,11 @@ ITERATION LIMITS
 
 TDD MODE
 --------
-  tdd_mode (config / plan header, default true) — author tests first and prove
-  they fail (RED) before writing code, then make them pass (GREEN). The single
-  source is driver.tdd_mode (a plan.md header can set it); it is frozen into the
-  run at init. When enabled, llm.test_implementor (focus, framework_instruction,
-  test_paths) and runners.test_implementor are required.
+  tdd_mode (config, default true) — author tests first and prove they fail (RED)
+  before writing code, then make them pass (GREEN). The single source is
+  driver.tdd_mode; it is frozen into the run at init. When enabled,
+  llm.test_implementor (focus, framework_instruction, test_paths) and
+  runners.test_implementor are required.
 
 REVIEW GATE
 -----------
@@ -2101,19 +1996,15 @@ def main() -> None:
     p_bc = sub.add_parser("bootstrap-config")
     p_bc.add_argument("--project")
 
-    p_sr = sub.add_parser("set-runners")
-    p_sr.add_argument("--config", required=True)
-    p_sr.add_argument("--runners-file", dest="runners_file", required=True)
+    p_ac = sub.add_parser("apply-config")
+    p_ac.add_argument("--config", required=True)
+    p_ac.add_argument("--values-file", dest="values_file", required=True)
+    p_ac.add_argument("--project")
 
     p_init = sub.add_parser("init")
     p_init.add_argument("--plan", required=True)
     p_init.add_argument("--config")
     p_init.add_argument("--project")
-    # Human approved this plan's header (per --request approval / --plan confirm),
-    # so its executable/gate keys (tester.* commands, test_paths, review_block_
-    # severity, tdd_mode) may be merged from the untrusted plan.md. Without it,
-    # those keys come from config.json (unless driver.allow_unattended_header_merge).
-    p_init.add_argument("--header-approved", dest="header_approved", action="store_true")
 
     p_adv = sub.add_parser("advance")
     p_adv.add_argument("--run", required=True)
@@ -2123,11 +2014,9 @@ def main() -> None:
 
     p_vc = sub.add_parser("validate-config")
     p_vc.add_argument("--config", required=True)
-    # Optional: merge a plan.md header and check the plan body, i.e. validate the
-    # config exactly as `init` will see it for that plan. --header-approved mirrors
-    # init's trust gate so the check matches init under the same approval state.
+    # Optional: also check a plan body (the whole plan.md is the contract), i.e.
+    # validate the config exactly as `init` will see it for that plan.
     p_vc.add_argument("--plan")
-    p_vc.add_argument("--header-approved", dest="header_approved", action="store_true")
 
     p_vr = sub.add_parser("validate-result")
     p_vr.add_argument("--type", required=True, choices=["test", "review"])
@@ -2173,7 +2062,7 @@ def main() -> None:
 
     dispatch = {
         "bootstrap-config": cmd_bootstrap_config,
-        "set-runners":      cmd_set_runners,
+        "apply-config":     cmd_apply_config,
         "init":             cmd_init,
         "advance":          cmd_advance,
         "status":           cmd_status,

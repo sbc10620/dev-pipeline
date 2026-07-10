@@ -27,17 +27,9 @@
     }
   },
   "runners": {
-    "implementor": [
-      { "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Edit Write Bash" }
-    ],
-    "test_implementor": [
-      { "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Edit Write" }
-    ],
-    "tester": [
-      { "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Bash > {output_file}", "normalizer": "claude-cli" }
-    ],
-    "reviewer": [
-      { "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Grep Glob > {output_file}", "normalizer": "claude-cli" }
-    ]
+    "implementor": [{ "type": "unconfigured" }],
+    "test_implementor": [{ "type": "unconfigured" }],
+    "tester": [{ "type": "unconfigured" }],
+    "reviewer": [{ "type": "unconfigured" }]
   }
 }

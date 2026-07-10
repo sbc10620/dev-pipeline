@@ -120,7 +120,7 @@ class E2ETestCase(unittest.TestCase):
         plan = self._write_plan(tdd)
         return e2e_lib.run_pipeline_to_done(
             project_root=self.proj, driver_path=DRIVER,
-            plan_path=plan, config_path=cfg, tdd_mode=tdd, header_approved=True)
+            plan_path=plan, config_path=cfg, tdd_mode=tdd)
 
     # -- the two cases -----------------------------------------------------
 

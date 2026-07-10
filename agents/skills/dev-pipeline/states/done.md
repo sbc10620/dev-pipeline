@@ -53,7 +53,7 @@
   _Orchestrator (main session) model: <model executing this skill>._
 
   ### planning / init state
-  - Method: conversational planner (dp-planner.md) if run with --request, else the user's plan.md; init merged the header + validated the contract
+  - Method: conversational planner (dp-planner.md) if run with --request, else the user's plan.md; config set via --update-config; init validated the config + contract
   - <issues, or "No issues">
 
   ### test_implementation state   (TDD only)

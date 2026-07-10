@@ -137,15 +137,13 @@ def _diff_paths(diff_text):
 
 
 def run_pipeline_to_done(project_root, driver_path, plan_path, config_path,
-                         tdd_mode, header_approved=True, max_steps=40):
+                         tdd_mode, max_steps=40):
     """Drive a run from init to done/failed, mirroring the SKILL. Returns a
     summary dict. Raises PipelineError on a stage failure."""
     proj = pathlib.Path(project_root)
     driver_path = pathlib.Path(driver_path)
 
     args = ["init", "--plan", str(plan_path), "--config", str(config_path), "--project", str(proj)]
-    if header_approved:
-        args.append("--header-approved")
     iproc, init = _driver(driver_path, *args)
     if not init:
         raise PipelineError(f"init failed: {iproc.stdout}\n{iproc.stderr}")

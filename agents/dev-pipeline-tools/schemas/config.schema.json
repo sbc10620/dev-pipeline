@@ -27,9 +27,6 @@
         "run_self_evolution": {
           "type": "boolean"
         },
-        "allow_unattended_header_merge": {
-          "type": "boolean"
-        },
         "review_block_severity": {
           "oneOf": [
             {

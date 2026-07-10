@@ -9,6 +9,27 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.0.0] - 2026-07-10
+
+Config/plan flow redesign: the `plan.md` config header is **removed**, config lives solely in `config.json` and is written by a new conversational **`--update-config`** flow, and `main-session`/`subagent` handoffs get a firm persona-switch preamble. Folds in the reviewer-independence guidance drafted for 5.4.1. **Breaking** — existing installs must reconfigure.
+
+### Removed (breaking)
+- **The `plan.md` `dev-pipeline-config` header is gone.** `plan.md` is now a pure spec body (Requirements, Acceptance Criteria, Interface). All header machinery is deleted: `parse_plan_header`, `merge_plan_header`, the `_HEADER_PROSE_KEYS`/`_HEADER_EXEC_KEYS` whitelists, the `--header-approved` flag (on `init` and `validate-config`), and the `driver.allow_unattended_header_merge` opt-in. `init` now reads the whole plan file as the contract and snapshots `config.json` verbatim; there is nothing untrusted to merge, which **simplifies the trust model** (the plan carries no config).
+- **`driver set-runners` is replaced by `driver apply-config`** (see Added). The one-time, runners-only, refuse-when-configured write is gone; config setup is now the re-runnable `apply-config`.
+
+### Added
+- **`driver apply-config --config <path> --values-file <path>`** — the sanctioned config-write path behind `--update-config`. Deep-merges a partial `{driver?, llm?, runners?}` values file into `config.json` (only the named leaves change; a role's whole `runners` array replaces wholesale), validates the merged result (placeholders/invalid runners → nothing written), writes atomically, and seeds the config from the template first if absent. Unlike the removed `set-runners`, it is **re-runnable** — config only ever changes here, kept conservative.
+- **`--update-config <plan>` entry mode + `states/update_config.md`** — a conversational, host-session step (like the planner) that recommends the per-role **runners** (execution mode + model), the **`llm.*`** instructions, and the **`driver`** gate keys for a plan, gets the user's approval (required even under `--auto-run`), and calls `apply-config`. `--plan`/`--request` **auto-run** it when the config is incomplete; run it standalone to reconfigure.
+- **`bootstrap-config` reports `config_complete`** — true when `config.json` is ready to run (runners configured **and** no placeholders), so the SKILL knows whether the config gate needs to run. Reported on both the `created` and `exists` paths.
+- **`main-session`/`subagent` persona injection** — `run-stage` now prepends a firm role-switch preamble to the assembled system prompt for handoff modes ("act SOLELY as the dev-pipeline `<role>` … disregard any prior role, plan, or conversation context"), so prior-role/context bleed cannot weaken the role (especially the reviewer's independence). Bash runners are unaffected (fresh subprocess + hard sandbox).
+- **Reviewer-independence rule in `dp-reviewer.md`** (drafted for 5.4.1, shipped here) — "You did not write this code — review it as an independent auditor; judge only the diff+contract from disk, do not rely on prior context or memory of how it was produced." Assembled into the reviewer prompt for **every** mode. **Honest limit:** a same-session reviewer retains latent memory after compaction, so this is best-effort independence, not equivalent to a fresh subagent — ordering stays bash/subagent > main-session.
+
+### Changed
+- **`config.example.json` ships `runners` as the `unconfigured` sentinel** (was concrete claude bash defaults). The test suite and the real-LLM e2e harness now define their concrete runners inline instead of reading them from the template.
+- **`migrate-config` resets runners to `unconfigured`** (was: replace with the template's bash defaults) — a legacy config is converted to the setup state, then reconfigured via `--update-config`.
+- **The 5.4.0 absolute ban on a `main-session` reviewer alongside a `main-session` implementor is relaxed to a preference** (drafted for 5.4.1). It over-restricted the exact host it targeted: one with *neither* an LLM CLI *nor* a subagent tool forces every role to `main-session`. Now: prefer `subagent`/`bash` for the reviewer; a `main-session` reviewer is acceptable **only as a last resort**, as a best-effort gate (compact first, rely on the persona preamble + the reviewer's independence rule, warn the user).
+- **Global Rule 10's config-write exception** now names the `--update-config`/`apply-config` flow (was `set-runners`). `SKILL.md` gains the `--update-config` entry mode and config gate, drops the header trust gate (old Step 7) and the runner-setup dialog (old Step 5, subsumed by `--update-config`); `states/planning.md` writes a spec-only plan; `dp-planner.md` no longer authors a config header. `AGENTS.md`/`README.md`/`install.sh` updated to match.
+
 ## [5.4.0] - 2026-07-09
 
 `config.runners` — previously the one setting nobody ever inferred or confirmed — is now configured through a one-time interactive dialog right after the config is first bootstrapped, instead of silently copying the template's concrete claude commands.

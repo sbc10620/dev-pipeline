@@ -99,7 +99,7 @@ cp "${SOURCE_SKILL}/SKILL.md" "${SKILLS_DST}/SKILL.md"
 echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/SKILL.md"
 
 # Copy per-state orchestration files (the SKILL reads states/<state>.md per transition)
-for f in planning init test_implementation red_test implementation test review done failed; do
+for f in update_config planning init test_implementation red_test implementation test review done failed; do
   src="${SOURCE_SKILL}/states/${f}.md"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Source file not found: ${src}"
@@ -107,7 +107,7 @@ for f in planning init test_implementation red_test implementation test review d
   fi
   cp "${src}" "${SKILLS_DST}/states/${f}.md"
 done
-echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/states/ (9 files)"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/states/ (10 files)"
 
 # Copy driver script (must be co-located with schemas for standalone operation)
 cp "${SOURCE_TOOLS}/driver.py" "${SKILLS_DST}/driver.py"
@@ -237,15 +237,16 @@ echo ""
 echo "Next steps:"
 echo "  1. In your agent host, run either:"
 echo "       /dev-pipeline --request \"<what to build>\"   (planner writes plan.md for you)"
-echo "       /dev-pipeline --plan plan.md                 (run an existing plan.md)"
+echo "       /dev-pipeline --plan plan.md                 (run an existing plan.md spec)"
 echo "     The first run creates ${RUNTIME_DIR}/dev-pipeline.config.json from the template."
 echo ""
-echo "  2. Provide the tester/test_implementor instructions either in that config OR in"
-echo "     the plan.md 'dev-pipeline-config' header (the planner fills the header for you)."
+echo "  2. Config (runners + tester/test_implementor instructions + gate keys) is set by"
+echo "       /dev-pipeline --update-config <plan>, which recommends the values and writes them."
+echo "       --plan/--request auto-run it when the config is incomplete."
 echo "       config: llm.tester.build_instruction / install_instruction / test_instruction;"
 echo "       TDD on by default → llm.test_implementor.framework_instruction + test_paths"
 echo "       (set driver.tdd_mode=false to skip TDD)."
-echo "     The default runners call the 'claude' CLI (add other CLIs like 'codex' via config.runners)."
-echo "     SECURITY: default runners run headless without a sandbox and treat plan.md /"
-echo "       the contract as untrusted; a plan header's executable/gate keys merge only"
-echo "       with your approval. Run dev-pipeline in a sandboxed/throwaway environment."
+echo "     Runners are chosen per role (bash CLI / subagent / main-session); a bash runner"
+echo "       calling e.g. the 'claude' or 'codex' CLI is the only mode with a hard tool sandbox."
+echo "     SECURITY: runners treat plan.md / the contract as untrusted; a bash runner runs"
+echo "       headless with only its scoped tools. Run dev-pipeline in a sandboxed/throwaway env."

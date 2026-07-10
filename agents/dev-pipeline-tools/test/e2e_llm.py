@@ -29,6 +29,16 @@ from test_driver import DRIVER
 
 EXAMPLE = pathlib.Path(DRIVER).parent / "config.example.json"
 
+# config.example.json ships runners as the 'unconfigured' sentinel (the user picks
+# them via --update-config), so this real-LLM harness defines the concrete claude
+# runners it needs inline.
+CLAUDE_RUNNERS = {
+    "implementor": [{"type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Edit Write Bash"}],
+    "test_implementor": [{"type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Edit Write"}],
+    "tester": [{"type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Bash > {output_file}", "normalizer": "claude-cli"}],
+    "reviewer": [{"type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Grep Glob > {output_file}", "normalizer": "claude-cli"}],
+}
+
 SRC_INIT = ""
 TEST_SEED = '''import unittest
 from src.mathutil import is_prime
@@ -87,7 +97,8 @@ def _setup(root, tdd):
     if not tdd:  # legacy flow has no test author — seed the tests
         (proj / "tests" / "test_math.py").write_text(TEST_SEED)
 
-    cfg = json.loads(EXAMPLE.read_text())  # sonnet claude runners
+    cfg = json.loads(EXAMPLE.read_text())
+    cfg["runners"] = json.loads(json.dumps(CLAUDE_RUNNERS))  # real sonnet claude runners
     cfg["driver"]["tdd_mode"] = tdd
     cfg["driver"]["run_self_evolution"] = False
     cfg["llm"]["implementor"]["design_instruction"] = (
@@ -120,7 +131,7 @@ def _run_one(root, tdd):
     try:
         s = e2e_lib.run_pipeline_to_done(
             project_root=proj, driver_path=DRIVER, plan_path=plan,
-            config_path=cfg, tdd_mode=tdd, header_approved=True)
+            config_path=cfg, tdd_mode=tdd)
     except Exception as e:  # PipelineError or a malformed echo — report, don't crash
         print(f"  FAILED ({type(e).__name__}): {e}")
         return False
