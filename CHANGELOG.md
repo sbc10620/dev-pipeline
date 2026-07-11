@@ -9,6 +9,11 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.1.1] - 2026-07-11
+
+### Removed
+- **The review-result `source` field.** It was write-only provenance: no state file read it, `done.md` never surfaced it, and it duplicated `config.snapshot.json`'s `runners.reviewer[0].type`. It was also the root cause of a correctness bug — `dp-reviewer.md` told the role to always emit `"source": "bash-runner"`, and the driver only corrected it to the true execution mode inside `finalize-stage`/`run-stage`'s `judge()`; if that stamp step was ever skipped (e.g. a `subagent`/`main-session` reviewer whose `finalize-stage` call didn't run), the false `bash-runner` value passed `advance`'s schema re-validation undetected, because it was a valid enum member. Removing the field removes the possibility of a false value entirely. `review-result.schema.json` drops `source` from both `required` and `properties`; `dp-reviewer.md`'s example output and checklist no longer mention it; `_finalize_json` no longer takes a `source` argument.
+
 ## [6.1.0] - 2026-07-10
 
 Re-introduces `--resume`, removes an orphaned subcommand, and folds Karpathy-style discipline into the authoring role prompts.

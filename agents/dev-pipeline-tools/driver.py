@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "6.1.0"
+__version__ = "6.1.1"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -1074,8 +1074,7 @@ def cmd_advance(args) -> None:
 
         if passes:
             transition("done", "review_pass",
-                       extra={"directive": "finalize",
-                              "source": result.get("source")})
+                       extra={"directive": "finalize"})
         else:
             state["iterations"]["review"] += 1
             if state["iterations"]["review"] > state["max"]["review"]:
@@ -1783,23 +1782,17 @@ def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
-def _finalize_json(output_file: pathlib.Path, normalizer: str, schema_name, source=None) -> "str | None":
+def _finalize_json(output_file: pathlib.Path, normalizer: str, schema_name) -> "str | None":
     """Normalize a json-role's output file (strip markdown fences / prose wrappers),
     schema-validate it, and persist the canonical JSON back. Returns None on success
     or a short problem string. Shared by run-stage's bash `judge()` and
     `cmd_finalize_stage`, so a json result validates identically no matter whether a
-    bash CLI, a subagent, or the main session produced it.
-
-    `source` (review results only): the driver stamps the TRUE execution mode here
-    (`bash-runner` / `host-subagent` / `main-session`) — the role can't know its own
-    runner (first principle), so we overwrite whatever it wrote before validating."""
+    bash CLI, a subagent, or the main session produced it."""
     if not output_file.exists():
         return "output not produced"
     result = _normalize_output(output_file.read_text(encoding="utf-8"), normalizer)
     if result is None:
         return "no valid JSON in output"
-    if source and isinstance(result, dict) and schema_name == "review-result":
-        result["source"] = source
     if schema_name:
         errs = validate_against_schema(result, f"{schema_name}.schema.json")
         if errs:
@@ -1808,10 +1801,6 @@ def _finalize_json(output_file: pathlib.Path, normalizer: str, schema_name, sour
     # json.loads, so persist the canonical object regardless of how it was formatted.
     output_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return None
-
-
-# Maps a runner's execution type to the review-result `source` the driver stamps.
-_SOURCE_BY_MODE = {"bash": "bash-runner", "subagent": "host-subagent", "main-session": "main-session"}
 
 
 def cmd_run_stage(args) -> None:
@@ -1953,8 +1942,7 @@ def cmd_run_stage(args) -> None:
             return (None if proc.returncode == 0 else f"exit {proc.returncode}: {proc.stderr[-300:]}"), proc.returncode
         # json role — shared normalize → schema → persist-canonical (same path a
         # subagent/main-session result takes via cmd_finalize_stage).
-        src = _SOURCE_BY_MODE["bash"] if role == "reviewer" else None
-        problem = _finalize_json(output_file, runner.get("normalizer", "default"), meta["schema"], source=src)
+        problem = _finalize_json(output_file, runner.get("normalizer", "default"), meta["schema"])
         if problem:
             # keep the stderr tail visible for produce/parse failures, as before
             return (problem if problem.startswith("schema:") else problem + err), proc.returncode
@@ -2028,8 +2016,7 @@ def cmd_finalize_stage(args) -> None:
     # a host model may fence its output despite the "no fences" directive, and a
     # too-strict passthrough would dead-end the run.
     normalizer = first.get("normalizer", "default")
-    src = _SOURCE_BY_MODE.get(first.get("type")) if role == "reviewer" else None
-    problem = _finalize_json(output_file, normalizer, meta["schema"], source=src)
+    problem = _finalize_json(output_file, normalizer, meta["schema"])
     if problem:
         emit({"ok": False, "role": role, "problem": problem, "output_file": str(output_file)})
         sys.exit(2)

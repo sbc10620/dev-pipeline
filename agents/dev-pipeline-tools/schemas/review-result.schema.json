@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "summary", "findings", "next_steps", "source"],
+  "required": ["verdict", "summary", "findings", "next_steps"],
   "properties": {
     "verdict": {
       "type": "string",
@@ -30,10 +30,6 @@
     "next_steps": {
       "type": "array",
       "items": { "type": "string", "minLength": 1 }
-    },
-    "source": {
-      "type": "string",
-      "enum": ["bash-runner", "host-subagent", "main-session", "codex-adversarial-review", "claude-subagent"]
     }
   }
 }

@@ -117,7 +117,6 @@ def review_result(verdict="approve", findings=None, **extra):
         "summary": "stub review result",
         "findings": findings if findings is not None else [],
         "next_steps": [],
-        "source": "bash-runner",
     }
     obj.update(extra)
     return obj
@@ -505,7 +504,7 @@ class TestTerminalAndGuards(PipelineTestCase):
         p.write_raw_result_file(
             "review-result.json",
             json.dumps({"verdict": "ok", "summary": "x",
-                        "findings": [], "next_steps": [], "source": "x"}),
+                        "findings": [], "next_steps": []}),
         )
         r = p.advance()
         self.assertNotEqual(r.returncode, 0)
@@ -2183,17 +2182,28 @@ class TestRunnerModes(unittest.TestCase):
         self.assertIn("absolute project root", u)
         self.assertNotIn("valid JSON object", u)  # no json output directive for a file role
 
-    def test_finalize_stage_stamps_true_review_source(self):
-        # The driver overwrites a review's `source` with the true execution mode —
-        # the role can't know its own runner (so a self-reported value is corrected).
+    def test_finalize_stage_review_result_needs_no_source(self):
+        # review-result no longer carries a `source` field at all (the role can't
+        # know its own runner, and nothing downstream consumed it) — a subagent
+        # reviewer's source-less result validates and persists as-is.
+        run_dir, proj, work, sp = self._setup("reviewer", [{"type": "subagent"}])
+        outf = work / "reviewer-output.json"
+        outf.write_text(json.dumps(review_result(verdict="approve")), encoding="utf-8")
+        r = run_driver("finalize-stage", "--run", str(run_dir), "--role", "reviewer", "--stage-input", str(sp))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("source", json.loads(outf.read_text(encoding="utf-8")))
+
+    def test_finalize_stage_rejects_review_result_with_source(self):
+        # Regression guard: if a `source` key reappears (e.g. an old prompt still
+        # emits it), the schema's additionalProperties:false must reject it.
         run_dir, proj, work, sp = self._setup("reviewer", [{"type": "subagent"}])
         outf = work / "reviewer-output.json"
         rr = review_result(verdict="approve")
-        rr["source"] = "bash-runner"  # the role's guess (wrong under a subagent)
+        rr["source"] = "bash-runner"
         outf.write_text(json.dumps(rr), encoding="utf-8")
         r = run_driver("finalize-stage", "--run", str(run_dir), "--role", "reviewer", "--stage-input", str(sp))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(outf.read_text(encoding="utf-8"))["source"], "host-subagent")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("problem", r.stdout)
 
 
 if __name__ == "__main__":

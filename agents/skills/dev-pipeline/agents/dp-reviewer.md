@@ -80,15 +80,13 @@ Output **only** the following JSON, placed exactly where your prompt's output in
   ],
   "next_steps": [
     "<actionable next step>"
-  ],
-  "source": "bash-runner"
+  ]
 }
 ```
 
 - Where a value above is written as several options joined by "or", that is the list of allowed values — emit exactly one of them, never the literal `"X or Y"` string.
 - `verdict` is exactly one of `approve` or `needs-attention` (see Step 3).
 - Each finding's `severity` is exactly one of `critical`, `high`, `medium`, or `low` — choose the single level that best fits the finding.
-- `source` — set it to `"bash-runner"`. You do **not** know how you were actually run, so the driver **overwrites** this field with the true execution mode when it validates your result; just include the field with that default value.
 - `findings` must be an array (empty array `[]` if verdict is `approve`).
 - `line_start` and `line_end` must be integers ≥ 1, or null if the finding is not line-specific.
 - `confidence` must be a number between 0.0 and 1.0.
@@ -98,5 +96,4 @@ Output **only** the following JSON, placed exactly where your prompt's output in
 - [ ] Have I read the full contract including Acceptance Criteria?
 - [ ] Have I reviewed all changed and new files?
 - [ ] Is every finding supported by concrete evidence from the code?
-- [ ] Is `source` present as `"bash-runner"` (the driver corrects it to the true mode)?
 - [ ] Is the output file pure JSON with no surrounding text?
