@@ -21,6 +21,7 @@ Gemini CLI, Cursor, Kiro, OpenCode, …):
   .agents/skills/dev-pipeline/driver.py
   .agents/skills/dev-pipeline/schemas/               (JSON schemas)
   .agents/skills/dev-pipeline/config.example.json    (config template)
+  .agents/skills/dev-pipeline/RUNNERS.md             (verified bash-runner command catalog)
 
 Per-host entry points (added because these hosts don't read .agents/skills yet):
   .claude/skills/dev-pipeline/          real copy — Claude Code doesn't read
@@ -133,6 +134,17 @@ if [[ ! -f "${CONFIG_EXAMPLE}" ]]; then
 fi
 cp "${CONFIG_EXAMPLE}" "${SKILLS_DST}/config.example.json"
 echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/config.example.json"
+
+# Copy the runner catalog (verified bash-runner command templates per role/CLI)
+# so --update-config has known-good commands to draw from without the source
+# repo present.
+RUNNERS_CATALOG="${SOURCE_TOOLS}/RUNNERS.md"
+if [[ ! -f "${RUNNERS_CATALOG}" ]]; then
+  echo "[dev-pipeline] ERROR: Runner catalog not found: ${RUNNERS_CATALOG}"
+  exit 1
+fi
+cp "${RUNNERS_CATALOG}" "${SKILLS_DST}/RUNNERS.md"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/RUNNERS.md"
 
 # --- Claude Code entry point: a REAL copy under .claude/skills/ ---
 # Claude Code does not read .agents/skills yet (anthropics/claude-code#31005) and

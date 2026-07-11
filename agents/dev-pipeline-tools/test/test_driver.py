@@ -1860,6 +1860,160 @@ class TestRunStage(unittest.TestCase):
         self.assertFalse(marker.exists(),
                          "grandchild survived the timeout — process group was not killed")
 
+    def test_success_waits_for_backgrounded_group_mate(self):
+        # 6.2.0 switched _run_one from PIPE+communicate() (which, as a side
+        # effect of waiting for pipe EOF, blocked until every process holding
+        # the write end — including a backgrounded grandchild — closed it) to
+        # a direct file redirect. A file has no EOF to wait on, so without an
+        # explicit fix the direct child's own exit alone would be reported as
+        # "done" even while a same-process-group background job it spawned is
+        # still running and still writing to the log. Confirm the fix: the
+        # runner must not be reported successful until the marker the
+        # backgrounded job creates 2s later actually exists, and the delayed
+        # output must be captured.
+        marker = self.proj / "bg_marker"
+        self._cfg("implementor", [
+            {"type": "bash",
+             "command": f"echo shell-done; (sleep 2; echo grandchild-done; touch {{project_root}}/bg_marker) & true",
+             "timeout": 10},
+        ])
+        r = self._run("implementor", self._si("implementor"))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        self.assertTrue(marker.exists(),
+                         "run-stage reported success before the backgrounded group-mate finished")
+        log_text = pathlib.Path(r.json["log_file"]).read_text(encoding="utf-8")
+        self.assertIn("grandchild-done", log_text)
+
+    def test_runner_log_content_and_path_are_echoed(self):
+        # 6.2.0: a bash runner's stdout+stderr must land in <role>-runner.log
+        # (not be buffered/discarded), and run-stage must echo its path as
+        # log_file. This only checks the FINAL content — see
+        # test_runner_log_streams_in_real_time_while_running for the actual
+        # real-time claim, which this test alone would pass even under a
+        # batch-write-at-exit implementation.
+        self._cfg("implementor", [
+            {"type": "bash", "command": "echo hello-stdout; echo hello-stderr 1>&2"},
+        ])
+        r = self._run("implementor", self._si("implementor"))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        log_path = pathlib.Path(r.json["log_file"])
+        self.assertTrue(log_path.exists())
+        log_text = log_path.read_text(encoding="utf-8")
+        self.assertIn("hello-stdout", log_text)
+        self.assertIn("hello-stderr", log_text)
+
+    def test_runner_log_streams_in_real_time_while_running(self):
+        # The whole point of 6.2.0's logging is observing a runner WHILE it
+        # executes, not only after. Launch run-stage ourselves (bypassing the
+        # blocking self._run helper) so we can poll the log mid-run: the
+        # pre-sleep line must appear before the runner exits, and the
+        # post-sleep line must NOT appear until after it does — a batched,
+        # write-at-exit implementation would fail the second assertion.
+        self._cfg("implementor", [
+            {"type": "bash", "command": "printf 'PRE_MARKER\\n'; sleep 2; printf 'POST_MARKER\\n'"},
+        ])
+        si_path = self._si("implementor")
+        log_path = self.run_dir / "w" / "implementor-runner.log"
+
+        def body():
+            # The header line echoes the command's own source text (for audit),
+            # so both markers are present in it from the moment the header is
+            # written — BEFORE either has actually run. Only content after the
+            # header's closing "-----\n" is real runtime output.
+            if not log_path.exists():
+                return ""
+            return log_path.read_text(encoding="utf-8").split("-----\n", 1)[-1]
+
+        proc = subprocess.Popen(
+            [sys.executable, str(DRIVER), "run-stage", "--run", str(self.run_dir),
+             "--role", "implementor", "--stage-input", str(si_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.time() + 5
+            seen_pre = False
+            while time.time() < deadline:
+                if "PRE_MARKER" in body():
+                    seen_pre = True
+                    break
+                time.sleep(0.05)
+            mid_body = body()
+            self.assertTrue(seen_pre, "log never showed the pre-sleep marker while the runner was still running")
+            self.assertNotIn("POST_MARKER", mid_body,
+                              "post-sleep marker appeared before the sleep finished — log is not streaming live")
+            out, err = proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertIn("POST_MARKER", body())
+
+    def test_runner_log_echoed_and_quoted_on_all_runners_failed(self):
+        # log_file must be present even when every runner failed, and the
+        # failure reason must quote the log (the old proc.stderr[-300:] tail is
+        # gone now that stdout/stderr go straight to a file, not a pipe).
+        self._cfg("implementor", [{"type": "bash", "command": "echo boom 1>&2; exit 1"}])
+        r = self._run("implementor", self._si("implementor"))
+        self.assertNotEqual(r.returncode, 0)
+        j = json.loads(r.stdout)
+        self.assertFalse(j["ok"])
+        self.assertIn("log_file", j)
+        log_text = pathlib.Path(j["log_file"]).read_text(encoding="utf-8")
+        self.assertIn("boom", log_text)
+        self.assertIn("boom", j["attempts"][0]["problem"])
+
+    def test_runner_log_truncated_fresh_each_run_stage_call(self):
+        # A fresh run-stage call for the same role/work_dir must not accumulate
+        # unrelated content from a PRIOR call into the new log.
+        self._cfg("implementor", [{"type": "bash", "command": "echo first-call"}])
+        r1 = self._run("implementor", self._si("implementor"))
+        self.assertIn("first-call", pathlib.Path(r1.json["log_file"]).read_text(encoding="utf-8"))
+
+        self._cfg("implementor", [{"type": "bash", "command": "echo second-call"}])
+        r2 = self._run("implementor", self._si("implementor"))
+        text2 = pathlib.Path(r2.json["log_file"]).read_text(encoding="utf-8")
+        self.assertIn("second-call", text2)
+        self.assertNotIn("first-call", text2)
+
+    def test_output_directive_final_answer_branch_for_output_file_reference(self):
+        # A command whose template references {output_file} (a stdout redirect
+        # like claude's `>`, or a CLI-native flag like codex's `-o`) must be told
+        # to give the JSON as its final answer, NOT to write the file itself —
+        # this is also what keeps claude/codex bash-runner prompts identical.
+        self._cfg("tester", [{"type": "bash", "command": "echo x > {output_file}"}])
+        out = self.run_dir / "tr.json"
+        self._run("tester", self._si("tester", output_file=str(out)))
+        user_text = (self.run_dir / "w" / "tester-user.txt").read_text(encoding="utf-8")
+        self.assertIn("as your final answer only", user_text)
+        self.assertNotIn("Write a single valid JSON object", user_text)
+
+    def test_output_directive_final_answer_branch_for_native_flag_without_redirect(self):
+        # The actual regression this fix targets: a command referencing
+        # {output_file} via a CLI-native flag with NO `>` redirect anywhere
+        # (e.g. codex's `-o {output_file}`). The OLD regex `>\s*\{output_file\}`
+        # would miss this and wrongly fall through to the "write it yourself"
+        # branch — impossible/wrong for a harness-level capture like `-o`. Use
+        # a command shaped like that (no `>` at all) and confirm it still gets
+        # the "final answer" branch, not "write it yourself".
+        self._cfg("tester", [{"type": "bash", "command": "true -o {output_file} --other-flag"}])
+        out = self.run_dir / "tr.json"
+        self._run("tester", self._si("tester", output_file=str(out)))
+        user_text = (self.run_dir / "w" / "tester-user.txt").read_text(encoding="utf-8")
+        self.assertIn("as your final answer only", user_text)
+        self.assertNotIn("Write a single valid JSON object", user_text)
+
+    def test_output_directive_write_branch_for_no_output_file_reference(self):
+        # A command with no {output_file} reference at all (e.g. cline, which has
+        # no clean-stdout mode or native result-file flag) must be told the exact
+        # path to Write the result to.
+        self._cfg("tester", [{"type": "bash", "command": "echo not-json"}])
+        out = self.run_dir / "tr.json"
+        self._run("tester", self._si("tester", output_file=str(out)))
+        user_text = (self.run_dir / "w" / "tester-user.txt").read_text(encoding="utf-8")
+        self.assertIn("Write a single valid JSON object", user_text)
+        self.assertIn(str(out), user_text)
+
 
 class TestConfigMigration(unittest.TestCase):
     """3.0.0: validate-config rejects removed runner types with a migration hint;

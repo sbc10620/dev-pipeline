@@ -29,6 +29,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 
@@ -39,7 +40,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "6.1.1"
+__version__ = "6.2.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -1756,34 +1757,80 @@ def _normalize_output(raw: str, normalizer: str) -> "dict | None":
         return None
 
 
-def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int) -> "subprocess.CompletedProcess":
+def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int,
+             log_path: pathlib.Path) -> "tuple[int | None, str]":
     """Substitute placeholders (shell-quoted) into a command template and run it
-    in a shell with cwd=project_root.
+    in a shell with cwd=project_root, with the runner's combined stdout+stderr
+    connected DIRECTLY to `log_path` (append) — the child writes straight to that
+    fd, so the log grows in real time (observable via `tail -f log_path`) while a
+    long-running LLM CLI is still executing, not only after it exits. Returns
+    (exit_code, this_attempt's log tail): exit_code is None on timeout (the old
+    stderr-based error tail is replaced by a slice of the log written since this
+    attempt started, tracked by byte offset so concurrent attempts in the same
+    run-stage call don't bleed into each other's tail).
 
     start_new_session=True puts the runner in its OWN process group so that a
     timeout (or the driver being interrupted) can SIGKILL the whole group — the
     shell AND the LLM CLI it spawned. Plain subprocess.run kills only the direct
     child shell, orphaning the CLI grandchild (reparented to PID 1) to keep
-    running. After killing the group we only reap the direct child with wait()
-    (which cannot block on an escaped grandchild or its pipes, unlike a post-kill
-    communicate()), then re-raise. Limits: a grandchild that calls setsid() itself
-    escapes the group, and a SIGKILL of the driver leaves nothing to clean up."""
+    running.
+
+    A direct-file redirect (vs. the old PIPE+communicate()) has no EOF to wait
+    on, so the direct child exiting is no longer proof the WHOLE group is done —
+    a runner command that backgrounds part of its own work (`… & true`) would
+    otherwise be reported "finished" while a group-mate is still writing to the
+    log. So on a clean exit we still poll the process group for emptiness,
+    bounded by whatever's left of `timeout`; if group-mates outlive that budget
+    we kill the group and report a timeout, same as the direct-timeout path — a
+    runner can never make this wait longer than its configured timeout. A
+    genuine interrupt (KeyboardInterrupt) still re-raises after cleanup; only a
+    timeout (direct or via a lingering group-mate) is reported back to the caller."""
     cmd = command
     for key, val in subst.items():
         cmd = cmd.replace("{" + key + "}", shlex.quote(str(val)))
-    with subprocess.Popen(cmd, shell=True, cwd=str(project_root),
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          text=True, start_new_session=True) as proc:
-        try:
-            out, err = proc.communicate(timeout=timeout)
-        except BaseException:  # TimeoutExpired or an interrupt (KeyboardInterrupt/SIGINT)
+    with open(log_path, "ab") as logf:
+        header = f"\n----- run @ {datetime.now().isoformat(timespec='seconds')}: {cmd[:200]} -----\n"
+        logf.write(header.encode("utf-8"))
+        logf.flush()
+        start_offset = logf.tell()
+        timed_out = False
+        returncode = None
+        deadline = time.monotonic() + timeout
+        with subprocess.Popen(cmd, shell=True, cwd=str(project_root),
+                              stdout=logf, stderr=subprocess.STDOUT,
+                              start_new_session=True) as proc:
+            pgid = os.getpgid(proc.pid)  # capture while proc is still alive/queryable
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                proc.kill()
-            proc.wait()
-            raise
-        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+                proc.wait(timeout=timeout)
+                returncode = proc.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+            except BaseException:  # a genuine interrupt (KeyboardInterrupt/SIGINT)
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                proc.wait()
+                raise
+            else:
+                # Direct child exited on its own — wait out any group-mate it
+                # left running, within what remains of the timeout budget.
+                while time.monotonic() < deadline:
+                    try:
+                        os.killpg(pgid, 0)  # signal 0: existence check, no-op
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.1)
+                else:
+                    timed_out = True
+            if timed_out:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                proc.wait()
+    tail = log_path.read_bytes()[start_offset:].decode("utf-8", errors="replace")[-300:]
+    return (None if timed_out else returncode), tail
 
 
 def _finalize_json(output_file: pathlib.Path, normalizer: str, schema_name) -> "str | None":
@@ -1872,14 +1919,25 @@ def cmd_run_stage(args) -> None:
     }
 
     def output_directive(runner: dict) -> str:
-        """Per-runner output instruction: a runner that redirects stdout to
-        `{output_file}` (e.g. `codex exec … > {output_file}`) must PRINT the result;
-        one that writes via a tool must WRITE the file. Matches the actual mechanism."""
+        """Per-runner output instruction, two branches by command shape (kept
+        deliberately close so bash-runner prompts stay as similar as possible
+        across CLIs — see AGENTS.md "bash runner prompts should be identical
+        wherever possible"):
+
+        - The command already references `{output_file}` (a stdout redirect like
+          claude's `… > {output_file}`, or a CLI-native result flag like codex's
+          `-o {output_file}` that captures the final answer outside the model's
+          own tool calls) — the harness/shell captures it deterministically, so
+          the model is told to answer normally and NOT write the file itself.
+        - The command has no `{output_file}` reference at all (e.g. cline, which
+          has no clean-stdout or native result-file flag) — the only way to get
+          the result out is the model's own Write tool, so it's told the exact
+          path to write to."""
         if meta["category"] != "json":
             return ""
         what = "a single valid JSON object (no markdown fences, nothing else)"
-        if re.search(r">\s*\{output_file\}", runner.get("command", "")):
-            return f"\n\nOutput {what} to **stdout** only."
+        if "{output_file}" in runner.get("command", ""):
+            return f"\n\nGive {what} as your final answer only — it is captured automatically. Do NOT write it to a file yourself."
         return f"\n\nWrite {what} to this exact file path and nothing else there: {output_file}"
 
     # --- main-session / subagent handoff ---------------------------------------
@@ -1929,28 +1987,34 @@ def cmd_run_stage(args) -> None:
         emit(payload)
         return
 
+    # Fresh log per run-stage invocation (not per retry/fallback runner — every
+    # attempt below appends to the same file so the whole stage's activity reads
+    # as one timeline); only reached on the bash path (the handoff branch above
+    # already returned, and has no subprocess of its own to log).
+    log_path = work / f"{role}-runner.log"
+    log_path.write_text("", encoding="utf-8")
+
     def judge(runner: dict, command: str, timeout: int):
         """Run one command and judge it by category. Returns (problem|None, exit).
         `problem` is None on success, else a short reason string (also fed back on
         the retry)."""
         if meta["category"] == "json" and output_file.exists():
             output_file.unlink()  # clean slate so a stale file isn't mistaken for success
-        try:
-            proc = _run_one(command, subst, project_root, timeout)
-        except subprocess.TimeoutExpired:
-            return "timeout", None
-        # On a non-zero exit, keep a stderr tail so a missing CLI / crash is visible
+        returncode, log_tail = _run_one(command, subst, project_root, timeout, log_path)
+        if returncode is None:
+            return ("timeout" + (f" (log tail: {log_tail})" if log_tail.strip() else "")), None
+        # On a non-zero exit, keep a log tail so a missing CLI / crash is visible
         # in the reason (file roles already include it; do it for json too).
-        err = f" (exit {proc.returncode}: {proc.stderr.strip()[-300:]})" if proc.returncode else ""
+        err = f" (exit {returncode}: {log_tail})" if returncode else ""
         if meta["category"] == "file":
-            return (None if proc.returncode == 0 else f"exit {proc.returncode}: {proc.stderr[-300:]}"), proc.returncode
+            return (None if returncode == 0 else f"exit {returncode}: {log_tail}"), returncode
         # json role — shared normalize → schema → persist-canonical (same path a
         # subagent/main-session result takes via cmd_finalize_stage).
         problem = _finalize_json(output_file, runner.get("normalizer", "default"), meta["schema"])
         if problem:
-            # keep the stderr tail visible for produce/parse failures, as before
-            return (problem if problem.startswith("schema:") else problem + err), proc.returncode
-        return None, proc.returncode
+            # keep the log tail visible for produce/parse failures, as before
+            return (problem if problem.startswith("schema:") else problem + err), returncode
+        return None, returncode
 
     attempts = []
     for idx, runner in enumerate(runners):
@@ -1975,7 +2039,8 @@ def cmd_run_stage(args) -> None:
 
         if problem is None:
             emit({"ok": True, "role": role, "category": meta["category"], "runner": idx,
-                  "used": command, "output_file": str(output_file), "attempts": attempts})
+                  "used": command, "output_file": str(output_file), "log_file": str(log_path),
+                  "attempts": attempts})
             return
         attempts.append({"runner": idx, "exit": exit_code, "problem": problem})
 
@@ -1985,7 +2050,7 @@ def cmd_run_stage(args) -> None:
         output_file.unlink()
 
     emit({"ok": False, "role": role, "category": meta["category"],
-          "reason": "all_runners_failed", "attempts": attempts})
+          "reason": "all_runners_failed", "log_file": str(log_path), "attempts": attempts})
     sys.exit(2)
 
 

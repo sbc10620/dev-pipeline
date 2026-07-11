@@ -13,7 +13,7 @@ The advance that landed here echoed `directive: run_implementor`, `iter_dir`, an
   ```bash
   python3 <driver_path> run-stage --run <run_dir> --role implementor --stage-input <iter_dir>/stage-input.json
   ```
-  Read the JSON. **If `mode` is `main-session`/`subagent`, execute the implementor per [SKILL §Role Execution](../SKILL.md#-role-execution)** (file role: the executor edits production code; an empty [Step 3] delta means it did not run → re-execute once, else stop), then continue. Otherwise: `ok: true` → proceed; `ok: false` → stop and report (`all_runners_failed` lists the `attempts`). The runner edits production code in `project_root` and build-checks it; the driver enforces a bash runner's tool envelope (no test/install stages, no `.dev-pipeline/` edits) via the configured command — you do not pass any flags.
+  For a bash runner, prefer running this in the background and polling `<iter_dir>/implementor-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it. Read the JSON. **If `mode` is `main-session`/`subagent`, execute the implementor per [SKILL §Role Execution](../SKILL.md#-role-execution)** (file role: the executor edits production code; an empty [Step 3] delta means it did not run → re-execute once, else stop), then continue. Otherwise: `ok: true` → proceed; `ok: false` → stop and report (`all_runners_failed` lists the `attempts`). The runner edits production code in `project_root` and build-checks it; the driver enforces a bash runner's tool envelope (no test/install stages, no `.dev-pipeline/` edits) via the configured command — you do not pass any flags.
 
 - [Step 3] **Compute the implementor delta and record the manifest** (git repo). Print this run's delta (modified/deleted tracked + new untracked), one `project_root`-relative path per line:
   ```bash
@@ -40,6 +40,7 @@ The advance that landed here echoed `directive: run_implementor`, `iter_dir`, an
 **Checklist:**
 - [ ] Baseline staged before run-stage (git repos)
 - [ ] `run-stage --role implementor` returned `ok: true`, **or** a `mode` handoff was executed (empty-delta guard applied); else stopped/reported
+- [ ] (bash runner, host permitting) ran in the background with the runner log polled for progress
 - [ ] (TDD) boundary check passed (or single re-run performed)
 - [ ] Manifest recorded with the final delta
 - [ ] `driver advance` called; followed the reported `next_state`

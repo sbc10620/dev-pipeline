@@ -55,7 +55,7 @@ Give it a goal — a **conversational planner** writes a single `plan.md` (a tes
 bash /path/to/dev-pipeline/install.sh /path/to/your/project
 ```
 
-This copies the skill (incl. `states/` and the role prompts under `agents/`), `driver.py`, schemas, and the config template into the canonical `<project>/.agents/skills/dev-pipeline/` (the open Agent Skills standard, read by Codex/Gemini/Cursor/…), plus a real `.claude/skills/` copy for Claude Code and a `.clinerules/workflows/` pointer for Cline. It does NOT create the config — the skill bootstraps `dev-pipeline.config.json` from the template (via `driver bootstrap-config`) into the gitignored `<project>/.dev-pipeline/` directory on the first run (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
+This copies the skill (incl. `states/` and the role prompts under `agents/`), `driver.py`, schemas, the config template, and `RUNNERS.md` (verified bash-runner commands) into the canonical `<project>/.agents/skills/dev-pipeline/` (the open Agent Skills standard, read by Codex/Gemini/Cursor/…), plus a real `.claude/skills/` copy for Claude Code and a `.clinerules/workflows/` pointer for Cline. It does NOT create the config — the skill bootstraps `dev-pipeline.config.json` from the template (via `driver bootstrap-config`) into the gitignored `<project>/.dev-pipeline/` directory on the first run (so it never clutters the project root or gets confused with your own source files). The pipeline runs standalone — the dev-pipeline source repo does not need to be present.
 
 The bootstrapped config starts **incomplete** (runners are the `unconfigured` sentinel; tester instructions are placeholders). The `--update-config` step fills it in: the skill recommends a runner (execution mode + model) per role plus the `llm.*` instructions and `driver` gate keys with its reasoning — confirm or correct in one turn, and it writes them via `driver apply-config`. `--plan`/`--request` run this automatically when the config is incomplete; you can also run `/dev-pipeline --update-config` any time to reconfigure (an optional plan path sharpens the recommendations).
 
@@ -105,17 +105,19 @@ Config lives in `.dev-pipeline/dev-pipeline.config.json`. Normally you set it th
 }
 ```
 
-**Runners (3.0.0 bash; 5.3.0 adds host modes).** Each role runs through `driver run-stage`, which assembles the prompt from the LLM-agnostic `dp-<role>.md` + the stage's inputs. `config.runners.<role>` is an ordered array (homogeneous per role) whose entries pick an **execution mode**:
+**Runners (3.0.0 bash; 5.3.0 adds host modes; 6.2.0 adds `cline` as a third CLI).** Each role runs through `driver run-stage`, which assembles the prompt from the LLM-agnostic `dp-<role>.md` + the stage's inputs. `config.runners.<role>` is an ordered array (homogeneous per role) whose entries pick an **execution mode**:
 
-- `{ "type": "bash", "command": …, "normalizer"?: "default|passthrough" }` — a CLI invocation the driver runs (the default; **the only place an LLM is named**). Placeholders substituted: `{system_file}` `{user_file}` `{output_file}` `{project_root}` `{run_dir}` `{work_dir}`. `normalizer` applies to **json** roles only (tester/reviewer): `default` (the default) tolerates a markdown fence or surrounding prose; `passthrough` requires clean JSON. A file role (implementor/test_implementor) has no JSON output, so a normalizer on it is rejected.
+- `{ "type": "bash", "command": …, "normalizer"?: "default|passthrough" }` — a CLI invocation the driver runs (the default; **the only place an LLM is named**). Placeholders substituted: `{system_file}` `{user_file}` `{output_file}` `{project_root}` `{run_dir}` `{work_dir}`. `normalizer` applies to **json** roles only (tester/reviewer): `default` (the default) tolerates a markdown fence or surrounding prose; `passthrough` requires clean JSON. A file role (implementor/test_implementor) has no JSON output, so a normalizer on it is rejected. **See `agents/dev-pipeline-tools/RUNNERS.md`** for verified command templates per role × CLI (claude/codex/cline) — draw from it instead of composing a command from scratch.
 - `{ "type": "subagent", "model"?: "…", "normalizer"?: … }` — the host session spawns a subagent with the assembled prompt injected (no host-specific agent file; stays LLM-free). Optional `model`. For a **json** role the handoff normalizer defaults to `default` (tolerates fences + bare JSON).
 - `{ "type": "main-session", "normalizer"?: … }` — the host LLM performs the role itself (after compacting the conversation). Works even on hosts without a subagent tool.
 
 For a bash runner the driver runs and validates; for a subagent/main-session runner it **hands the assembled prompt to the SKILL** to execute, then the SKILL validates a JSON result via `driver finalize-stage`. `llm.test_implementor` + `runners.test_implementor` are required only under TDD (default — set `tdd_mode:false` to omit). The `planner` has no runner — it runs conversationally in the host session.
 
-> **Security:** `subagent`/`main-session` runners have **no hard tool sandbox** (LLM-free = no host agent files); their only containment is the role prose. For a read-only role (reviewer/tester) on untrusted code, prefer a **bash** runner with a scoped `--allowedTools`. Prefer `subagent`/`bash` for the reviewer so it isn't the same session that wrote the code (esp. if the implementor is `main-session`); a `main-session` reviewer is a best-effort, self-review-prone gate — acceptable only when the host can run neither a bash runner nor a subagent, and then only after compacting and warning the user. `subagent`/`main-session` are host-coupled (need a host session); `bash` is the portable default.
+**Observability (6.2.0).** A bash runner's combined stdout+stderr streams live to `<iter_dir>/<role>-runner.log` — `run-stage` echoes the path as `log_file`, and on a host that supports backgrounding, the SKILL runs the CLI in the background and polls that log so a multi-minute LLM call doesn't leave the session silent (see `SKILL.md §Role Execution`). What actually shows up there is CLI-dependent — `RUNNERS.md` documents which CLIs stream in real time and which stay quiet by design until they exit.
 
-> **Security:** a bash runner (e.g. `claude -p` / `codex exec`) runs headless with only its scoped `--allowedTools`; `plan.md`/the contract/code are untrusted input, and for handoff modes the driver prepends a persona-switch preamble to keep the role focused. `config.json` is local, user-owned state — written **only** by the human-approved `--update-config` flow (`driver apply-config`, which validates before writing); the plan carries no config. Run dev-pipeline in a sandboxed/throwaway environment and keep each role's `--allowedTools` minimal (read-only roles use a stdout-redirect command with no `Write`). An old config with a removed runner (e.g. `spec_author`) is rejected with a hint — run `driver migrate-config --config <path>` to reset runners to `unconfigured`, then `--update-config`.
+> **Security:** `subagent`/`main-session` runners have **no hard tool sandbox** (LLM-free = no host agent files); their only containment is the role prose. For a read-only role (reviewer/tester) on untrusted code, prefer a **bash** runner with a scoped `--allowedTools` (claude) or `-s read-only` (codex) — both CLI-enforced sandboxes. `cline` as a bash runner is the exception: `--auto-approve` is all-or-nothing with no per-tool restriction, so a cline tester/reviewer has the **same no-hard-sandbox caveat as `subagent`/`main-session`** — prefer claude/codex there and reserve cline mainly for implementor/test_implementor (see `RUNNERS.md`). Prefer `subagent`/`bash` (claude/codex) for the reviewer so it isn't the same session that wrote the code (esp. if the implementor is `main-session`); a `main-session` reviewer is a best-effort, self-review-prone gate — acceptable only when the host can run neither a bash runner nor a subagent, and then only after compacting and warning the user. `subagent`/`main-session` are host-coupled (need a host session); `bash` is the portable default.
+
+> **Security:** a bash runner (e.g. `claude -p` / `codex exec` / `cline`) runs headless with only its scoped `--allowedTools` (or CLI-equivalent — see the sandbox note above); `plan.md`/the contract/code are untrusted input, and for handoff modes the driver prepends a persona-switch preamble to keep the role focused. `config.json` is local, user-owned state — written **only** by the human-approved `--update-config` flow (`driver apply-config`, which validates before writing); the plan carries no config. Run dev-pipeline in a sandboxed/throwaway environment and keep each role's `--allowedTools` minimal (read-only roles use a stdout-redirect command with no `Write`). An old config with a removed runner (e.g. `spec_author`) is rejected with a hint — run `driver migrate-config --config <path>` to reset runners to `unconfigured`, then `--update-config`.
 
 ### Config fields
 
@@ -157,7 +159,7 @@ From a host with the skill installed (Claude Code, Cline, …), with your projec
 
 ## Roles
 
-Each role is an LLM-agnostic prose file (`agents/skills/dev-pipeline/agents/dp-<role>.md`) run by `driver run-stage` through its `config.runners.<role>` command. The **tool envelope** below is whatever that command's flags grant (e.g. claude `--allowedTools`) — set in config, not in the role file.
+Each role is an LLM-agnostic prose file (`agents/skills/dev-pipeline/agents/dp-<role>.md`) run by `driver run-stage` through its `config.runners.<role>` command. The **tool envelope** below is whatever that command's flags grant (e.g. claude `--allowedTools`, codex `-s`) — set in config, not in the role file; see `RUNNERS.md` for verified commands per CLI.
 
 | Role | Does | Tool envelope (set in config) |
 |---|---|---|
@@ -171,7 +173,7 @@ Each role is an LLM-agnostic prose file (`agents/skills/dev-pipeline/agents/dp-<
 
 ## Reviewer
 
-`config.runners.reviewer` is an ordered array tried front-to-back (configured via `--update-config`; a typical choice is a **claude** reviewer — `claude -p`, read-only tools). Add more entries to get automatic fallback — the next runner is used only if one fails to produce a valid `review-result.json`. A **codex** reviewer is fully supported (`codex exec -s read-only`, OS-sandboxed) if you prefer it or want a second-vendor cross-check — just add it to the array. The reviewer reads the change diff against the spec's Acceptance Criteria.
+`config.runners.reviewer` is an ordered array tried front-to-back (configured via `--update-config`; a typical choice is a **claude** reviewer — `claude -p`, read-only tools). Add more entries to get automatic fallback — the next runner is used only if one fails to produce a valid `review-result.json`. A **codex** reviewer is fully supported (`codex exec -s read-only`, OS-sandboxed) if you prefer it or want a second-vendor cross-check — just add it to the array. A **cline** reviewer works too (tool-writer result strategy — see `RUNNERS.md`) but has no hard read-only sandbox (`--auto-approve` is all-or-nothing), so prefer claude/codex unless you accept that trade-off. The reviewer reads the change diff against the spec's Acceptance Criteria.
 
 ---
 
@@ -202,6 +204,7 @@ Created at `<project>/.dev-pipeline/` (gitignored automatically).
         ├── red-test-result.json   # TDD: the red_test (RED verification) result
         ├── test-result.json
         ├── review-result.json
+        ├── <role>-runner.log      # a bash runner's stdout+stderr, streamed live for observability
         └── <role>-system.txt / <role>-user.txt / <role>-output.json  # run-stage prompt+output (audit)
 ```
 
@@ -281,6 +284,7 @@ dev-pipeline/
     └── dev-pipeline-tools/
         ├── driver.py
         ├── config.example.json
+        ├── RUNNERS.md              ← verified bash-runner command catalog (claude/codex/cline)
         ├── test/
         │   └── test_driver.py
         └── schemas/
@@ -303,6 +307,7 @@ dev-pipeline/
 │           ├── agents/             ← role prompts (dp-planner … dp-reviewer)
 │           ├── driver.py           ← installed for standalone operation
 │           ├── config.example.json ← template for driver bootstrap-config
+│           ├── RUNNERS.md          ← verified bash-runner command catalog
 │           └── schemas/            ← config / test-result / review-result / state
 ├── .claude/
 │   └── skills/
@@ -326,7 +331,7 @@ dev-pipeline/
 ## Design notes
 
 - **Deterministic state**: all state transitions go through `driver.py` — the LLM never decides the next state
-- **Pluggable runners**: `runners` config picks an execution mode per role — a `bash` CLI (codex, gemini, …), a host `subagent` (model-selectable), or the `main-session` itself
+- **Pluggable runners**: `runners` config picks an execution mode per role — a `bash` CLI (claude, codex, cline, …; see `RUNNERS.md`), a host `subagent` (model-selectable), or the `main-session` itself
 - **Oscillation prevention**: `attempts.md` accumulates every failed attempt and is passed to the implementor on retry
 - **Environment vs code failures**: tester classifies failures; environment failures halt immediately instead of retrying
 - **Self-evolution**: when enabled, uses the done-state retrospective to update the installed agent `.md` files and the skill (`SKILL.md`) (source repo not updated)
