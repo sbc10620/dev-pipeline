@@ -194,10 +194,11 @@ Created at `<project>/.dev-pipeline/` (gitignored automatically).
     ├── state.json           # driver state (single source of truth)
     ├── contract.md          # the plan body — the contract for test author, implementor and reviewer
     ├── attempts.md          # accumulated failure history — passed to authors on retry
-    ├── config.snapshot.json
     ├── changed-manifest.txt  # files the runners produced (commit/review scope)
-    ├── stage-input.json      # per-stage input echoed by advance
+    ├── last-advance.json     # most recent advance's landing echo — `driver resume` replays it
+    ├── config.snapshot.json
     └── iterations/<n>/
+        ├── stage-input.json       # per-stage input echoed by advance (fed to run-stage)
         ├── red-test-result.json   # TDD: the red_test (RED verification) result
         ├── test-result.json
         ├── review-result.json

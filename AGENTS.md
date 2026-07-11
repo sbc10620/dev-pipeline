@@ -37,6 +37,9 @@ python3 agents/dev-pipeline-tools/driver.py run-stage --run <run_dir> --role imp
 # (main-session/subagent runners) validate a json result the SKILL executed itself
 python3 agents/dev-pipeline-tools/driver.py finalize-stage --run <run_dir> --role tester --stage-input <iter_dir>/stage-input.json
 
+# Validate a standalone test/review result JSON against its schema
+python3 agents/dev-pipeline-tools/driver.py validate-result --type <test|review> --file <path>
+
 # Migrate an old config's runners to the 'unconfigured' sentinel (also drops a removed
 # role like the pre-5.0.0 spec_author); reconfigure afterwards with --update-config
 python3 agents/dev-pipeline-tools/driver.py migrate-config --config <project>/.dev-pipeline/dev-pipeline.config.json
