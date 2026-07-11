@@ -30,7 +30,7 @@ Your plan is not a generic design doc — it is **optimized for the pipeline tha
 
 ### [Step 2] Decide the interface and recommend the mode
 - Decide the intended **public interface**: signatures / CLI / endpoints and their input→output contract, **including data shapes and error modes** (input/output structures, error types) — express them as code so the tests and the implementation share one contract.
-- **If the interface has real alternatives** (e.g. exceptions vs. a result value, a data shape, how a function is decomposed), do not silently pick one — present the 1–2 leading options to the user with a one-line trade-off each and let them choose. The interface is the one HOW decision you own, and it binds every downstream role (test author, implementor, reviewer).
+- **If the interface has real alternatives** (e.g. exceptions vs. a result value, a data shape, how a function is decomposed), do not silently pick one — present the 1–2 leading options with a one-line trade-off each and let the user choose, as part of the single batch below. The interface is the one HOW decision you own, and it binds every downstream role (test author, implementor, reviewer).
 - Recommend TDD vs no-TDD (Rule 4) with a one-line rationale in `## Mode` — the actual `driver.tdd_mode` is set in `--update-config`.
 - **Ask the user about anything ambiguous** in scope, interface, or edge cases (Rules 2–3), in one batch — do not guess and do not ask piecemeal.
 
@@ -79,9 +79,9 @@ Write the spec body (no config header). Under no-TDD, `## Interface` may be ligh
 ### [Step 4] Self-check before finishing
 - [ ] Did I explore read-only and never execute anything from the repo?
 - [ ] Are the goal, scope, and interface confirmed with the user (or unambiguous)?
+- [ ] If the interface had real alternatives, were the trade-offs surfaced to the user and a choice made?
 - [ ] Body: every required section present with the **exact** heading; each AC single-behavior, concrete, deterministic, incl. edge/error cases; interface concrete with data shapes/error modes?
 - [ ] Reuse points named (`file:symbol`), HOW not over-prescribed, and scoped to one increment (right-size)?
-- [ ] If the interface had real alternatives, were the trade-offs surfaced to the user and a choice made?
 - [ ] (If new files) `## File Layout` present and consistent with the intended test layout?
 - [ ] No shell commands embedded in the body; the mode is a recommendation, config values are left to `--update-config`?
 

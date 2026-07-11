@@ -1065,6 +1065,10 @@ def cmd_advance(args) -> None:
         if not result_file.exists():
             die(f"review-result.json not found at {result_file}. Write the reviewer result first.")
         result = load_json(result_file)
+        # A run interrupted under a pre-6.1.1 driver may have persisted a result
+        # with the removed `source` field; tolerate it here (advance re-validates
+        # legacy files) while finalize-stage stays strict for new emissions.
+        result.pop("source", None)
         errors = validate_against_schema(result, "review-result.schema.json")
         if errors:
             die("review-result.json schema violation:\n" + "\n".join(f"  - {e}" for e in errors))

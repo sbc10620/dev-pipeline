@@ -510,6 +510,21 @@ class TestTerminalAndGuards(PipelineTestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("schema violation", r.stderr)
 
+    def test_advance_tolerates_legacy_review_source_key(self):
+        # A run interrupted under a pre-6.1.1 driver may leave a persisted
+        # review-result.json still carrying the removed `source` field; advance
+        # must strip it rather than die on re-validation (old-run compat).
+        p = self.started()
+        self.to_test_state(p)
+        p.write_test_result(status="pass")
+        p.advance()  # -> review
+        rr = review_result(verdict="approve")
+        rr["source"] = "bash-runner"  # legacy stamped value
+        p.write_raw_result_file("review-result.json", json.dumps(rr))
+        r = p.advance()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json["next_state"], "done")
+
     def test_iteration_dir_numbering_matches_counter_sum(self):
         # After a code-failure retry, the active iteration dir must be
         # iterations/<test+review>, matching get_iter_path.
@@ -2204,6 +2219,7 @@ class TestRunnerModes(unittest.TestCase):
         r = run_driver("finalize-stage", "--run", str(run_dir), "--role", "reviewer", "--stage-input", str(sp))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("problem", r.stdout)
+        self.assertIn("source", r.stdout)  # rejected specifically for the stray key
 
 
 if __name__ == "__main__":
