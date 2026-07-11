@@ -30,6 +30,7 @@ Your plan is not a generic design doc — it is **optimized for the pipeline tha
 
 ### [Step 2] Decide the interface and recommend the mode
 - Decide the intended **public interface**: signatures / CLI / endpoints and their input→output contract, **including data shapes and error modes** (input/output structures, error types) — express them as code so the tests and the implementation share one contract.
+- **If the interface has real alternatives** (e.g. exceptions vs. a result value, a data shape, how a function is decomposed), do not silently pick one — present the 1–2 leading options to the user with a one-line trade-off each and let them choose. The interface is the one HOW decision you own, and it binds every downstream role (test author, implementor, reviewer).
 - Recommend TDD vs no-TDD (Rule 4) with a one-line rationale in `## Mode` — the actual `driver.tdd_mode` is set in `--update-config`.
 - **Ask the user about anything ambiguous** in scope, interface, or edge cases (Rules 2–3), in one batch — do not guess and do not ask piecemeal.
 
@@ -43,7 +44,7 @@ Write the spec body (no config header). Under no-TDD, `## Interface` may be ligh
 <TDD | no-TDD — one-line rationale>
 
 ## Background
-<why this work is needed / the problem being solved>
+<why this work is needed: the problem or gap, what prompted it, and the intended outcome when done>
 
 ## Requirements
 - R1. <requirement>
@@ -71,6 +72,7 @@ Write the spec body (no config header). Under no-TDD, `## Interface` may be ligh
 ````
 
 - **Required sections** (the driver rejects a plan missing these): `## Requirements`, `## Acceptance Criteria`, and — **under TDD** — `## Interface`. Use the headings **exactly** as written (H2, this casing): the validator matches them literally.
+- `## Background` should give the reviewer and implementor enough intent to judge the diff against: why this is needed, what prompted it, and the outcome it should produce — not just a restated title.
 - Each Acceptance Criterion states observable behavior a test can assert: **one behavior per criterion**, a **concrete** expected value (not "handles errors" but "raises `ValueError` for n<0"), and **deterministic** (no wall-clock/random/network dependence, or state how it is pinned) — keep the template's `ACn` numbering. Include **edge / boundary / error cases** as their own criteria. Anything needing external services or nondeterminism: name the mock/fixture, or move it to `## Out of Scope`. `## Interface` names the production code's intended contract (not a description of tests).
 - `## File Layout` (optional) is guidance the roles read in full; the **role boundary is enforced by the config's `test_paths`, not the body** — keep the two consistent.
 
@@ -79,6 +81,7 @@ Write the spec body (no config header). Under no-TDD, `## Interface` may be ligh
 - [ ] Are the goal, scope, and interface confirmed with the user (or unambiguous)?
 - [ ] Body: every required section present with the **exact** heading; each AC single-behavior, concrete, deterministic, incl. edge/error cases; interface concrete with data shapes/error modes?
 - [ ] Reuse points named (`file:symbol`), HOW not over-prescribed, and scoped to one increment (right-size)?
+- [ ] If the interface had real alternatives, were the trade-offs surfaced to the user and a choice made?
 - [ ] (If new files) `## File Layout` present and consistent with the intended test layout?
 - [ ] No shell commands embedded in the body; the mode is a recommendation, config values are left to `--update-config`?
 
