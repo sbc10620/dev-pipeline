@@ -9,6 +9,23 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.3.0] - 2026-07-12
+
+Removes the hardcoded 10-minute (600s) default timeout on bash runners: a
+runner with no `timeout` set now runs unbounded instead of being SIGKILLed
+at 600s. `timeout` stays available as an opt-in per-runner cap, unchanged.
+
+### Changed
+- **`driver.py`: bash-runner `timeout` is now optional with no default cap.** `cmd_run_stage` no longer falls back to `600` when a runner omits `timeout` — it passes `None` through to `_run_one`, which now blocks on `proc.wait(timeout=None)` (stdlib's documented indefinite-wait behavior) instead of capping at 10 minutes. The post-exit process-group drain (waiting out a backgrounded group-mate after the direct child exits) is likewise uncapped when `timeout` is `None` — an accepted trade-off documented in `_run_one`'s docstring: a runner that backgrounds a job it never reaps (`… & true` with a non-exiting child) will hang run-stage indefinitely; set an explicit `timeout` on that runner if you need a hang backstop. Runners with `timeout` set behave exactly as before (hard cap, whole process group SIGKILLed on expiry).
+- **`_resume_live_window`'s heuristic accounts for unbounded runners.** This best-effort heuristic (decides whether to flag a resumed run as `possibly_live`, prompting the SKILL to confirm before re-dispatching) previously assumed every runner without an explicit `timeout` took 600s. With unbounded now the default, that assumption would under-estimate how long a runner might legitimately still be running, letting `cmd_resume` silently treat a still-live unbounded runner as dead and risk a double-dispatch. The per-runner fallback used by this heuristic (`_RESUME_ASSUMED_UNBOUNDED_RUNNER_SECS`, only used here — it does not bound actual execution) is now 24h instead of 600s: erring long only costs an extra confirmation prompt on a genuinely dead run, whereas erring short risked working-tree corruption from a concurrent double-dispatch.
+- **Docs** (`AGENTS.md`, `RUNNERS.md`, `agents/skills/dev-pipeline/SKILL.md`): every "timeout defaults to 600s" statement updated to describe the new unbounded-unless-set behavior, including the guidance that a quiet bash-runner log is not proof of a hang (there is no default backstop killing it) and that hang detection now requires an explicit `timeout`.
+
+### Added
+- `test_no_timeout_runs_unbounded` (`test/test_driver.py`): a bash runner with no `timeout` key runs to completion (`sleep 2`) without being killed — a regression guard for `_run_one`'s `timeout=None` path (deadline computation, `proc.wait`, and the group-drain loop all handle `None` without raising or misreporting a timeout).
+
+### Versioning note
+MINOR: this changes `driver.py`'s runtime behavior for any existing config that omits a runner's `timeout` (that runner now runs unbounded instead of being capped at 600s) — backward-compatible in the sense that no existing config becomes invalid and no install breaks, but the default *behavior* for unset `timeout` genuinely changes, which is more than a docs/patch-level change.
+
 ## [6.2.1] - 2026-07-12
 
 Refines 6.2.0's bash-runner observability with real CLI runs: adopts a codex

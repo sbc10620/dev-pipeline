@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "6.2.1"
+__version__ = "6.3.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -48,6 +48,15 @@ SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 EXAMPLE_PATH = pathlib.Path(__file__).parent / "config.example.json"
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 VALID_SEVERITIES = set(SEVERITY_RANK)
+# Bash runners have no default timeout (unset = unbounded). This constant is used
+# ONLY by the resume-live-window heuristic below, which needs *some* finite number
+# to sum per unset runner when guessing whether a run might still be live — it does
+# not bound actual execution. Deliberately generous (24h, not the old 600s): the
+# heuristic only decides whether to warn the resuming SKILL "this might still be
+# live" (best-effort, not a lock), so under-guessing risks silently double-dispatching
+# a still-running unbounded runner (working-tree corruption), while over-guessing only
+# costs an extra confirmation prompt on a genuinely dead run. See _resume_live_window.
+_RESUME_ASSUMED_UNBOUNDED_RUNNER_SECS = 24 * 60 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -1149,22 +1158,28 @@ def _resume_live_window(run_dir: pathlib.Path) -> int:
     """Seconds after the last state write within which a run might still belong to a
     LIVE session (a runner subprocess could still be executing). A stage runs ONE
     role's runners sequentially (fallback tries them front-to-back), so the bound is
-    the largest per-role SUM of runner timeouts (default 600s each) plus a margin.
+    the largest per-role SUM of runner timeouts, plus a margin. A runner with no
+    `timeout` set now runs UNBOUNDED (no 10-minute default) — for this heuristic
+    only, an unset runner is assumed to take `_RESUME_ASSUMED_UNBOUNDED_RUNNER_SECS`
+    (deliberately generous, not the runner's real bound) since a live-window
+    estimate needs a finite number; this does not cap actual execution.
     This is a best-effort heuristic, not a lock — updated_at is stamped at the
     landing advance, so a wedged run can still read as old. Read the snapshot
     defensively (NOT via load_json, which would die): a run whose snapshot is
     missing/corrupt — e.g. init crashed before writing it — must still reach
     cmd_resume's coherent branches, not die inside this heuristic."""
-    longest = 600
+    longest = _RESUME_ASSUMED_UNBOUNDED_RUNNER_SECS
     snap = run_dir / "config.snapshot.json"
     try:
         if snap.exists():
             cfg = json.loads(snap.read_text(encoding="utf-8"))
-            per_role = [sum(r.get("timeout", 600) for r in runners if isinstance(r, dict))
+            per_role = [sum(r.get("timeout") if r.get("timeout") is not None
+                            else _RESUME_ASSUMED_UNBOUNDED_RUNNER_SECS
+                            for r in runners if isinstance(r, dict))
                         for runners in cfg.get("runners", {}).values()]
-            longest = max(per_role) if per_role else 600
+            longest = max(per_role) if per_role else _RESUME_ASSUMED_UNBOUNDED_RUNNER_SECS
     except Exception:
-        longest = 600
+        longest = _RESUME_ASSUMED_UNBOUNDED_RUNNER_SECS
     return int(longest) + 120
 
 
@@ -1757,7 +1772,7 @@ def _normalize_output(raw: str, normalizer: str) -> "dict | None":
         return None
 
 
-def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int,
+def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: "int | None",
              log_path: pathlib.Path) -> "tuple[int | None, str]":
     """Substitute placeholders (shell-quoted) into a command template and run it
     in a shell with cwd=project_root, with the runner's combined stdout+stderr
@@ -1768,6 +1783,10 @@ def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int
     stderr-based error tail is replaced by a slice of the log written since this
     attempt started, tracked by byte offset so concurrent attempts in the same
     run-stage call don't bleed into each other's tail).
+
+    `timeout=None` means UNBOUNDED — the runner's `timeout` field is optional and,
+    unlike earlier versions, has no default cap: an unset timeout runs until the
+    command exits on its own. Pass an int to opt back into a hard cap.
 
     start_new_session=True puts the runner in its OWN process group so that a
     timeout (or the driver being interrupted) can SIGKILL the whole group — the
@@ -1782,9 +1801,16 @@ def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int
     log. So on a clean exit we still poll the process group for emptiness,
     bounded by whatever's left of `timeout`; if group-mates outlive that budget
     we kill the group and report a timeout, same as the direct-timeout path — a
-    runner can never make this wait longer than its configured timeout. A
-    genuine interrupt (KeyboardInterrupt) still re-raises after cleanup; only a
-    timeout (direct or via a lingering group-mate) is reported back to the caller."""
+    runner can never make this wait longer than its configured timeout. If
+    `timeout` is None (unset — the default), there is no budget: this drain
+    waits for the process group to empty with no cap, same as the main wait. A
+    lingering group-mate a command backgrounds and never reaps (`… & true` where
+    the child never exits) will therefore hang run-stage indefinitely despite the
+    main command having already finished — an accepted consequence of "no
+    default timeout," not a bug; set an explicit `timeout` on that runner if you
+    need a hang backstop. A genuine interrupt (KeyboardInterrupt) still
+    re-raises after cleanup; only a timeout (direct or via a lingering
+    group-mate) is reported back to the caller."""
     cmd = command
     for key, val in subst.items():
         cmd = cmd.replace("{" + key + "}", shlex.quote(str(val)))
@@ -1795,13 +1821,13 @@ def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int
         start_offset = logf.tell()
         timed_out = False
         returncode = None
-        deadline = time.monotonic() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         with subprocess.Popen(cmd, shell=True, cwd=str(project_root),
                               stdout=logf, stderr=subprocess.STDOUT,
                               start_new_session=True) as proc:
             pgid = os.getpgid(proc.pid)  # capture while proc is still alive/queryable
             try:
-                proc.wait(timeout=timeout)
+                proc.wait(timeout=timeout)  # timeout=None blocks indefinitely (stdlib behavior)
                 returncode = proc.returncode
             except subprocess.TimeoutExpired:
                 timed_out = True
@@ -1814,8 +1840,9 @@ def _run_one(command: str, subst: dict, project_root: pathlib.Path, timeout: int
                 raise
             else:
                 # Direct child exited on its own — wait out any group-mate it
-                # left running, within what remains of the timeout budget.
-                while time.monotonic() < deadline:
+                # left running, within what remains of the timeout budget (or
+                # indefinitely if this runner has no timeout).
+                while deadline is None or time.monotonic() < deadline:
                     try:
                         os.killpg(pgid, 0)  # signal 0: existence check, no-op
                     except ProcessLookupError:
@@ -1994,7 +2021,7 @@ def cmd_run_stage(args) -> None:
     log_path = work / f"{role}-runner.log"
     log_path.write_text("", encoding="utf-8")
 
-    def judge(runner: dict, command: str, timeout: int):
+    def judge(runner: dict, command: str, timeout: "int | None"):
         """Run one command and judge it by category. Returns (problem|None, exit).
         `problem` is None on success, else a short reason string (also fed back on
         the retry)."""
@@ -2022,7 +2049,11 @@ def cmd_run_stage(args) -> None:
         if not command:
             attempts.append({"runner": idx, "error": "no command"})
             continue
-        timeout = int(runner.get("timeout", 600))
+        # No default cap: an unset `timeout` runs unbounded. Set it explicitly on
+        # a runner to opt back into a hard timeout (e.g. for hang detection on a
+        # json role whose log stays quiet on success — see RUNNERS.md).
+        raw_timeout = runner.get("timeout")
+        timeout = int(raw_timeout) if raw_timeout is not None else None
         runner_user = user_text + output_directive(runner)
         user_file.write_text(runner_user, encoding="utf-8")
         problem, exit_code = judge(runner, command, timeout)

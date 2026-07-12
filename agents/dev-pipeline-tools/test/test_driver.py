@@ -1885,6 +1885,22 @@ class TestRunStage(unittest.TestCase):
         log_text = pathlib.Path(r.json["log_file"]).read_text(encoding="utf-8")
         self.assertIn("grandchild-done", log_text)
 
+    def test_no_timeout_runs_unbounded(self):
+        # A bash runner with no `timeout` key must run unbounded (no implicit
+        # 10-minute default) rather than being SIGKILLed. This is a regression
+        # guard for _run_one's `timeout=None` path: `deadline = None`, then
+        # `proc.wait(timeout=None)` (stdlib blocks indefinitely) and the
+        # post-exit group-drain loop (`while deadline is None or ...`) must both
+        # complete without raising (e.g. a stray `time.monotonic() + None`
+        # TypeError) and without ever reporting "timeout".
+        self._cfg("implementor", [
+            {"type": "bash", "command": "sleep 2; echo done"},
+        ])
+        r = self._run("implementor", self._si("implementor"))
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["ok"])
+        self.assertEqual(r.json["attempts"], [])
+
     def test_runner_log_content_and_path_are_echoed(self):
         # 6.2.0: a bash runner's stdout+stderr must land in <role>-runner.log
         # (not be buffered/discarded), and run-stage must echo its path as
