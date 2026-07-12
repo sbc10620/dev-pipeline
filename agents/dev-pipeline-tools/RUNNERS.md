@@ -83,12 +83,62 @@ The driver streams a runner's combined stdout+stderr in real time to
 What ends up readable in that log differs by CLI and by whether the command
 redirects stdout to `{output_file}`:
 
-| CLI | Real-time log? | Notes (all measured, not assumed — 2026-07-11) |
+| CLI | Real-time log? | Notes (all measured, not assumed — 2026-07-11, codex's `model_reasoning_summary` row updated 2026-07-12) |
 |---|---|---|
 | `cline` | ✅ | Plain progress text, not `--json` (a parsed structural result isn't needed — cline's result path is the Write tool, not stdout — and plain text reads far better than the JSONL event stream `--json` would produce). Real-time and correct-exit-code by construction — the template runs cline directly with no pipe (see "Why the cline templates don't strip ANSI" above). **Measured: cline emits raw ANSI color codes even when stdout isn't a TTY**, and they land in the log as-is; fine for a human `tail -f`, strip `\x1b\[[0-9;]*[a-zA-Z]` on your host's side only if you relay an excerpt somewhere that doesn't render them (e.g. a chat message). |
-| `codex` | ✅ | `codex exec`'s own progress output (workdir/model banner, the echoed prompt, the response) goes to stdout; real-time by default, no extra flag needed. |
-| `claude` (file role: implementor / test_implementor) | ❌ by default | Plain `-p` prints only the final message at exit. Add `--output-format stream-json --verbose` for a real-time JSONL event stream in the log (verified below) — safe for file roles since nothing parses their stdout. |
-| `claude` (json role: tester / reviewer, `> {output_file}`) | ❌ | stdout is the result channel (redirected to `{output_file}`), so the log only gets stderr — which claude leaves essentially empty on success. **This is expected, not a hang**; rely on the driver's per-runner `timeout` (default 600s) as the actual hang detector, not log activity. |
+| `codex` | ✅ transmission; content depends on `model_reasoning_summary` | Transmission is real-time by default (workdir/model banner, the echoed prompt, the response go to stdout as they're produced), but *content* is sparse without reasoning summaries — banner/echo/final-answer only, with a long silent gap in between. Add `-c model_reasoning_summary=auto` (included in the templates below) for genuine natural-language reasoning text mid-run (e.g. `"I'm checking the contract and diff first..."`) plus the shell commands codex runs and their output, all streamed live — measured, not assumed. |
+| `claude` (file role: implementor / test_implementor) | ❌ by default | Plain `-p` prints only the final message at exit. Add `--output-format stream-json --verbose` for a real-time JSONL event stream in the log (verified below) — safe for file roles since nothing parses their stdout, but see the note below the table: this shows tool-call names, not readable reasoning. |
+| `claude` (json role: tester / reviewer, `> {output_file}`) | ❌ | stdout is the result channel (redirected to `{output_file}`), so the log only gets stderr — which claude leaves essentially empty on success. **This is expected, not a hang**; rely on the driver's per-runner `timeout` (default 600s) as the actual hang detector, not log activity. **Deliberately not addressed** — see "Why the claude json role doesn't stream reasoning" below. |
+
+**On claude's `stream-json` and "real-time" claims above**: turning it on genuinely streams in real time (measured), but what streams is JSONL event objects, not prose. Each event's `thinking` field is commonly an empty string paired with an opaque `signature` blob rather than readable text, so in practice a file role's stream-json log shows tool-call names (`[tool] Read {"file_path": "..."}`) and little else — useful for "what is it touching right now," not for "what is it reasoning about." See the next section for why this bar was applied to the json role's design and why it lost there.
+
+## Why the claude json role doesn't stream reasoning
+
+The claude tester/reviewer templates above still use the plain `> {output_file}`
+redirect from 6.2.0, not a `stream-json`-based design. A full alternative was
+built and verified end-to-end through the real `driver._run_one`: run claude
+with `--output-format stream-json --verbose` plus `--json-schema` (given the
+target schema's JSON text with its `$schema` meta-key stripped, since claude
+rejects that key), `tee` the stream to both the log and a `.raw` capture file
+(unbuffered by construction — `tee`, unlike plain `sed`, doesn't block-buffer
+a pipe), preserve claude's real exit code with the same POSIX subshell pattern
+used for cline (capture `$?` before the pipe, `exit` with the saved value
+after), and extract the last event's `structured_output` field with a python3
+one-liner into `{output_file}`. It worked — real-time log growth, correct
+exit code, and a clean schema-valid result were all confirmed. **Caveat:**
+this was verified by calling `driver._run_one` directly with a hand-built
+`subst` dict that included an extra `schema_file` entry pointing at the real
+schema file — `{schema_file}` is *not* a placeholder `driver.py` actually
+substitutes (its `subst` dict has only the six documented placeholders, and
+`apply-config` rejects any command referencing an unknown one), so the
+templates above never used it and no such command could pass config
+validation as written. Reviving this design for real would need a matching
+`driver.py` change (adding a `schema_file`-style substitution key) first, not
+just copying the command shape below.
+
+It was rejected anyway, for two reasons, in order:
+
+1. **Complexity cost (CLI/account-independent).** The apparatus above —
+   `tee` + exit-code-preserving subshell + a `--json-schema` payload + a
+   python3 extraction step (plus, per the caveat above, an as-yet-unbuilt
+   driver-level way to source the schema without hardcoding it) — is a lot of
+   moving parts for one CLI's json roles, all to gain observability, not
+   correctness (the 6.2.0 `> {output_file}` redirect already produces a
+   correct result).
+2. **Observed, dated, version-pinned: no readable payoff.** On Claude Code
+   `2.1.207` in the account used to verify this (2026-07-11), every
+   `thinking` event in the stream was an empty string plus an opaque
+   `signature` blob — see the note above the Log strategy table. Whatever the
+   underlying cause (account settings, model behavior, or something else —
+   not diagnosed, so no mechanism is claimed here), the practical result was
+   that the stream showed tool-call names and nothing resembling readable
+   reasoning. Weighed against reason 1's cost, that wasn't enough to keep.
+
+**Re-evaluate this decision if:** a future claude CLI/account combination
+streams genuinely readable reasoning text in `stream-json` (not just tool
+names) — at that point this paragraph's history is the starting design, but
+note the `{schema_file}` caveat above: a `driver.py` change would be needed
+before the exact commands here are pasteable, not just re-verifying.
 
 ## Security
 
@@ -100,8 +150,19 @@ redirects stdout to `{output_file}`:
 ## Prerequisites (one-time, per CLI)
 
 - `claude`: logged in (`claude auth` / API key configured); `--model` names a model your account can use.
-- `codex`: model/provider configured in `~/.codex/config.toml` (or pass `-c model=…`); if the project directory is not a git-trusted repo, `--skip-git-repo-check` is required (see below) or run `codex` once interactively to trust it.
+- `codex`: model/provider configured in `~/.codex/config.toml` (or pass `-c model=…`); if the project directory is not a git-trusted repo, `--skip-git-repo-check` is required (see below) or run `codex` once interactively to trust it. The templates below also pass `-c model_reasoning_summary=auto` for live log content (see Log strategy) — verified on `gpt-5.4-mini`; whether a model/provider that doesn't support reasoning summaries treats this as a harmless no-op or an error is untested, so drop the flag if your configured model rejects it.
 - `cline`: `cline auth` once to configure a provider/model; `--auto-approve true` skips the interactive approval prompts a headless run can't answer.
+
+**Known limitation, not addressed here (2026-07-12):** on this machine's local
+`~/.codex/config.toml` (`model_reasoning_effort = "low"`, model `gpt-5.4-mini`),
+a codex reviewer claimed in about 3 of 5 test runs that it "couldn't inspect"
+the contract/diff in a read-only sandbox and answered without actually
+reading them — while still returning a schema-valid result (so this doesn't
+show up as a driver-level failure). This is a local model/effort-config
+reliability issue, not something `RUNNERS.md`'s commands or `driver.py`
+control — tracked for future investigation, out of scope here. If you rely on
+a codex reviewer/tester, consider a stronger `model_reasoning_effort` in your
+own `~/.codex/config.toml`.
 
 ---
 
@@ -111,11 +172,11 @@ redirects stdout to `{output_file}`:
 ```json
 { "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Edit Write Bash" }
 ```
-Add `--output-format stream-json --verbose` before the final flag for a real-time log (recommended when using the background+poll pattern in SKILL §Role Execution).
+Add `--output-format stream-json --verbose` before the final flag for a real-time log (recommended when using the background-and-check pattern in SKILL §Role Execution) — note it surfaces tool-call names, not readable reasoning (see the Log strategy table and "Why the claude json role doesn't stream reasoning" above); useful for "what is it touching right now," not much beyond that.
 
 **codex**
 ```json
-{ "type": "bash", "command": "codex exec -s workspace-write -C {project_root} --skip-git-repo-check \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null" }
+{ "type": "bash", "command": "codex exec -s workspace-write -C {project_root} --skip-git-repo-check -c model_reasoning_summary=auto \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null" }
 ```
 
 **cline**
@@ -135,7 +196,7 @@ Same shape as implementor, tools scoped to writing tests (no `Bash`):
 
 **codex**
 ```json
-{ "type": "bash", "command": "codex exec -s workspace-write -C {project_root} --skip-git-repo-check \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null" }
+{ "type": "bash", "command": "codex exec -s workspace-write -C {project_root} --skip-git-repo-check -c model_reasoning_summary=auto \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null" }
 ```
 
 **cline**
@@ -153,7 +214,7 @@ Note: none of these three CLIs restrict writes by path natively (`--allowedTools
 
 **codex**
 ```json
-{ "type": "bash", "command": "codex exec -s workspace-write -C {project_root} --skip-git-repo-check -o {output_file} \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null", "normalizer": "default" }
+{ "type": "bash", "command": "codex exec -s workspace-write -C {project_root} --skip-git-repo-check -c model_reasoning_summary=auto -o {output_file} \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null", "normalizer": "default" }
 ```
 `workspace-write` (not `read-only`): the tester needs to actually run build/install/test commands, which may write caches/artifacts.
 
@@ -172,7 +233,7 @@ See Security above: no hard sandbox for cline.
 
 **codex**
 ```json
-{ "type": "bash", "command": "codex exec -s read-only -C {project_root} --skip-git-repo-check -o {output_file} \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null", "normalizer": "default" }
+{ "type": "bash", "command": "codex exec -s read-only -C {project_root} --skip-git-repo-check -c model_reasoning_summary=auto -o {output_file} \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null", "normalizer": "default" }
 ```
 
 **cline** — ⚠️ no hard read-only sandbox (see Security); prefer claude/codex for the reviewer.
@@ -185,33 +246,42 @@ See Security above: no hard sandbox for cline.
 ## Verified combinations
 
 Two rounds: first each CLI standalone against a minimal scratch prompt (result
-strategy + log strategy in isolation), then the **exact `reviewer` command
-templates above, run through the real `driver run-stage`** (not a simulation)
-against a tiny contract + diff — the same code path the SKILL uses, including
+strategy + log strategy in isolation), then the **exact command templates
+above, run through the real `driver run-stage`** (not a simulation) against a
+tiny scratch project — the same code path the SKILL uses, including
 `output_directive()`'s command-shape branching and the log-streaming in
-`_run_one`.
+`_run_one`. The `run-stage` round initially covered only the `reviewer` role
+(2026-07-11); the 2026-07-12 codex re-verification (below) extended it to
+`implementor`/`tester`/`test_implementor` too, for that CLI.
 
 | Date | CLI | Version | What was run | Result | Log |
 |---|---|---|---|---|---|
 | 2026-07-11 | `claude` | Claude Code 2.1.207 | standalone json (`> {output_file}`) | ✅ clean JSON | ✅ empty (expected — stdout is the result channel) |
 | 2026-07-11 | `claude` | Claude Code 2.1.207 | standalone file (`--output-format stream-json --verbose`) | n/a | ✅ real-time JSONL |
-| 2026-07-11 | `codex` | 0.143.0 | standalone json (`-s read-only -o {output_file}`) | ✅ clean JSON, written despite read-only sandbox | ✅ real-time |
 | 2026-07-11 | `claude` | Claude Code 2.1.207 | **`driver run-stage --role reviewer`**, template above verbatim | ✅ `ok:true`, schema-valid `review-result.json` | ✅ matches the "quiet by design" note above |
-| 2026-07-11 | `codex` | 0.143.0 | **`driver run-stage --role reviewer`**, template above verbatim | ✅ `ok:true`, schema-valid `review-result.json` | ✅ real-time, `log_file` echoed |
 | 2026-07-11 | `cline` | 3.0.39 | **`driver run-stage --role reviewer`**, CURRENT template (direct, no pipe) | ✅ `ok:true`, schema-valid `review-result.json` | ✅ real-time by construction (no buffering middleman); log contains raw ANSI as expected/accepted (see "Why the cline templates don't strip ANSI"), `log_file` echoed |
+| 2026-07-12 | `codex` | 0.143.0 | **`driver run-stage --role reviewer`**, CURRENT template (`-c model_reasoning_summary=auto` added) | ✅ `ok:true`, schema-valid, and **content-verified**: correctly flagged a deliberately-wrong function (`weird_double_qq77` returning `a+b` instead of `a*2`) — proves it actually read the contract+diff, not a hollow pass. First attempt on the same setup was schema-valid but hollow (claimed it "couldn't inspect" the files without reading them) — see the reliability note in Prerequisites; this row is the non-hollow retry. | ✅ real-time, natural-language reasoning present (`"I'm reading the contract and diff first, then I'll inspect every changed file..."`), 16.5s span, `log_file` echoed |
+| 2026-07-12 | `codex` | 0.143.0 | **`driver run-stage --role implementor`**, CURRENT template | ✅ `ok:true`; file created with the contractually-correct implementation (`return a * 2`) | ✅ real-time, progressive growth over 44s (many increments, not one dump), rich reasoning text throughout |
+| 2026-07-12 | `codex` | 0.143.0 | **`driver run-stage --role tester`**, CURRENT template | ✅ `ok:true`, schema-valid `test-result.json`; ran the exact configured test command, reported the real exit code (0) and a correct summary | ✅ real-time, `log_file` echoed |
+| 2026-07-12 | `codex` | 0.143.0 | **`driver run-stage --role test_implementor`**, CURRENT template | ⚠️ inconclusive — hit this account's codex usage quota mid-run (`"You've hit your usage limit..."`), not a template defect | ✅ real-time and rich right up to the quota cutoff (e.g. `"**Checking tree inspection**"`, `"The contract is very small... I'm checking whether there are any existing test files..."`) — further evidence the flag works, just didn't finish |
 
-Superseded (2026-07-11, kept for context — do not use): two earlier iterations of
-the cline template were tried and rejected before the current direct form.
-(1) A plain `cline … | sed …` pipe to strip ANSI lost cline's real exit code
-through the pipe (`/bin/sh` reports the last command's — sed's — status) —
-confirmed with a `PATH`-shadowed failing fake `cline` (exit 5): the plain-pipe
-form reported `ok:true` (masked); (2) adding a POSIX exit-code-preserving
-subshell fixed that, but plain `sed` (no `-u`) still fully block-buffered the
-pipe (measured: 0 bytes logged 1s into a 2s-spaced run), so `-u` was added —
-verified working end-to-end via `driver run-stage`, including the fake-failure
-case correctly returning `ok:false`. Both were abandoned in favor of dropping
-the pipe entirely, which fixes both problems at the root instead of patching
-around them.
+Superseded (2026-07-11 → 2026-07-12, kept for context — do not use): the two
+`codex` rows previously here (a standalone json test and a `driver run-stage
+--role reviewer` run) used the pre-`model_reasoning_summary` command and no
+longer match the current templates ("verified" means against the exact
+command shown) — replaced by the 2026-07-12 rows above, run against the
+templates with `-c model_reasoning_summary=auto`. Separately, two earlier
+iterations of the **cline** template were tried and rejected before the
+current direct form: (1) a plain `cline … | sed …` pipe to strip ANSI lost
+cline's real exit code through the pipe (`/bin/sh` reports the last command's
+— sed's — status) — confirmed with a `PATH`-shadowed failing fake `cline`
+(exit 5): the plain-pipe form reported `ok:true` (masked); (2) adding a POSIX
+exit-code-preserving subshell fixed that, but plain `sed` (no `-u`) still
+fully block-buffered the pipe (measured: 0 bytes logged 1s into a 2s-spaced
+run), so `-u` was added — verified working end-to-end via `driver run-stage`,
+including the fake-failure case correctly returning `ok:false`. Both were
+abandoned in favor of dropping the pipe entirely, which fixes both problems
+at the root instead of patching around them.
 
 Also confirmed while verifying: `codex exec` needs `--skip-git-repo-check` when
 `project_root` isn't a git-trusted directory, and reads stdin unless it's

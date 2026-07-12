@@ -8,7 +8,7 @@ The advance that landed here echoed `directive: run_tester`, `iter_dir`, and `td
   ```bash
   python3 <driver_path> run-stage --run <run_dir> --role tester --stage-input <iter_dir>/stage-input.json
   ```
-  The runner executes the configured build/install/test and writes a schema-valid `red-test-result.json` to `<iter_dir>`. For a bash runner, prefer running this in the background and polling `<iter_dir>/tester-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it. Read the JSON:
+  The runner executes the configured build/install/test and writes a schema-valid `red-test-result.json` to `<iter_dir>`. For a bash runner, prefer running this in the background and checking `<iter_dir>/tester-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it (a quiet log there doesn't mean it's stuck — see that section for the check/relay cadence). Read the JSON:
   - **`mode` is `main-session`/`subagent`** → execute the tester per [SKILL §Role Execution](../SKILL.md#-role-execution) (json role: writes `red-test-result.json` to `output_file`; `driver finalize-stage` validates), then proceed.
   - `ok: true` → a valid result was written; proceed (its pass/fail is the driver's to interpret).
   - `ok: false` → the runner could not produce a valid result (tooling problem). Stop and report the `attempts`.
@@ -28,5 +28,5 @@ The advance that landed here echoed `directive: run_tester`, `iter_dir`, and `td
 
 **Checklist:**
 - [ ] `run-stage --role tester` returned `ok: true` (valid `red-test-result.json` written), **or** a `mode` handoff was executed and `finalize-stage` returned `ok: true`; else stopped/reported
-- [ ] (bash runner, host permitting) ran in the background with the runner log polled for progress
+- [ ] (bash runner, host permitting) ran in the background with the runner log checked periodically (a quiet log is expected for some runners, not a hang); relayed to the user only when there was something new to say
 - [ ] `driver advance` called; followed the reported `next_state` (the driver auto-recorded any RED-not-confirmed note)

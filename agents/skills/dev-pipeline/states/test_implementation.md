@@ -13,7 +13,7 @@ The advance that landed here echoed `directive: run_test_implementor`, `iter_dir
   ```bash
   python3 <driver_path> run-stage --run <run_dir> --role test_implementor --stage-input <iter_dir>/stage-input.json
   ```
-  For a bash runner, prefer running this in the background and polling `<iter_dir>/test_implementor-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it. Read the JSON. **If `mode` is `main-session`/`subagent`, execute the test author per [SKILL §Role Execution](../SKILL.md#-role-execution)** (file role: the executor writes tests; the [Step 3] empty-delta guard catches a no-op), then continue. Otherwise `ok: true` → proceed; `ok: false` → stop and report. A bash runner writes tests only (its configured tool envelope has no Bash); the driver enforces the prompt.
+  For a bash runner, prefer running this in the background and checking `<iter_dir>/test_implementor-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it (a quiet log there doesn't mean it's stuck — see that section for the check/relay cadence). Read the JSON. **If `mode` is `main-session`/`subagent`, execute the test author per [SKILL §Role Execution](../SKILL.md#-role-execution)** (file role: the executor writes tests; the [Step 3] empty-delta guard catches a no-op), then continue. Otherwise `ok: true` → proceed; `ok: false` → stop and report. A bash runner writes tests only (its configured tool envelope has no Bash); the driver enforces the prompt.
 
 - [Step 3] **Boundary check + manifest** (skip if not a git repo). Print the delta (one `project_root`-relative path per line):
   ```bash
@@ -41,6 +41,6 @@ The advance that landed here echoed `directive: run_test_implementor`, `iter_dir
 **Checklist:**
 - [ ] Baseline staged (git repos) before run-stage
 - [ ] `run-stage --role test_implementor` returned `ok: true`, **or** a `mode` handoff was executed (empty-delta guard applied)
-- [ ] (bash runner, host permitting) ran in the background with the runner log polled for progress
+- [ ] (bash runner, host permitting) ran in the background with the runner log checked periodically (a quiet log is expected for some runners, not a hang); relayed to the user only when there was something new to say
 - [ ] Boundary check passed (or misconfig reported / single re-run performed); manifest recorded
 - [ ] `driver advance` called; followed the reported `next_state`
