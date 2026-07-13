@@ -9,7 +9,7 @@
   python3 <driver_path> resume --run <run_dir>
   ```
   - Non-zero exit → the driver prints the reason and (for a run with no `last-advance.json`) an exact manual recipe. Relay it and stop.
-  - On success, parse the JSON and **restore the Run Context** from it: `project_root` (from `project_dir`), `plan_path`, `contract_path`, `tdd_mode`, `run_dir`. These replace the values `init` normally seeds.
+  - On success, parse the JSON and **restore the Run Context** from it: `project_root` (from `project_dir`), `plan_path`, `contract_path`, `tdd_mode`, `run_dir`, and **`work_root`, `worktree_branch`, `worktree_base_ref`**. These replace the values `init` normally seeds — in particular, **use the restored `work_root` for every git command below and in the resumed state file, never `project_root`**, exactly as a fresh run would (a run predating this feature has no `work_root` in `state.json`; `driver resume` falls back to `project_dir` for it, so this restore always yields a usable value).
   - `possibly_live` is a **best-effort** flag (the run's `state.json` was written recently). It can miss a genuinely live session and can fire on a benign quick retry, so treat it as a nudge, not a guarantee: **always** make sure no other session is still driving this run before continuing — a second driver on the same run corrupts its state. If `possibly_live` is set and you can't confirm the run is idle, stop.
 
 - [Step 3] **Dispatch on the driver's output.** It reports a `next_state` (the state to resume in) and sometimes a `directive`:
@@ -18,10 +18,10 @@
   - **`next_state` is an authoring state (`implementation` or `test_implementation`)** → **first recover the interrupted delta (Step 4)**, then follow `states/<next_state>.md` from the top.
   - **`next_state` is a JSON-role state (`test`, `red_test`, `review`)** → no delta recovery needed (re-running just overwrites the result file and advance re-validates it) → follow `states/<next_state>.md` from the top.
 
-- [Step 4] **Authoring re-entry — recover the interrupted stage's delta before re-baselining (mandatory).** `states/implementation.md`/`test_implementation.md` Step 1 runs `git add -A`, which would fold the interrupted author's not-yet-recorded edits into the new baseline and hide them from the manifest, the review diff, and the commit. Recover them the **same way the state files compute their delta** — worktree vs the git **index** (whose `git add -A` baseline from the crashed stage survives on disk, and already absorbed earlier stages' files and any pre-run dirty edits, so those are correctly excluded):
+- [Step 4] **Authoring re-entry — recover the interrupted stage's delta before re-baselining (mandatory).** `states/implementation.md`/`test_implementation.md` Step 1 runs `git add -A`, which would fold the interrupted author's not-yet-recorded edits into the new baseline and hide them from the manifest, the review diff, and the commit. Recover them the **same way the state files compute their delta** — working tree vs the git **index** (whose `git add -A` baseline from the crashed stage survives on disk, and already absorbed earlier stages' files and any pre-run dirty edits, so those are correctly excluded). **Run against the restored `work_root`, not `project_root`** (see Step 2):
   ```bash
-  { git -C <project_root> -c core.quotePath=false diff --name-only --relative; \
-    git -C <project_root> -c core.quotePath=false ls-files --others --exclude-standard; } | sort -u
+  { git -C <work_root> -c core.quotePath=false diff --name-only --relative; \
+    git -C <work_root> -c core.quotePath=false ls-files --others --exclude-standard; } | sort -u
   ```
   - **Subtract what's already recorded.** Drop any path already in `<run_dir>/changed-manifest.txt` — those were recorded and boundary-checked when their stage produced them. The **remainder** is the interrupted stage's unrecorded output.
   - **Boundary check the remainder — only when `tdd_mode` is true** — with the current state's role (`implementation` re-entry → `--role implementation`; `test_implementation` → `--role test_implementation`):
@@ -39,7 +39,7 @@
 
 **Checklist:**
 - [ ] Run located (`--resume <run_dir>` or `latest`); stopped cleanly if absent
-- [ ] `driver resume` ran; Run Context (`project_root`, `plan_path`, `contract_path`, `tdd_mode`) restored; confirmed the run is idle (esp. if `possibly_live`)
+- [ ] `driver resume` ran; Run Context (`project_root`, `plan_path`, `contract_path`, `tdd_mode`, `work_root`, `worktree_branch`, `worktree_base_ref`) restored; confirmed the run is idle (esp. if `possibly_live`)
 - [ ] Dispatched correctly: `advance` directive re-advanced (never opened `init.md`); terminal always followed its state file; authoring vs JSON-role routed right
-- [ ] (authoring re-entry) recovered the worktree-vs-index delta minus the manifest, boundary-checked the remainder (TDD, no auto-revert), and `record-changes`d it **before** entering the state file
+- [ ] (authoring re-entry) recovered the working-tree-vs-index delta (against `work_root`) minus the manifest, boundary-checked the remainder (TDD, no auto-revert), and `record-changes`d it **before** entering the state file
 - [ ] Continued the normal loop from the recovered state

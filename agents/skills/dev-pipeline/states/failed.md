@@ -2,6 +2,8 @@
 
 Read `halt_reason` (and any echoed context) from the `driver advance` output.
 
+**Worktree run (echoed `worktree_branch` is set):** do **not** merge or clean up. Unlike `done.md`, a failed run's worktree + branch are **preserved as-is** for debugging — the failure is likely visible in the worktree's own state (partial edits, a failing test run, etc.), and auto-discarding it would destroy that evidence. Tell the user where it lives (the echoed `work_root`) and how to remove it once they're done: `python3 <driver_path> cleanup-worktree --run <run_dir>` (safe — it only force-removes the worktree checkout and safe-deletes the branch if it's already merged elsewhere; it never merges anything itself).
+
 **`halt_reason: "environment"`**
 Stop immediately. Report:
 - Which stage failed (build/install/test) and, if the advance echoed `phase: "red_test"`, that it happened during **RED verification** (so it is a toolchain/framework setup problem, not a code defect).

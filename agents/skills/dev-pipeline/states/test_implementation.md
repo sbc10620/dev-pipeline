@@ -2,11 +2,11 @@
 
 **Goal:** Run the test-author runner to write tests from the contract, enforce the role boundary, record the manifest, advance.
 
-The advance that landed here echoed `directive: run_test_implementor`, `iter_dir`, and `tdd_mode`. The driver persisted the test author's context (`contract_path`, `focus`, `framework_instruction`, `test_paths`, and — on a re-entry — the red-not-confirmed note or the reviewer findings) to `<iter_dir>/stage-input.json`.
+The advance that landed here echoed `directive: run_test_implementor`, `iter_dir`, `tdd_mode`, and **`work_root`**. The driver persisted the test author's context (`contract_path`, `focus`, `framework_instruction`, `test_paths`, and — on a re-entry — the red-not-confirmed note or the reviewer findings) to `<iter_dir>/stage-input.json`. **All git commands below run against `work_root`, not `project_root`** — identical under a normal run, but `work_root` is the isolated worktree checkout under `--worktree` (see `states/init.md`).
 
 - [Step 1] **Stage a boundary/manifest baseline** (git repo only — `git rev-parse --git-dir`). If not a git repo, skip the boundary guard in [Step 3] and note to the user it cannot be enforced.
   ```bash
-  cd <project_root> && git add -A
+  cd <work_root> && git add -A
   ```
 
 - [Step 2] **Run the test author:**
@@ -15,10 +15,10 @@ The advance that landed here echoed `directive: run_test_implementor`, `iter_dir
   ```
   For a bash runner, prefer running this in the background and checking `<iter_dir>/test_implementor-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it (a quiet log there doesn't mean it's stuck — see that section for the check/relay cadence). Read the JSON. **If `mode` is `main-session`/`subagent`, execute the test author per [SKILL §Role Execution](../SKILL.md#-role-execution)** (file role: the executor writes tests; the [Step 3] empty-delta guard catches a no-op), then continue. Otherwise `ok: true` → proceed; `ok: false` → stop and report. A bash runner writes tests only (its configured tool envelope has no Bash); the driver enforces the prompt.
 
-- [Step 3] **Boundary check + manifest** (skip if not a git repo). Print the delta (one `project_root`-relative path per line):
+- [Step 3] **Boundary check + manifest** (skip if not a git repo). Print the delta (one `work_root`-relative path per line):
   ```bash
-  { git -C <project_root> -c core.quotePath=false diff --name-only --relative; \
-    git -C <project_root> -c core.quotePath=false ls-files --others --exclude-standard; } | sort -u
+  { git -C <work_root> -c core.quotePath=false diff --name-only --relative; \
+    git -C <work_root> -c core.quotePath=false ls-files --others --exclude-standard; } | sort -u
   ```
   Pass every printed path to check-boundary:
   ```bash

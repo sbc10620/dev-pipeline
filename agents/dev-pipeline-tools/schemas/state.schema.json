@@ -15,6 +15,18 @@
     "contract_path": { "type": "string" },
     "spec_path":     { "type": "string" },
     "project_dir":   { "type": "string" },
+    "work_root": {
+      "description": "Where code is edited and working-tree git bookkeeping happens: the worktree path under --worktree, else equal to project_dir.",
+      "type": "string"
+    },
+    "worktree_branch": {
+      "description": "dev-pipeline/<run_id> for a --worktree run, else null.",
+      "oneOf": [{ "type": "string" }, { "type": "null" }]
+    },
+    "worktree_base_ref": {
+      "description": "The branch (or, if detached, commit SHA) project_dir was on when --worktree created the worktree; else null.",
+      "oneOf": [{ "type": "string" }, { "type": "null" }]
+    },
     "tdd_mode":     { "type": "boolean" },
     "red_phase":    { "type": "boolean" },
     "iterations": {

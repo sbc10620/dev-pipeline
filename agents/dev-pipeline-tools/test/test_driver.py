@@ -13,7 +13,9 @@ Run:
     python3 -m unittest discover -s agents/dev-pipeline-tools/test -v
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import pathlib
 import shlex
@@ -22,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 
 # driver.py lives one directory up from this test file.
@@ -158,22 +161,37 @@ class Pipeline:
     stage: `init` writes the contract (contract.md) from the plan body itself.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, git=False, git_commit=True):
+        """`git`/`git_commit`: initialize self.project as a real git repo (with an
+        initial commit unless git_commit=False) — needed only by --worktree tests;
+        every other test leaves the default (plain temp dir, no git) unchanged."""
         self._tmp = tempfile.TemporaryDirectory()
         self.project = pathlib.Path(self._tmp.name)
         self._config = config
         self.run_dir = None
         self.contract_path = None
+        self.work_root = None
+        if git:
+            subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+            subprocess.run(["git", "-C", str(self.project), "config", "user.email", "t@example.com"], check=True)
+            subprocess.run(["git", "-C", str(self.project), "config", "user.name", "Test"], check=True)
+            if git_commit:
+                (self.project / ".gitkeep").write_text("", encoding="utf-8")
+                subprocess.run(["git", "-C", str(self.project), "add", ".gitkeep"], check=True)
+                subprocess.run(["git", "-C", str(self.project), "commit", "-q", "-m", "initial"], check=True)
 
     def close(self):
         self._tmp.cleanup()
 
     # -- setup -------------------------------------------------------------
 
-    def init(self, tdd=None, plan_text=None):
-        """Run driver init (expecting success). `tdd` (if given) is baked into the
-        config's driver.tdd_mode — the per-run --tdd/--no-tdd flags were removed in
-        5.0.0. `plan_text` overrides the default valid plan body."""
+    def init(self, tdd=None, plan_text=None, worktree=False, expect_success=True):
+        """Run driver init. `tdd` (if given) is baked into the config's
+        driver.tdd_mode — the per-run --tdd/--no-tdd flags were removed in 5.0.0.
+        `plan_text` overrides the default valid plan body. `worktree` passes
+        --worktree through. `expect_success=False` returns the raw CompletedProcess
+        instead of asserting success and returning its parsed JSON — for tests
+        exercising an expected init failure (e.g. --worktree without a git repo)."""
         if tdd is not None:
             self._config.setdefault("driver", {})["tdd_mode"] = tdd
         tdd_eff = self._config.get("driver", {}).get("tdd_mode", True)
@@ -187,10 +205,15 @@ class Pipeline:
 
         args = ["init", "--plan", str(plan), "--config", str(cfg_path),
                 "--project", str(self.project)]
+        if worktree:
+            args.append("--worktree")
         proc = run_driver(*args)
+        if not expect_success:
+            return proc
         assert proc.returncode == 0, f"init failed: {proc.stderr}"
         self.run_dir = pathlib.Path(proc.json["run_dir"])
         self.contract_path = pathlib.Path(proc.json["contract_path"])
+        self.work_root = pathlib.Path(proc.json["work_root"])
         return proc.json
 
     # -- driving -----------------------------------------------------------
@@ -583,6 +606,268 @@ class TestInit(PipelineTestCase):
                        "--project", str(p.project))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("Config file not found", r.stderr)
+
+
+class TestWorktree(PipelineTestCase):
+    """--worktree: isolate a run's code edits + git bookkeeping in a fresh git
+    worktree + branch instead of project_dir's own working tree."""
+
+    def _git_pipeline(self, git_commit=True, **driver_overrides):
+        p = Pipeline(valid_config(**driver_overrides), git=True, git_commit=git_commit)
+        self._pipelines.append(p)
+        return p
+
+    def test_init_worktree_creates_checkout_and_branch(self):
+        p = self._git_pipeline()
+        j = p.init(worktree=True)
+
+        work_root = pathlib.Path(j["work_root"])
+        self.assertNotEqual(work_root, p.project)
+        self.assertTrue(work_root.is_dir())
+
+        run_id = j["run_id"]
+        branch = f"dev-pipeline/{run_id}"
+        branches = subprocess.run(
+            ["git", "-C", str(p.project), "branch", "--list", branch],
+            capture_output=True, text=True, check=True).stdout
+        self.assertIn(branch, branches)
+
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["work_root"], str(work_root))
+        self.assertEqual(state["worktree_branch"], branch)
+        self.assertTrue(state["worktree_base_ref"])
+
+    def test_init_worktree_requires_git_repo(self):
+        p = self.make_pipeline()  # plain temp dir, not a git repo
+        proc = p.init(worktree=True, expect_success=False)
+        self.assertNotEqual(proc.returncode, 0)
+        # No partial run left on disk — the same "no partial run" contract as a
+        # rejected plan/config.
+        self.assertFalse((p.project / ".dev-pipeline" / "runs").exists())
+
+    def test_init_worktree_requires_head(self):
+        p = self._git_pipeline(git_commit=False)  # git repo, but no commits yet
+        proc = p.init(worktree=True, expect_success=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse((p.project / ".dev-pipeline" / "runs").exists())
+
+    def test_run_stage_uses_work_root_as_cwd(self):
+        p = self._git_pipeline()
+        j = p.init(worktree=True)
+        work_root = pathlib.Path(j["work_root"])
+
+        # Override the implementor runner (post-init, in the frozen snapshot run-stage
+        # actually reads) to prove where it executes: `pwd` written via the
+        # {project_root} placeholder, which run-stage must substitute to work_root.
+        snap_path = p.run_dir / "config.snapshot.json"
+        snap = json.loads(snap_path.read_text(encoding="utf-8"))
+        snap["runners"]["implementor"] = [
+            {"type": "bash", "command": "pwd > {project_root}/cwd_marker.txt"},
+        ]
+        snap_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        adv = p.advance()  # init -> implementation
+        self.assertEqual(adv.json["next_state"], "implementation")
+        self.assertEqual(adv.json["work_root"], str(work_root))
+        iter_dir = pathlib.Path(adv.json["iter_dir"])
+
+        rs = run_driver("run-stage", "--run", str(p.run_dir), "--role", "implementor",
+                        "--stage-input", str(iter_dir / "stage-input.json"))
+        self.assertEqual(rs.returncode, 0, rs.stderr)
+        marker = work_root / "cwd_marker.txt"
+        self.assertTrue(marker.exists(),
+                        "runner did not execute with cwd/{project_root} == work_root")
+        self.assertEqual(marker.read_text(encoding="utf-8").strip(), str(work_root))
+        self.assertFalse((p.project / "cwd_marker.txt").exists(),
+                         "runner incorrectly ran against project_dir instead of work_root")
+
+    def test_cleanup_worktree_removes_checkout_and_branch(self):
+        p = self._git_pipeline()
+        j = p.init(worktree=True)
+        work_root = pathlib.Path(j["work_root"])
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        branch = state["worktree_branch"]
+
+        r = run_driver("cleanup-worktree", "--run", str(p.run_dir))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["cleaned"])
+        self.assertTrue(r.json["worktree_removed"])
+        self.assertTrue(r.json["branch_removed"])
+        self.assertFalse(work_root.exists())
+        branches = subprocess.run(
+            ["git", "-C", str(p.project), "branch", "--list", branch],
+            capture_output=True, text=True, check=True).stdout
+        self.assertNotIn(branch, branches)
+
+        # Idempotent: a second call is a clean no-op, not an error.
+        r2 = run_driver("cleanup-worktree", "--run", str(p.run_dir))
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertTrue(r2.json["cleaned"])
+
+    def test_cleanup_worktree_force_removes_dirty_worktree(self):
+        # The `test` stage runs with cwd=work_root, so build/test caches routinely
+        # leave untracked files behind — cleanup must not be blocked by them.
+        p = self._git_pipeline()
+        j = p.init(worktree=True)
+        work_root = pathlib.Path(j["work_root"])
+        (work_root / "build_cache").mkdir()
+        (work_root / "build_cache" / "artifact.o").write_text("junk", encoding="utf-8")
+
+        r = run_driver("cleanup-worktree", "--run", str(p.run_dir))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["worktree_removed"])
+        self.assertFalse(work_root.exists())
+
+    def test_cleanup_worktree_reports_unmerged_branch_without_forcing(self):
+        p = self._git_pipeline()
+        j = p.init(worktree=True)
+        work_root = pathlib.Path(j["work_root"])
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        branch = state["worktree_branch"]
+
+        # Commit something ON the worktree branch that the base branch never gets —
+        # cleanup-worktree must not discard this unmerged work.
+        (work_root / "new_file.txt").write_text("unmerged work\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(work_root), "add", "new_file.txt"], check=True)
+        subprocess.run(["git", "-C", str(work_root), "commit", "-q", "-m", "unmerged change"], check=True)
+
+        r = run_driver("cleanup-worktree", "--run", str(p.run_dir))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["worktree_removed"])
+        self.assertFalse(r.json["branch_removed"])
+        self.assertTrue(r.json["branch_error"])
+        branches = subprocess.run(
+            ["git", "-C", str(p.project), "branch", "--list", branch],
+            capture_output=True, text=True, check=True).stdout
+        self.assertIn(branch, branches)
+
+    def test_cleanup_worktree_noop_for_non_worktree_run(self):
+        p = self.started()  # plain (non-git) init, no --worktree
+        r = run_driver("cleanup-worktree", "--run", str(p.run_dir))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(r.json["cleaned"])
+        self.assertEqual(r.json["reason"], "not a worktree run")
+
+    def test_reserve_run_id_dedupes_on_collision(self):
+        # Deterministic unit test of the collision-avoidance helper itself (run
+        # via subprocess, `run_id_new()`'s real 1-second resolution can't be forced
+        # to collide reliably) — import driver.py as a module and monkeypatch
+        # run_id_new, following the same pattern used elsewhere in this file.
+        spec = importlib.util.spec_from_file_location("dp_driver_worktree", DRIVER)
+        drv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(drv)
+
+        proj = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, proj, ignore_errors=True)
+        runs_dir = proj / ".dev-pipeline" / "runs"
+        runs_dir.mkdir(parents=True)
+        fixed_rid = "20260101-000000"
+        (runs_dir / fixed_rid).mkdir()
+        (runs_dir / f"{fixed_rid}-2").mkdir()
+
+        orig = drv.run_id_new
+        drv.run_id_new = lambda: fixed_rid
+        try:
+            rid = drv.reserve_run_id(proj)
+        finally:
+            drv.run_id_new = orig
+        self.assertEqual(rid, f"{fixed_rid}-3")
+
+    def test_cmd_init_retries_run_dir_on_real_collision(self):
+        # reserve_run_id only PROBES for a free rid; cmd_init's own run_dir.mkdir(
+        # ..., exist_ok=False) retry loop is what actually closes the race (a
+        # concurrent run could win between the probe and the claim). Prove the
+        # retry loop itself recovers by pre-creating the run_dir the forced rid
+        # would claim and calling cmd_init directly (bypassing the subprocess
+        # boundary so run_id_new can be monkeypatched deterministically).
+        spec = importlib.util.spec_from_file_location("dp_driver_init_collision", DRIVER)
+        drv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(drv)
+
+        proj = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, proj, ignore_errors=True)
+        plan = proj / "plan.md"
+        plan.write_text(plan_body(False), encoding="utf-8")
+        cfg_dir = proj / ".dev-pipeline"
+        cfg_dir.mkdir(parents=True)
+        cfg_path = cfg_dir / "dev-pipeline.config.json"
+        cfg_path.write_text(json.dumps(valid_config()), encoding="utf-8")
+
+        fixed_rid = "20260101-000000"
+        # Simulate a run that already claimed the rid run_id_new() is about to
+        # return (the exact race window reserve_run_id's probe cannot close).
+        (proj / ".dev-pipeline" / "runs" / fixed_rid).mkdir(parents=True)
+
+        orig = drv.run_id_new
+        drv.run_id_new = lambda: fixed_rid
+        try:
+            args = types.SimpleNamespace(plan=str(plan), config=str(cfg_path),
+                                         project=str(proj), worktree=False)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                drv.cmd_init(args)
+            result = json.loads(buf.getvalue())
+        finally:
+            drv.run_id_new = orig
+
+        self.assertEqual(result["run_id"], f"{fixed_rid}-2")
+        self.assertTrue(pathlib.Path(result["run_dir"]).is_dir())
+
+    def test_init_worktree_latest_dir_conflict_leaves_no_orphaned_worktree(self):
+        # A worktree is created BEFORE run_dir in cmd_init; if a later,
+        # deterministic precondition (the `latest`-is-a-directory check) then
+        # fails, the worktree/branch it already created must not be left orphaned
+        # with no state.json ever pointing at them (cleanup-worktree could never
+        # find them again).
+        p = self._git_pipeline()
+        latest_dir = p.project / ".dev-pipeline" / "latest"
+        latest_dir.mkdir(parents=True)
+        (latest_dir / "keep.txt").write_text("do not delete me", encoding="utf-8")
+
+        proc = p.init(worktree=True, expect_success=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse((p.project / ".dev-pipeline" / "worktrees").exists(),
+                         "a worktree was left behind after init failed")
+        self.assertFalse((p.project / ".dev-pipeline" / "runs").exists())
+        # The pre-existing (unrelated) directory must survive untouched.
+        self.assertTrue((latest_dir / "keep.txt").exists())
+        wt_list = subprocess.run(["git", "-C", str(p.project), "worktree", "list"],
+                                 capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("worktrees", wt_list)
+
+    def test_init_worktree_in_repo_subdirectory_resolves_work_root_to_subdir(self):
+        # `git worktree add` checks out the WHOLE repo, not just project_dir's
+        # subtree — when project_dir is a strict subdirectory of a larger repo,
+        # work_root must be adjusted to the matching subdirectory inside the new
+        # checkout, or every downstream path (runner cwd, test_paths globs, delta
+        # computation) resolves against the wrong directory.
+        repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@example.com"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        sub = repo / "sub" / "project"
+        sub.mkdir(parents=True)
+        (sub / "marker.txt").write_text("hi\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
+
+        cfg_dir = sub / ".dev-pipeline"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        cfg_path = cfg_dir / "dev-pipeline.config.json"
+        cfg_path.write_text(json.dumps(valid_config()), encoding="utf-8")
+        plan = sub / "plan.md"
+        plan.write_text(plan_body(False), encoding="utf-8")
+
+        r = run_driver("init", "--plan", str(plan), "--config", str(cfg_path),
+                       "--project", str(sub), "--worktree")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        work_root = pathlib.Path(r.json["work_root"])
+        self.assertTrue(
+            (work_root / "marker.txt").exists(),
+            f"work_root {work_root} does not contain the subproject's committed "
+            "files — it likely points at the worktree checkout's repo root "
+            "instead of the matching subdirectory")
 
 
 class TestValidateConfig(PipelineTestCase):

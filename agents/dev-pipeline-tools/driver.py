@@ -5,9 +5,10 @@ dev-pipeline driver — deterministic state machine for the implement→test→r
 Usage:
   python3 driver.py bootstrap-config [--project <dir>]
   python3 driver.py apply-config     --config <path> --values-file <path>
-  python3 driver.py init             --plan <path> [--config <path>] [--project <dir>]
+  python3 driver.py init             --plan <path> [--config <path>] [--project <dir>] [--worktree]
   python3 driver.py advance          --run <run_dir>
   python3 driver.py resume           --run <run_dir>
+  python3 driver.py cleanup-worktree --run <run_dir>
   python3 driver.py status           --run <run_dir>
   python3 driver.py validate-config  --config <path> [--plan <path>]
   python3 driver.py validate-result  --type test|review --file <path>
@@ -26,6 +27,7 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -40,7 +42,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "6.3.0"
+__version__ = "6.4.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -69,6 +71,25 @@ def now_iso() -> str:
 
 def run_id_new() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def reserve_run_id(project_dir: pathlib.Path) -> str:
+    """Pick a run_id not already used under project_dir's runs/ or worktrees/.
+    run_id_new() has 1-second resolution, so two `init` calls landing in the same
+    second collide on the bare timestamp — realistic for concurrent runs (the
+    worktree feature's whole point) and a latent bug even without worktrees. On
+    collision, append -2, -3, … until free. Best-effort (a probe-then-create race
+    remains between this call and cmd_init's actual mkdir), not a hard lock —
+    consistent with this file's other best-effort concurrency guards (see
+    _resume_live_window)."""
+    base_rid = run_id_new()
+    n = 1
+    while True:
+        rid = base_rid if n == 1 else f"{base_rid}-{n}"
+        if not (project_dir / ".dev-pipeline" / "runs" / rid).exists() and \
+           not (project_dir / ".dev-pipeline" / "worktrees" / rid).exists():
+            return rid
+        n += 1
 
 
 def emit(obj: dict) -> None:
@@ -686,63 +707,160 @@ def cmd_init(args) -> None:
 
     # --- All checks passed; now create the run on disk. ---
     project_dir = pathlib.Path(args.project).resolve() if args.project else pathlib.Path(".").resolve()
-    rid = run_id_new()
-    run_dir = project_dir / ".dev-pipeline" / "runs" / rid
-    run_dir.mkdir(parents=True, exist_ok=True)
 
-    # latest symlink
+    # Cheap, deterministic preconditions — checked BEFORE claiming a run_dir or
+    # creating a worktree, so none of these failure modes leaves either behind.
     latest_link = project_dir / ".dev-pipeline" / "latest"
-    if latest_link.is_symlink():
-        latest_link.unlink()
-    elif latest_link.is_dir():
+    if latest_link.exists() and not latest_link.is_symlink() and latest_link.is_dir():
         die(f"Cannot create 'latest' symlink: {latest_link} is a directory. Remove it manually.")
-    elif latest_link.exists():
-        latest_link.unlink()
-    # Relative target keeps the symlink valid if the project dir is moved/remounted.
-    latest_link.symlink_to(pathlib.Path("runs") / rid)
 
-    # The contract = the plan body (the whole plan.md, no header to strip as of
-    # 6.0.0). It is the single artifact the downstream roles (test author,
-    # implementor, reviewer) read; there is no separate spec.md and no
-    # spec-author stage.
-    contract_path = run_dir / "contract.md"
-    contract_path.write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
+    # --worktree preconditions that don't depend on rid (so they run before ANY
+    # claim): project_dir must be inside a git repo with an existing commit.
+    git_root = None
+    if getattr(args, "worktree", False):
+        git_root = _git_toplevel(project_dir)
+        if git_root is None:
+            die(f"--worktree requires project_dir to be inside a git repository: {project_dir}")
+        head_check = _git(project_dir, "rev-parse", "--verify", "-q", "HEAD")
+        if head_check.returncode != 0:
+            die(f"--worktree requires an existing commit in {project_dir} — the "
+                "repository has no HEAD yet. Make an initial commit and retry.")
 
-    ts = now_iso()
-    state_obj = {
-        "run_id": rid,
-        "dev_pipeline_version": __version__,
-        "state": "init",
-        "plan_path": str(plan_path),        # source plan (provenance; not fed to roles)
-        "config_path": str(config_path),
-        "contract_path": str(contract_path),
-        "project_dir": str(project_dir),
-        "tdd_mode": tdd_mode,
-        # red_phase is true only while the very first RED verification is pending.
-        # It flips to false once red_test confirms RED, so later test fixes
-        # (driven by review findings) do not re-impose the failing-test gate.
-        "red_phase": tdd_mode,
-        "iterations": {"test": 0, "review": 0, "test_implementation": 0},
-        "max": {
-            "test": cfg["driver"]["max_test_iteration"],
-            "review": cfg["driver"]["max_review_iteration"],
-            "test_implementation": cfg["driver"].get("max_test_implementation_iteration", 3),
-        },
-        "halt_reason": None,
-        "history": [{"state": "init", "ts": ts, "outcome": "started", "failure_type": None}],
-        "started_at": ts,
-        "updated_at": ts,
-    }
-    save_state(run_dir, state_obj)
+    # Claim a run_dir atomically: reserve_run_id only PROBES for a free rid, so a
+    # concurrent init could still win the race between the probe and this mkdir
+    # (realistic — concurrent runs are the point of --worktree). exist_ok=False
+    # turns that race into a clean, retried collision instead of two runs silently
+    # sharing (and one overwriting) the same run_dir/state.json.
+    while True:
+        rid = reserve_run_id(project_dir)
+        run_dir = project_dir / ".dev-pipeline" / "runs" / rid
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            continue
 
-    # snapshot config.json into the run (config.json on disk is untouched — it is
-    # only ever written by apply-config / the --update-config flow)
-    save_json(run_dir / "config.snapshot.json", cfg)
+    # From here on, run_dir (and, under --worktree, the worktree + branch) must be
+    # rolled back on ANY failure — including our own die() calls below, which
+    # raise SystemExit, not a normal exception — so this success flag + `finally`
+    # is used instead of try/except (a `finally` runs on SystemExit too, unlike
+    # `except Exception`). This closes the leak a die() between worktree-add and
+    # the final emit() would otherwise cause (cleanup-worktree can only find a
+    # worktree/branch that made it into a saved state.json). The only failure
+    # that can still occur inside this block is `git worktree add` itself (rid- and
+    # therefore run_dir-dependent, so it can't be checked any earlier) or a genuine
+    # I/O error — every rid-independent precondition was already checked above.
+    worktree_branch = None
+    worktree_base_ref = None
+    work_root = project_dir
+    wt_path = None
+    success = False
+    try:
+        # --worktree: isolate this run's code edits + git bookkeeping into a fresh
+        # git worktree + branch instead of project_dir's own working tree, so the
+        # pipeline never touches the user's real checkout.
+        if getattr(args, "worktree", False):
+            ref_out = _git(project_dir, "symbolic-ref", "--short", "-q", "HEAD")
+            worktree_base_ref = (ref_out.stdout.strip() if ref_out.returncode == 0
+                                  else _git(project_dir, "rev-parse", "HEAD").stdout.strip())
+            worktree_branch = f"dev-pipeline/{rid}"
+            wt_path = project_dir / ".dev-pipeline" / "worktrees" / rid
+            wt_path.parent.mkdir(parents=True, exist_ok=True)
+            added = _git(project_dir, "worktree", "add", str(wt_path), "-b", worktree_branch)
+            if added.returncode != 0:
+                die(f"git worktree add failed for {wt_path} (branch {worktree_branch}):\n"
+                    f"{added.stderr.strip()}")
+            # `git worktree add` checks out the WHOLE repo at wt_path (from
+            # git_root), not just project_dir's subtree. If project_dir is a
+            # strict subdirectory of the repo (a layout the non-worktree flow
+            # already supports — see done.md's no-HEAD+subdir note), work_root
+            # must point at the matching subdirectory inside the new checkout,
+            # not at the checkout's root, or every git bookkeeping/role-boundary
+            # path downstream resolves against the wrong directory.
+            try:
+                rel = project_dir.relative_to(git_root)
+            except ValueError:
+                rel = pathlib.Path(".")
+            work_root = wt_path if str(rel) == "." else wt_path / rel
 
-    # initialise attempts.md
-    (run_dir / "attempts.md").write_text(
-        "# Attempt History\n\n_No attempts recorded yet._\n", encoding="utf-8"
-    )
+        # latest symlink
+        if latest_link.is_symlink() or latest_link.exists():
+            latest_link.unlink()
+        # Relative target keeps the symlink valid if the project dir is moved/remounted.
+        latest_link.symlink_to(pathlib.Path("runs") / rid)
+
+        # The contract = the plan body (the whole plan.md, no header to strip as of
+        # 6.0.0). It is the single artifact the downstream roles (test author,
+        # implementor, reviewer) read; there is no separate spec.md and no
+        # spec-author stage.
+        contract_path = run_dir / "contract.md"
+        contract_path.write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
+
+        ts = now_iso()
+        state_obj = {
+            "run_id": rid,
+            "dev_pipeline_version": __version__,
+            "state": "init",
+            "plan_path": str(plan_path),        # source plan (provenance; not fed to roles)
+            "config_path": str(config_path),
+            "contract_path": str(contract_path),
+            "project_dir": str(project_dir),
+            # work_root is where code is edited and the working-tree git bookkeeping
+            # (baseline/delta/review-diff/commit) happens: the worktree path when
+            # --worktree was used, else identical to project_dir. worktree_branch /
+            # worktree_base_ref are None for a non-worktree run.
+            "work_root": str(work_root),
+            "worktree_branch": worktree_branch,
+            "worktree_base_ref": worktree_base_ref,
+            "tdd_mode": tdd_mode,
+            # red_phase is true only while the very first RED verification is pending.
+            # It flips to false once red_test confirms RED, so later test fixes
+            # (driven by review findings) do not re-impose the failing-test gate.
+            "red_phase": tdd_mode,
+            "iterations": {"test": 0, "review": 0, "test_implementation": 0},
+            "max": {
+                "test": cfg["driver"]["max_test_iteration"],
+                "review": cfg["driver"]["max_review_iteration"],
+                "test_implementation": cfg["driver"].get("max_test_implementation_iteration", 3),
+            },
+            "halt_reason": None,
+            "history": [{"state": "init", "ts": ts, "outcome": "started", "failure_type": None}],
+            "started_at": ts,
+            "updated_at": ts,
+        }
+        save_state(run_dir, state_obj)
+
+        # snapshot config.json into the run (config.json on disk is untouched — it
+        # is only ever written by apply-config / the --update-config flow)
+        save_json(run_dir / "config.snapshot.json", cfg)
+
+        # initialise attempts.md
+        (run_dir / "attempts.md").write_text(
+            "# Attempt History\n\n_No attempts recorded yet._\n", encoding="utf-8"
+        )
+
+        success = True
+    finally:
+        if not success:
+            # Best-effort: undo whatever we managed to create so a failed
+            # --worktree init leaves nothing on disk — the same "no partial run"
+            # contract the config/plan-body validation above already has. Never
+            # let a rollback failure mask the original error.
+            if wt_path is not None:
+                try:
+                    _git(wt_path, "clean", "-xdf")
+                    _git(project_dir, "worktree", "remove", "--force", str(wt_path))
+                    _git(project_dir, "worktree", "prune")
+                    if worktree_branch:
+                        _git(project_dir, "branch", "-D", worktree_branch)
+                except Exception:
+                    pass
+            try:
+                if latest_link.is_symlink() and latest_link.resolve() == run_dir.resolve():
+                    latest_link.unlink()
+            except Exception:
+                pass
+            shutil.rmtree(run_dir, ignore_errors=True)
 
     emit({
         "state": "init",
@@ -751,6 +869,7 @@ def cmd_init(args) -> None:
         "contract_path": str(contract_path),
         "plan_path": str(plan_path),
         "tdd_mode": tdd_mode,
+        "work_root": str(work_root),
         "directive": "advance",
         "next_action": "advance",
         "message": "Init successful. Call `driver advance --run <run_dir>` to enter the first stage.",
@@ -848,6 +967,16 @@ def cmd_advance(args) -> None:
             e["tester_runners"] = runners.get("tester", [])
         elif new_state == "done":
             e["run_self_evolution"] = cfg.get("driver", {}).get("run_self_evolution", False)
+            # Needed to merge the worktree branch back and then tear it down;
+            # None/absent for a non-worktree run (done.md's git stays no-op).
+            e["worktree_branch"] = state.get("worktree_branch")
+            e["worktree_base_ref"] = state.get("worktree_base_ref")
+        elif new_state == "failed":
+            # A worktree run that fails must NOT be auto-merged/cleaned up — the
+            # SKILL preserves it for debugging (states/failed.md) and needs these
+            # to tell the user where it is / how to clean it up manually.
+            e["worktree_branch"] = state.get("worktree_branch")
+            e["worktree_base_ref"] = state.get("worktree_base_ref")
         # Note: no reviewer-runner echo here — the reviewer (like every role in
         # 3.0.0) is run by `driver run-stage`, which reads config.runners.reviewer
         # itself; the SKILL never needs the runner array.
@@ -873,6 +1002,12 @@ def cmd_advance(args) -> None:
             # state.json), not by re-deriving from config — the frozen state value
             # is the single source once a run has started.
             "tdd_mode": tdd,
+            # work_root is where code is edited and working-tree git bookkeeping
+            # happens (the worktree path under --worktree, else == project_dir).
+            # Echoed unconditionally like tdd_mode, never re-derived from disk
+            # (Global Rule 9) — state files must git -C <work_root>, not
+            # <project_root>, for baseline/delta/review-diff/commit.
+            "work_root": state.get("work_root") or state.get("project_dir", ""),
         }
         result.update(dest_echoes(new_state))
         if extra:
@@ -888,7 +1023,9 @@ def cmd_advance(args) -> None:
         save_state(run_dir, state)
         # Persist a stage-input.json next to the iteration so `driver run-stage`
         # (bash-runner mode) can consume the same context the SKILL echo carries.
-        si = build_stage_input(result, state.get("project_dir", ""))
+        # work_root (not project_dir) is what a runner's cwd/{project_root} must
+        # resolve to — see build_stage_input's docstring.
+        si = build_stage_input(result, state.get("work_root") or state.get("project_dir", ""))
         if si and si.get("work_dir") and si["work_dir"] != ".":
             save_json(pathlib.Path(si["work_dir"]) / "stage-input.json", si)
         emit(result)
@@ -1213,6 +1350,14 @@ def cmd_resume(args) -> None:
         # tdd_mode is in every replayed landing echo, but the init/H1 branches emit
         # only ctx — carry it here so resume.md can always restore it.
         "tdd_mode": state.get("tdd_mode", False),
+        # Same story for work_root and the worktree identity: a replayed echo from
+        # an OLD advance already carries work_root (it's now always echoed), but
+        # the init/H1 branches below emit only ctx, and a run created before this
+        # feature has no work_root in state.json at all — fall back to project_dir
+        # so resume.md always has a value to restore.
+        "work_root": state.get("work_root") or state.get("project_dir", ""),
+        "worktree_branch": state.get("worktree_branch"),
+        "worktree_base_ref": state.get("worktree_base_ref"),
     }
 
     # Concurrency guard (best-effort): a state.json touched more recently than a
@@ -1262,7 +1407,7 @@ def cmd_resume(args) -> None:
             # needs; never gut the echo). Re-persist stage-input from the PRISTINE
             # echo (before injecting resume metadata) so it is byte-identical to the
             # original the interrupted advance wrote.
-            si = build_stage_input(echo, state.get("project_dir", ""))
+            si = build_stage_input(echo, state.get("work_root") or state.get("project_dir", ""))
             if si and si.get("work_dir") and si["work_dir"] != ".":
                 save_json(pathlib.Path(si["work_dir"]) / "stage-input.json", si)
             out(dict(echo))
@@ -1285,7 +1430,9 @@ def cmd_resume(args) -> None:
     # without which re-running an authoring stage silently drops pre-crash edits.
     role = _STATE_ROLE.get(current)
     iter_dir = get_iter_path(run_dir, state)
-    proj = ctx["project_dir"] or "<project_root>"
+    # work_root (not project_dir) is where the run's git bookkeeping actually
+    # happens — identical to project_dir unless this was a --worktree run.
+    proj = ctx["work_root"] or ctx["project_dir"] or "<work_root>"
     lines = [f"python3 driver.py status --run {run_dir}"]
     if role:
         lines.append(f"python3 driver.py run-stage --run {run_dir} --role {role} "
@@ -1300,6 +1447,62 @@ def cmd_resume(args) -> None:
         "\n(Or start a new run.) WARNING: re-running an authoring stage without "
         "first recording the outstanding `git diff HEAD` delta can silently drop "
         "pre-crash edits from the commit and review.")
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: cleanup-worktree
+# ---------------------------------------------------------------------------
+
+def cmd_cleanup_worktree(args) -> None:
+    """Tear down a `--worktree` run's checkout + branch (idempotent; a no-op for
+    a non-worktree run). This is the deterministic HALF of the worktree
+    lifecycle — driver-owned, like init's creation. Merging the branch back is
+    NOT deterministic (conflicts require a judgment call) and is NOT done here;
+    it is the SKILL's job (states/done.md), which calls this only after a
+    successful merge (or, from states/failed.md, never — a failed run's worktree
+    is preserved for debugging and cleaned up manually)."""
+    run_dir = pathlib.Path(args.run).resolve()
+    state = load_state(run_dir)
+    project_dir = pathlib.Path(state.get("project_dir") or ".")
+    work_root = state.get("work_root")
+    branch = state.get("worktree_branch")
+
+    if not work_root or not branch or pathlib.Path(work_root) == project_dir:
+        emit({"ok": True, "cleaned": False, "reason": "not a worktree run"})
+        return
+
+    wt_path = pathlib.Path(work_root)
+    worktree_removed = False
+    if wt_path.exists():
+        # The `test` stage runs with cwd=work_root, so build/test caches routinely
+        # leave untracked files behind — `git worktree remove` refuses those
+        # without --force. clean first so --force is a formality, not a data-loss
+        # risk (only ever removes untracked files INSIDE the worktree checkout).
+        _git(wt_path, "clean", "-xdf")
+        removed = _git(project_dir, "worktree", "remove", "--force", str(wt_path))
+        if removed.returncode != 0 and wt_path.exists():
+            die(f"git worktree remove failed for {wt_path}:\n{removed.stderr.strip()}")
+        worktree_removed = True
+    # Prune stale metadata even if the checkout dir is already gone (e.g. removed
+    # by hand), so `git worktree list` stops reporting it.
+    _git(project_dir, "worktree", "prune")
+
+    branch_removed = False
+    branch_error = None
+    exists = _git(project_dir, "rev-parse", "--verify", "-q", f"refs/heads/{branch}")
+    if exists.returncode == 0:
+        # -d (safe delete) only, never -D (force): if the branch isn't fully
+        # merged into project_dir's current HEAD — e.g. done.md's merge failed
+        # and the user is resolving it outside the pipeline — this is SUPPOSED
+        # to fail rather than silently discard unmerged work. Report, don't force.
+        deleted = _git(project_dir, "branch", "-d", branch)
+        if deleted.returncode == 0:
+            branch_removed = True
+        else:
+            branch_error = deleted.stderr.strip()
+
+    emit({"ok": True, "cleaned": True, "worktree_removed": worktree_removed,
+          "branch_removed": branch_removed, "branch_error": branch_error})
 
 
 # ---------------------------------------------------------------------------
@@ -1339,6 +1542,17 @@ def _git_toplevel(start: pathlib.Path) -> "pathlib.Path | None":
         return None
     top = out.stdout.strip()
     return pathlib.Path(top) if top else None
+
+
+def _git(cwd: pathlib.Path, *args: str) -> "subprocess.CompletedProcess[str]":
+    """Run `git -C <cwd> <args>`, capturing output. Does NOT raise or die on a
+    non-zero exit — git failures here are routine (e.g. `worktree remove` on an
+    already-gone worktree, `branch -d` on an unmerged branch) and callers decide
+    what a given failure means. Used only by the worktree lifecycle (init
+    --worktree / cleanup-worktree); every other git call in this file is the
+    single read-only `_git_toplevel` above."""
+    return subprocess.run(["git", "-C", str(cwd), *args],
+                          capture_output=True, text=True)
 
 
 def _ensure_gitignore_entry(project_root: pathlib.Path) -> bool:
@@ -1898,7 +2112,12 @@ def cmd_run_stage(args) -> None:
     stage_input = load_json(si_path)
     cfg = load_json(run_dir / "config.snapshot.json")
     state = load_state(run_dir)
-    project_root = pathlib.Path(stage_input.get("project_root") or state.get("project_dir") or ".").resolve()
+    # stage_input["project_root"] already carries work_root (build_stage_input sets
+    # it from that); the state.get(...) chain is a fallback for a stage-input.json
+    # missing/predating this field, preferring work_root over project_dir so a
+    # worktree run still resolves to its worktree, not the main checkout.
+    project_root = pathlib.Path(stage_input.get("project_root") or state.get("work_root")
+                                or state.get("project_dir") or ".").resolve()
 
     # Guard against passing the wrong stage-input (a mismatched iteration/role
     # path) — the SKILL always passes the matching path.
@@ -2204,9 +2423,10 @@ DRIVER CLI
 ----------
   bootstrap-config Seed .dev-pipeline/dev-pipeline.config.json (runners left unconfigured)
   apply-config     Merge a values file into config.json (validated, atomic; --update-config)
-  init             Create a new run from a plan + config
+  init             Create a new run from a plan + config   [--worktree]
   advance          Compute and apply the next state transition
   resume           Re-emit the current state's landing echo to continue an interrupted run
+  cleanup-worktree Remove a --worktree run's checkout + branch (no-op if not a worktree run)
   status           Print current run state
   validate-config  Check config completeness and schema   [--plan <path>]
   validate-result  Check a test-result or review-result file
@@ -2232,6 +2452,18 @@ TDD MODE
   driver.tdd_mode; it is frozen into the run at init. When enabled,
   llm.test_implementor (focus, framework_instruction, test_paths) and
   runners.test_implementor are required.
+
+WORKTREES
+---------
+  --worktree (per-run init flag, not a config key) — code edits and working-tree
+  git bookkeeping (baseline/delta/review-diff/commit) happen in a fresh git
+  worktree + branch (dev-pipeline/<run_id>) instead of the project's own working
+  tree, isolating the run from it and allowing concurrent runs. Requires
+  project_dir to be a git repo with an existing commit. On `done`, the branch is
+  merged back (only after verifying project_dir is on the original branch and
+  clean) and the worktree + branch are removed via `cleanup-worktree`. On
+  `failed`, the worktree is preserved for debugging — clean it up manually with
+  `cleanup-worktree --run <run_dir>` once you're done.
 
 REVIEW GATE
 -----------
@@ -2275,12 +2507,16 @@ def main() -> None:
     p_init.add_argument("--plan", required=True)
     p_init.add_argument("--config")
     p_init.add_argument("--project")
+    p_init.add_argument("--worktree", action="store_true")
 
     p_adv = sub.add_parser("advance")
     p_adv.add_argument("--run", required=True)
 
     p_res = sub.add_parser("resume")
     p_res.add_argument("--run", required=True)
+
+    p_cw = sub.add_parser("cleanup-worktree")
+    p_cw.add_argument("--run", required=True)
 
     p_sta = sub.add_parser("status")
     p_sta.add_argument("--run", required=True)
@@ -2327,6 +2563,7 @@ def main() -> None:
         "init":             cmd_init,
         "advance":          cmd_advance,
         "resume":           cmd_resume,
+        "cleanup-worktree": cmd_cleanup_worktree,
         "status":           cmd_status,
         "validate-config":  cmd_validate_config,
         "validate-result":  cmd_validate_result,

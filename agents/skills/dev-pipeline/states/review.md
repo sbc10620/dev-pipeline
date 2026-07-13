@@ -2,18 +2,18 @@
 
 **Goal:** Prepare the change diff, run the reviewer runner, advance (the driver applies the gate).
 
-The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `contract_path`, and `changes_diff` (the path the reviewer will read). The driver persisted the reviewer context to `<iter_dir>/stage-input.json`, with `output_file` set to `<iter_dir>/review-result.json`.
+The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `contract_path`, `changes_diff` (the path the reviewer will read), and **`work_root`**. The driver persisted the reviewer context to `<iter_dir>/stage-input.json`, with `output_file` set to `<iter_dir>/review-result.json`.
 
-- [Step 1] **Write the change diff** to the echoed `changes_diff` path so the reviewer can read it. Scope it to the pipeline's manifest when present (so unrelated/untracked files are not reviewed). **Run from `project_root`.** Check for an initial commit: `git -C <project_root> rev-parse --verify HEAD 2>/dev/null`.
+- [Step 1] **Write the change diff** to the echoed `changes_diff` path so the reviewer can read it. Scope it to the pipeline's manifest when present (so unrelated/untracked files are not reviewed). **Run from `work_root`, not `project_root`** — identical under a normal run, but `work_root` is the isolated worktree checkout under `--worktree` (see `states/init.md`); the diff must reflect the worktree's own history, not the main checkout's. Check for an initial commit: `git -C <work_root> rev-parse --verify HEAD 2>/dev/null`.
   - **Manifest present** (`<run_dir>/changed-manifest.txt`): mark new files intent-to-add **one path at a time** so they show as `new file` hunks (a plain `diff HEAD` **omits untracked files** — the reviewer has no Bash and sees only this diff), write the diff, then undo the marking so the working tree is unchanged for later states. Mark per path (a single `add -N` with several paths aborts wholesale if any manifest entry is stale — created then deleted — silently omitting **all** new files); `diff`/`reset` tolerate stale pathspecs, so keep those scoped to the whole set:
     ```bash
     while IFS= read -r p; do [ -n "$p" ] || continue
-      git -C <project_root> add -N -- "$p" 2>/dev/null || true
+      git -C <work_root> add -N -- "$p" 2>/dev/null || true
     done < <run_dir>/changed-manifest.txt
-    git -C <project_root> diff HEAD -- <manifest paths> > <changes_diff>
-    git -C <project_root> reset -q -- <manifest paths> 2>/dev/null || true
+    git -C <work_root> diff HEAD -- <manifest paths> > <changes_diff>
+    git -C <work_root> reset -q -- <manifest paths> 2>/dev/null || true
     ```
-  - **No manifest / no HEAD (fallback):** surface untracked files first with `git -C <project_root> add -N . 2>/dev/null || true`, then diff **against the worktree, not the index** (intent-to-add files are invisible to `diff --cached`): `git -C <project_root> diff HEAD > <changes_diff>` (or, on a repo with no HEAD, `git -C <project_root> diff > <changes_diff>`), then `git -C <project_root> reset -q`.
+  - **No manifest / no HEAD (fallback):** surface untracked files first with `git -C <work_root> add -N . 2>/dev/null || true`, then diff **against the worktree, not the index** (intent-to-add files are invisible to `diff --cached`): `git -C <work_root> diff HEAD > <changes_diff>` (or, on a repo with no HEAD, `git -C <work_root> diff > <changes_diff>`), then `git -C <work_root> reset -q`.
 
 - [Step 2] **Run the reviewer:**
   ```bash

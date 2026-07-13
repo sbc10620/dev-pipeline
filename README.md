@@ -146,14 +146,17 @@ From a host with the skill installed (Claude Code, Cline, …), with your projec
 /dev-pipeline --request "add rate limiting"   # planner writes plan.md, then runs
 /dev-pipeline --request "<goal>" --auto-run   # skip the post-plan approval gate
 /dev-pipeline --plan plan.md                  # run an existing plan.md
+/dev-pipeline --request "<goal>" --worktree   # isolate this run in a git worktree + branch
 /dev-pipeline --help
 ```
 
 **Prerequisites:**
 - `.dev-pipeline/dev-pipeline.config.json` must be present and valid
 - **Commit the installed dev-pipeline files** (the canonical `.agents/skills/dev-pipeline/` tree, the `.claude/skills/dev-pipeline/` copy, and `.clinerules/workflows/dev-pipeline.md`) before running. They are tracked (not gitignored, so self-evolution can manage their history); committing them keeps dev-pipeline's own tooling out of your change's manifest — and out of a codex reviewer's `working-tree` scan, if you configure one.
-- Start with a **clean working tree**. Unrelated uncommitted changes stay out of the manifest-scoped commit and review, but a clean tree keeps the role-boundary checks accurate (and out of scope for an opt-in codex reviewer, which scans the working tree).
+- Start with a **clean working tree**. Unrelated uncommitted changes stay out of the manifest-scoped commit and review, but a clean tree keeps the role-boundary checks accurate (and out of scope for an opt-in codex reviewer, which scans the working tree). Under `--worktree` this also matters at `done`: the auto-merge only proceeds if your checkout is clean and still on the branch it was on when the run started.
 - **Gitignore your build outputs** (compiled binaries, object files, etc.). Build/test artifacts are excluded from the change manifest by design; keeping them gitignored also keeps them out of a codex reviewer's `working-tree` scan (if you configure one).
+
+**Isolate a run with `--worktree`:** add `--worktree` to `--request`/`--plan` to run the whole pipeline — code edits, the manifest, the commit — inside a fresh git worktree + branch (`dev-pipeline/<run_id>`) instead of your current checkout. This keeps a run from touching your working tree at all while it's in progress, and lets multiple runs proceed concurrently (each gets its own worktree/branch). Requires your project to be a git repo with at least one commit. On success, `done` merges the branch back (`git merge --no-ff`) — but only after checking your checkout is on the same branch it started from and clean — and removes the worktree; a conflict, or your checkout having moved/gotten dirty in the meantime, stops the merge and leaves the worktree + branch in place for you to sort out by hand. A run that ends in `failed` also leaves its worktree in place, for debugging — clean it up yourself with `driver cleanup-worktree --run <run_dir>` once you're done with it.
 
 ---
 
@@ -192,6 +195,7 @@ Created at `<project>/.dev-pipeline/` (gitignored automatically).
 .dev-pipeline/
 ├── dev-pipeline.config.json # your config — bootstrapped by the skill on first run (gitignored)
 ├── latest -> runs/<run-id>
+├── worktrees/<run-id>/       # --worktree runs only: the isolated checkout, removed on a successful done-merge
 └── runs/<run-id>/
     ├── state.json           # driver state (single source of truth)
     ├── contract.md          # the plan body — the contract for test author, implementor and reviewer
@@ -222,6 +226,7 @@ python3 agents/dev-pipeline-tools/driver.py apply-config --config .dev-pipeline/
 python3 agents/dev-pipeline-tools/driver.py validate-config --config .dev-pipeline/dev-pipeline.config.json
 python3 agents/dev-pipeline-tools/driver.py status --run .dev-pipeline/latest
 python3 agents/dev-pipeline-tools/driver.py resume --run .dev-pipeline/latest
+python3 agents/dev-pipeline-tools/driver.py cleanup-worktree --run .dev-pipeline/latest   # tear down a --worktree run's checkout + branch
 python3 agents/dev-pipeline-tools/driver.py migrate-config --config .dev-pipeline/dev-pipeline.config.json
 ```
 
