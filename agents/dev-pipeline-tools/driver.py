@@ -11,7 +11,7 @@ Usage:
   python3 driver.py cleanup-worktree --run <run_dir>
   python3 driver.py status           --run <run_dir>
   python3 driver.py validate-config  --config <path> [--plan <path>]
-  python3 driver.py validate-result  --type test|review --file <path>
+  python3 driver.py validate-result  --type test|review|implementor|test_implementor --file <path>
   python3 driver.py check-boundary   --run <run_dir> --role <test_implementation|implementation> --changed <file...>
   python3 driver.py record-changes   --run <run_dir> --changed <file...>
   python3 driver.py run-stage        --run <run_dir> --role <role> [--stage-input <file>]
@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "6.4.0"
+__version__ = "6.5.3"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -1744,10 +1744,42 @@ def cmd_validate_config(args) -> None:
 # Subcommand: validate-result
 # ---------------------------------------------------------------------------
 
+# Maps validate-result's --type to its schema file. A dict, not a ternary — a
+# ternary silently misroutes a third type into the `else` branch (this was a
+# real bug caught in review when `implementor`/`test_implementor` were added:
+# adding a choice without rewriting a 2-way ternary would have validated
+# implementor results against review-result.schema.json). implementor and
+# test_implementor deliberately share one schema (same shape, same precedent as
+# test-result.schema.json already being shared by the `test` and `red_test`
+# states).
+SCHEMA_BY_TYPE = {
+    "test":            "test-result.schema.json",
+    "review":          "review-result.schema.json",
+    "implementor":     "implementor-result.schema.json",
+    "test_implementor": "implementor-result.schema.json",
+}
+
+
 def cmd_validate_result(args) -> None:
     result_path = pathlib.Path(args.file).resolve()
-    schema_name = "test-result.schema.json" if args.type == "test" else "review-result.schema.json"
-    data = load_json(result_path)
+    schema_name = SCHEMA_BY_TYPE[args.type]
+    try:
+        raw = result_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        die(f"File not found: {result_path}")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        # Tolerate a stray markdown fence / surrounding prose around an otherwise
+        # valid JSON object — the same leniency a json role's `default` normalizer
+        # gets. A "do not fence this JSON" prompt directive is advisory, not
+        # enforced, and this is the implementor/test_implementor's optional
+        # result-status file, not schema-validated by run-stage itself for a bash
+        # runner (see SKILL.md Global Rule 5) — losing a deliberate `blocked`
+        # signal to a stray fence would defeat the point of this file.
+        data = _normalize_output(raw, "default")
+        if data is None:
+            die(f"Invalid JSON in {result_path}")
     errors = validate_against_schema(data, schema_name)
     if errors:
         sys.stderr.write(f"[dev-pipeline] {args.type}-result validation FAILED:\n")
@@ -1909,6 +1941,16 @@ def build_stage_input(result: dict, project_dir: str) -> "dict | None":
         si["output_file"] = str(pathlib.Path(iter_dir) / result.get("result_filename", "test-result.json"))
     elif role == "reviewer" and iter_dir:
         si["output_file"] = str(pathlib.Path(iter_dir) / "review-result.json")
+    elif role == "implementor" and iter_dir:
+        # A file role's PRIMARY result is still the git delta — this is an optional
+        # additional signal (see output_directive/dp-implementor.md) so a role that
+        # concludes the contract can't be satisfied has a structured channel to say
+        # so, instead of grinding indefinitely (esp. in main-session, which has no
+        # external supervision at all — see AGENTS.md "Worktree isolation" security
+        # note on main-session's lack of a hard envelope, same root cause here).
+        si["output_file"] = str(pathlib.Path(iter_dir) / "implementor-result.json")
+    elif role == "test_implementor" and iter_dir:
+        si["output_file"] = str(pathlib.Path(iter_dir) / "test_implementor-result.json")
     return si
 
 
@@ -2178,13 +2220,23 @@ def cmd_run_stage(args) -> None:
         - The command has no `{output_file}` reference at all (e.g. cline, which
           has no clean-stdout or native result-file flag) — the only way to get
           the result out is the model's own Write tool, so it's told the exact
-          path to write to."""
-        if meta["category"] != "json":
-            return ""
-        what = "a single valid JSON object (no markdown fences, nothing else)"
-        if "{output_file}" in runner.get("command", ""):
-            return f"\n\nGive {what} as your final answer only — it is captured automatically. Do NOT write it to a file yourself."
-        return f"\n\nWrite {what} to this exact file path and nothing else there: {output_file}"
+          path to write to.
+
+        implementor/test_implementor (file roles) get a THIRD, distinct branch:
+        unlike a json role, `output_file` there is an OPTIONAL additional signal,
+        not the role's primary result (the git delta still is) — so it is always
+        "write it yourself," never a stdout-capture directive (the model's stdout
+        during a file role is tool-call chatter, not a clean JSON answer)."""
+        if meta["category"] == "json":
+            what = "a single valid JSON object (no markdown fences, nothing else)"
+            if "{output_file}" in runner.get("command", ""):
+                return f"\n\nGive {what} as your final answer only — it is captured automatically. Do NOT write it to a file yourself."
+            return f"\n\nWrite {what} to this exact file path and nothing else there: {output_file}"
+        if role in ("implementor", "test_implementor"):
+            return (f"\n\nAdditionally, after you finish, write a brief status JSON "
+                    f"(see your role instructions for the exact shape) to this exact "
+                    f"file path: {output_file}")
+        return ""
 
     # --- main-session / subagent handoff ---------------------------------------
     # The driver (a subprocess) cannot invoke the host's subagent tool or the main
@@ -2215,7 +2267,11 @@ def cmd_run_stage(args) -> None:
         )
         system_file.write_text(persona + system_text, encoding="utf-8")
         directive = ""
-        if meta["category"] == "json":
+        # json roles get output_file as their PRIMARY (only) result channel;
+        # implementor/test_implementor get it as an optional additional signal
+        # (see output_directive) — both need the directive text + a clean slate.
+        wants_output_file = meta["category"] == "json" or role in ("implementor", "test_implementor")
+        if wants_output_file:
             directive += output_directive(runners[0])
             if output_file.exists():
                 output_file.unlink()  # stale-output guard (parity with judge())
@@ -2225,7 +2281,7 @@ def cmd_run_stage(args) -> None:
         user_file.write_text(user_text + directive, encoding="utf-8")
         payload = {"ok": True, "mode": mode, "role": role, "category": meta["category"],
                    "system_file": str(system_file), "user_file": str(user_file),
-                   "output_file": str(output_file) if meta["category"] == "json" else None}
+                   "output_file": str(output_file) if wants_output_file else None}
         if mode == "main-session":
             payload["compact_first"] = True
         elif runners[0].get("model"):
@@ -2244,7 +2300,7 @@ def cmd_run_stage(args) -> None:
         """Run one command and judge it by category. Returns (problem|None, exit).
         `problem` is None on success, else a short reason string (also fed back on
         the retry)."""
-        if meta["category"] == "json" and output_file.exists():
+        if (meta["category"] == "json" or role in ("implementor", "test_implementor")) and output_file.exists():
             output_file.unlink()  # clean slate so a stale file isn't mistaken for success
         returncode, log_tail = _run_one(command, subst, project_root, timeout, log_path)
         if returncode is None:
@@ -2294,9 +2350,11 @@ def cmd_run_stage(args) -> None:
             return
         attempts.append({"runner": idx, "exit": exit_code, "problem": problem})
 
-    # Every runner failed: for json roles, remove any partial output so a
-    # downstream `advance` cannot mistake it for a valid result (n3 hardening).
-    if meta["category"] == "json" and output_file.exists():
+    # Every runner failed: for json roles (and implementor/test_implementor's
+    # optional status file), remove any partial output so a downstream `advance`
+    # (or the SKILL's result-status check) cannot mistake it for a valid result
+    # (n3 hardening).
+    if (meta["category"] == "json" or role in ("implementor", "test_implementor")) and output_file.exists():
         output_file.unlink()
 
     emit({"ok": False, "role": role, "category": meta["category"],
@@ -2429,7 +2487,7 @@ DRIVER CLI
   cleanup-worktree Remove a --worktree run's checkout + branch (no-op if not a worktree run)
   status           Print current run state
   validate-config  Check config completeness and schema   [--plan <path>]
-  validate-result  Check a test-result or review-result file
+  validate-result  Check a test/review/implementor/test_implementor result file
   check-boundary   (TDD) verify a role only touched files it is allowed to
   record-changes   Accumulate pipeline-produced files into changed-manifest.txt
   run-stage        Execute a role via its configured runner (bash), or hand off (main-session/subagent)
@@ -2528,7 +2586,8 @@ def main() -> None:
     p_vc.add_argument("--plan")
 
     p_vr = sub.add_parser("validate-result")
-    p_vr.add_argument("--type", required=True, choices=["test", "review"])
+    p_vr.add_argument("--type", required=True,
+                      choices=["test", "review", "implementor", "test_implementor"])
     p_vr.add_argument("--file", required=True)
 
     p_cb = sub.add_parser("check-boundary")

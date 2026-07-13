@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["implemented", "blocked"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "concern": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "null" }
+      ],
+      "description": "Required (non-null) when status is 'blocked': what the contract asks for, what makes it impossible as specified, and what would need to change in the plan. Always null when status is 'implemented'."
+    },
+    "assumptions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional. Smallest-reasonable-assumption notes made to resolve a contract ambiguity (not a codebase-understanding question)."
+    }
+  }
+}

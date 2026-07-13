@@ -143,12 +143,17 @@ For a bash runner the driver runs and validates; for a subagent/main-session run
 From a host with the skill installed (Claude Code, Cline, …), with your project open:
 
 ```
-/dev-pipeline --request "add rate limiting"   # planner writes plan.md, then runs
+/dev-pipeline --request "add rate limiting"   # planner writes a plan, then runs
 /dev-pipeline --request "<goal>" --auto-run   # skip the post-plan approval gate
 /dev-pipeline --plan plan.md                  # run an existing plan.md
 /dev-pipeline --request "<goal>" --worktree   # isolate this run in a git worktree + branch
 /dev-pipeline --help
 ```
+
+A plan the planner writes for you (`--request`) is saved to
+`.dev-pipeline/plans/<YYYYMMDD>-<slug>.md` (gitignored, local-only, one per request —
+not overwritten by the next `--request`). A plan you hand it yourself (`--plan <path>`)
+stays exactly where you put it.
 
 **Prerequisites:**
 - `.dev-pipeline/dev-pipeline.config.json` must be present and valid

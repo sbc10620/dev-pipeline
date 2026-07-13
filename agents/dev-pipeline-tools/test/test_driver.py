@@ -950,6 +950,52 @@ class TestValidateResult(PipelineTestCase):
         r = run_driver("validate-result", "--type", "review", "--file", path)
         self.assertNotEqual(r.returncode, 0)
 
+    # implementor/test_implementor: added when the SCHEMA_BY_TYPE ternary->dict
+    # fix landed (a 2-way ternary would have silently routed a third --type
+    # value into review-result.schema.json — verified this does NOT happen).
+    def test_valid_implementor_result_passes(self):
+        path = self._write({"status": "implemented", "summary": "done", "concern": None, "assumptions": []})
+        r = run_driver("validate-result", "--type", "implementor", "--file", path)
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["valid"])
+
+    def test_valid_implementor_blocked_result_passes(self):
+        path = self._write({"status": "blocked", "summary": "cannot proceed",
+                            "concern": "contract contradicts itself on X"})
+        r = run_driver("validate-result", "--type", "implementor", "--file", path)
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["valid"])
+
+    def test_invalid_implementor_result_fails(self):
+        path = self._write({"status": "confused"})  # bad enum + missing summary
+        r = run_driver("validate-result", "--type", "implementor", "--file", path)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_valid_test_implementor_result_passes(self):
+        # test_implementor shares implementor-result.schema.json — confirm the
+        # shared mapping actually resolves to a working schema for this type too.
+        path = self._write({"status": "implemented", "summary": "tests written"})
+        r = run_driver("validate-result", "--type", "test_implementor", "--file", path)
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["valid"])
+
+    def test_invalid_test_implementor_result_fails(self):
+        path = self._write({"status": "blocked"})  # missing summary
+        r = run_driver("validate-result", "--type", "test_implementor", "--file", path)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_implementor_result_tolerates_markdown_fence(self):
+        # A model may fence its status JSON despite the "do not fence" prompt
+        # directive — validate-result must not silently treat a deliberate
+        # `blocked` signal as absent just because of a stray ```json fence.
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8")
+        tmp.write('```json\n{"status": "blocked", "summary": "cannot proceed"}\n```\n')
+        tmp.close()
+        r = run_driver("validate-result", "--type", "implementor", "--file", tmp.name)
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["valid"])
+
 
 class TestAttemptAutoRecord(PipelineTestCase):
     """6.0.0: `advance` records the retry context to attempts.md itself when it
@@ -1908,6 +1954,25 @@ class TestStageInputWiring(PipelineTestCase):
         self.assertNotIn("directive", si["inputs"])  # control keys excluded
         self.assertNotIn("tester_runners", si["inputs"])  # M1: runner arrays never reach the prompt
 
+    def test_advance_writes_implementor_output_file(self):
+        # 6.5.0: implementor (a file role) gets an optional output_file too, so its
+        # prompt can be told an exact path for its result-status JSON — iter_dir
+        # itself is deliberately never exposed to a role's prompt
+        # (_STAGE_INPUT_CONTROL), so this wiring is the only way it learns the path.
+        p = self.started(tdd_mode=False)
+        p.advance()  # init -> implementation (iter_dir echoed here)
+        si = json.loads((p.run_dir / "iterations" / "0" / "stage-input.json").read_text(encoding="utf-8"))
+        self.assertEqual(si["role"], "implementor")
+        self.assertTrue(si["output_file"].endswith("implementor-result.json"))
+        self.assertNotIn("iter_dir", si["inputs"])  # never leaks into the prompt itself
+
+    def test_advance_writes_test_implementor_output_file(self):
+        p = self.started(tdd_mode=True)
+        p.advance()  # init -> test_implementation (iter_dir echoed here)
+        si = json.loads((p.run_dir / "iterations" / "0" / "stage-input.json").read_text(encoding="utf-8"))
+        self.assertEqual(si["role"], "test_implementor")
+        self.assertTrue(si["output_file"].endswith("test_implementor-result.json"))
+
 
 class TestRunStageIntegration(PipelineTestCase):
     """The advance/init → run-stage contract, with dummy runners (no LLM):
@@ -1998,6 +2063,23 @@ class TestRunStage(unittest.TestCase):
         self.assertTrue(r.json["ok"])
         self.assertEqual(r.json["runner"], 1)
         self.assertTrue((self.proj / "made.py").exists())
+
+    def test_implementor_bash_prompt_gets_status_directive(self):
+        # 6.5.0: the assembled prompt for a bash-runner implementor must name the
+        # exact path for its optional result-status JSON (never guessed by the
+        # model — iter_dir/work_dir is never in the prompt's own inputs).
+        self._cfg("implementor", [{"type": "bash", "command": "true"}])
+        self._run("implementor", self._si("implementor"))
+        user_text = (self.run_dir / "w" / "implementor-user.txt").read_text(encoding="utf-8")
+        self.assertIn("write a brief status JSON", user_text)
+        self.assertIn("implementor-output.json", user_text)  # default output_file naming (no output_file in this stage-input)
+        self.assertNotIn("valid JSON object", user_text)  # not the json-role directive
+
+    def test_test_implementor_bash_prompt_gets_status_directive(self):
+        self._cfg("test_implementor", [{"type": "bash", "command": "true"}])
+        self._run("test_implementor", self._si("test_implementor"))
+        user_text = (self.run_dir / "w" / "test_implementor-user.txt").read_text(encoding="utf-8")
+        self.assertIn("write a brief status JSON", user_text)
 
     def test_prompt_prose_resolved_from_layout(self):
         # Guards role_prompt_path + the .agents/skills/dev-pipeline/agents/ layout:
@@ -2641,16 +2723,37 @@ class TestRunnerModes(unittest.TestCase):
         self.assertIn("file role", r.json["note"])
 
     def test_run_stage_file_role_handoff(self):
-        # A file-role (implementor) handoff: no output_file, no json output directive.
+        # A file-role (implementor) handoff: no JSON-role output directive ("valid
+        # JSON object" phrasing), but as of 6.5.0 it DOES get an output_file + a
+        # distinct status-JSON directive (optional signal alongside its code
+        # delta) — see test_run_stage_implementor_handoff_status_directive below
+        # for that behavior specifically.
         run_dir, proj, work, sp = self._setup("implementor", [{"type": "subagent", "model": "x"}], json_role=False)
         r = run_driver("run-stage", "--run", str(run_dir), "--role", "implementor", "--stage-input", str(sp))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.json["mode"], "subagent")
         self.assertEqual(r.json["category"], "file")
-        self.assertIsNone(r.json["output_file"])
+        self.assertIsNotNone(r.json["output_file"])
         u = pathlib.Path(r.json["user_file"]).read_text(encoding="utf-8")
         self.assertIn("absolute project root", u)
-        self.assertNotIn("valid JSON object", u)  # no json output directive for a file role
+        self.assertNotIn("valid JSON object", u)  # no json-role output directive for a file role
+
+    def test_run_stage_implementor_handoff_status_directive(self):
+        # 6.5.0: implementor/test_implementor get a status-JSON directive distinct
+        # from a json role's ("write it yourself," never a stdout-capture
+        # instruction), plus the same stale-output cleanup a json role's handoff
+        # gets — a leftover file from a prior attempt must not survive to be
+        # mistaken for this attempt's result.
+        run_dir, proj, work, sp = self._setup("implementor", [{"type": "subagent", "model": "x"}], json_role=False)
+        stale = work / "implementor-output.json"
+        stale.write_text("STALE")
+        r = run_driver("run-stage", "--run", str(run_dir), "--role", "implementor", "--stage-input", str(sp))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json["output_file"], str(stale))
+        self.assertFalse(stale.exists())  # stale status file cleared before handoff
+        u = pathlib.Path(r.json["user_file"]).read_text(encoding="utf-8")
+        self.assertIn("write a brief status JSON", u)
+        self.assertIn(str(stale), u)
 
     def test_finalize_stage_review_result_needs_no_source(self):
         # review-result no longer carries a `source` field at all (the role can't

@@ -9,6 +9,92 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.5.3] - 2026-07-13
+
+`states/review.md`: a `main-session` reviewer now **always asks the user** before
+running — continue in this session, or open a new session for an independent
+review — instead of silently proceeding with a best-effort warning.
+
+### Changed
+- **`states/review.md` Step 2**: split the `main-session`/`subagent` bullet in two. `mode: "subagent"` is unchanged (executes directly). `mode: "main-session"` now asks the user first: "continue here" proceeds exactly as before (compact first, then execute per §Role Execution); "open a new session" stops without executing the reviewer or calling `driver advance` — the run stays parked at `review`, and the user is told to run `/dev-pipeline --resume <run_dir>` in a fresh session (which will ask the same question again, where "continue here" is now genuinely independent). New checklist item.
+- **`SKILL.md`** "Reviewer independence" paragraph rewritten to describe the ask-every-time behavior instead of the prior silent best-effort-and-warn behavior.
+
+### Fixed (adversarial review, before release)
+- **`--auto-run` interaction was undefined.** `SKILL.md` describes `--auto-run` as "run end-to-end," which read as suppressing this question too. `--auto-run`'s description and `states/review.md` Step 2 now both state explicitly that this is a runtime safety confirmation, not the approval gate `--auto-run` skips, so it is always asked regardless.
+- **`states/update_config.md`'s existing self-review acknowledgement** (the one-time approval when recommending a `main-session` reviewer) read as if it superseded the new per-review question, since neither file cross-referenced the other. Added a clarifying line: the two checks are complementary (one-time runner-choice consent vs. every-review runtime confirmation), not duplicative.
+
+### Design note
+The trigger condition is deliberately just "is the reviewer itself `main-session`" —
+it does **not** track whether the implementor/test_implementor earlier in the same
+run was also `main-session` (an earlier design explored this via run-directory marker
+files, which turned out to need extra machinery to avoid re-triggering forever after
+a legitimate `--resume` into a fresh session). Asking every time a `main-session`
+reviewer is about to run sidesteps that: the question itself, not a persisted flag,
+is what changes across a session boundary, so there is nothing to get stale.
+
+### Versioning note
+PATCH: prose-only (one state file + one SKILL paragraph); no driver.py logic,
+schema, or state-machine change — same precedent as 6.5.1/6.5.2.
+
+## [6.5.2] - 2026-07-13
+
+`--request`-generated plans are now saved to `.dev-pipeline/plans/<YYYYMMDD>-<slug>.md`
+instead of `<project_root>/plan.md` — no longer overwritten by the next `--request`,
+and no longer left in the user's tracked working tree.
+
+### Changed
+- **`states/planning.md` Step 1**: computes `<project_root>/.dev-pipeline/plans/<YYYYMMDD>-<slug>.md` (UTC date, matching the driver's own run-id convention; a filesystem-safe slug of the goal; `-2`/`-3`… on a same-day collision) as the default save path, creating `.dev-pipeline/plans/` if needed. A user-named path still overrides this. Only affects `--request`; a `--plan <path>`-supplied plan is untouched, wherever it lives.
+- **`states/done.md` / `AGENTS.md`**: the `done`-state merge precondition's `--untracked-files=no` rationale updated — it previously justified itself entirely by "the planner's plan.md sits untracked in project_root," which is no longer true for `--request` (now gitignored under `.dev-pipeline/plans/`, so it never appears in `git status` at all); the rationale now correctly scopes to `--plan <path>`-supplied plans, which can still live untracked anywhere in the tree.
+- **`SKILL.md`**: `plan_path`'s Run Context description documents the new default location.
+- **`AGENTS.md` / `README.md`**: runtime-layout diagram and usage docs updated with the new `.dev-pipeline/plans/` entry.
+
+### Versioning note
+PATCH: prose-only (SKILL orchestration + docs); no driver.py logic, schema, or state-machine change. `driver init --plan <path>` already accepted any path with no location assumption, so nothing there needed to change.
+
+## [6.5.1] - 2026-07-13
+
+`dp-test-implementor.md`: makes edge/error-case coverage a first-class, explicit
+requirement instead of a parenthetical aside — in practice `test_implementor` was
+observed writing only happy-path tests per Acceptance Criterion and skipping the
+edge cases the criterion or Interface implies.
+
+### Changed
+- **Rule 4** rewritten: previously "Cover each Acceptance Criterion (and its edge/error cases)..." buried the requirement in a parenthetical, and its "nothing speculative" framing was ambiguous about whether an *implied* edge case (e.g. empty-list handling, given the Interface takes a list) counted as "speculative" and should be skipped. Now explicit: an AC covered by only a happy-path test is incomplete, and the speculative/non-speculative line is drawn precisely — behavior a criterion or the Interface implies is in scope, behavior nothing in the contract points to is not.
+- **New Step 3.2** ("Author the tests"): requires identifying and testing each AC's edge/error cases (empty/null/zero/missing input, boundary values, invalid input, implied error conditions) immediately after its happy-path test, before moving to the next criterion — turns the rule into a concrete per-AC procedure rather than a general aside. Subsequent steps renumbered 3.3–3.6.
+- **Step 4 checklist** item replaced with an edge-case-specific check (was the same parenthetical as Rule 4's old wording).
+
+### Versioning note
+PATCH: a single role-prompt's prose, no schema/driver.py/state-machine change — same precedent as 6.1.1's prose-only changes.
+
+## [6.5.0] - 2026-07-13
+
+Gives `implementor` and `test_implementor` a structured, optional way to report
+"I concluded this can't be done as specified" instead of grinding indefinitely
+(the only external supervision `main-session` runners have is their own
+prose — no subprocess, no timeout, nothing driver.py can enforce) or writing a
+vacuous test to satisfy a rule against empty/skip/always-true tests while
+violating its intent.
+
+### Added
+- **`implementor-result.schema.json`** (`agents/dev-pipeline-tools/schemas/`): a small schema (`status: "implemented"|"blocked"`, `summary`, `concern`, `assumptions`) shared by both roles — same precedent as `test-result.schema.json` already being shared by the `test` and `red_test` states. `concern`-required-when-`status:"blocked"` is documented (not schema-enforced, matching `test-result.schema.json`'s `failure_type` convention — the hand-rolled validator doesn't support `if`/`then`).
+- **`driver.py`**: `build_stage_input` now wires an `output_file` for `implementor`/`test_implementor` (`<iter_dir>/implementor-result.json` / `<iter_dir>/test_implementor-result.json`), reusing the same mechanism `tester`/`reviewer` already have — a role that never saw its own `iter_dir` (the driver's `_STAGE_INPUT_CONTROL` deliberately strips it from every role's prompt) now gets an absolute path via `output_directive()` instead. `output_directive()` grows a third branch for these two roles: always "write it yourself" (never a stdout-capture directive — a file role's stdout is tool-call chatter, not a clean JSON answer), since this is an OPTIONAL signal alongside the git delta (the role's real result), not a replacement for it. The three `category == "json"` gates in the main-session/subagent handoff path (the output directive, the stale-output cleanup, and the `output_file` field in the handoff payload) are relaxed to also cover these two roles, so the mechanism works identically across bash, main-session, and subagent execution. `judge()`'s stale-output cleanup is extended the same way, so a retry can't mistake a previous attempt's leftover status file for the current one.
+- **`driver validate-result --type implementor|test_implementor`**: validates a role's result-status JSON against the shared schema. The `--type`→schema mapping changed from a 2-way ternary to a dict (`SCHEMA_BY_TYPE`) — the ternary would have silently routed a third `--type` value into its `else` branch (i.e. validated an implementor result against `review-result.schema.json`), a real bug caught in review before it shipped.
+- **`dp-implementor.md`**: Rule 5 (ambiguity) now explicitly distinguishes "unsure how the existing codebase works" (keep reading) from "unsure what the contract intends" (no amount of extra reading answers that — state the smallest reasonable assumption instead), with a matching stop-condition at the end of the codebase-exploration step. New Rule 11: when implementation is genuinely impossible as specified (not just difficult), stop and report `status: "blocked"` with a specific `concern` instead of forcing a broken implementation. A new final workflow step writes the result-status JSON to the path given in the prompt's output directive.
+- **`dp-test-implementor.md`**: the same two rules, adapted — Rule 10 for ambiguous expected behavior, Rule 11 for "no meaningful test can be written for this Acceptance Criterion as specified," which is a real dead end this role could hit today: Rule 3 already forbids empty/skipped/always-true tests, so without an escape hatch a genuinely untestable criterion had no valid path forward. Same final "write your result status" step.
+- **`SKILL.md` §Role Execution / `states/implementation.md` / `states/test_implementation.md`**: the existing empty-delta guard ("no file changes means the role didn't run — re-execute") now runs *after* checking for a result-status file. A `status: "blocked"` result is treated as the role's deliberate outcome (an empty or partial delta is expected and correct) and is never mistaken for a no-op re-execute trigger — this reordering was a real gap caught in review: without it, the guard would have fired first in exactly the `main-session` case this feature targets, silently discarding the "blocked" signal before it was ever surfaced. A `blocked` result is relayed to the user with a suggestion to revise `plan.md`; the user decides whether to stop or continue — nothing here auto-halts a run.
+
+### Fixed (adversarial review, before release)
+- **`install.sh`** never copied the new `implementor-result.schema.json` — every real install would have had `validate-result --type implementor|test_implementor` fail with "Schema file not found" (advisory-only, so silently swallowed), permanently discarding a `blocked` signal in exactly the `main-session` case this feature targets. Added to the copy list; file count corrected 4 → 5.
+- **`driver validate-result`** used a strict JSON parser with no fence tolerance, unlike a json role's `default` normalizer — a model fencing its status JSON despite the "do not fence" prompt directive would have had its result silently treated as absent. Now falls back to the same fence/prose-stripping normalizer json roles get, with a regression test.
+- **`dp-implementor.md` Rule 10 / `dp-test-implementor.md` Rule 2** ("never touch `.dev-pipeline/`" / "stay inside `test_paths`") had no exception for the new result-status write, directly contradicting the new final step that requires it. Both rules now explicitly exempt the output-directive path.
+- **`SKILL.md` Global Rule 5** claimed "a bash runner's result file is already schema-validated by run-stage" — true for json roles, but `judge()` never schema-validates a file role's optional status JSON, so `states/implementation.md`/`test_implementation.md`'s own instruction to call `validate-result` after a bash runner contradicted this global rule. Rule 5 now carves out the file-role exception.
+- **`states/implementation.md`** referenced "[Step 4]'s result-status check" where it meant Step 3 (the check that actually runs before the empty-delta guard) — a mismatch with the correctly-numbered mirror text in `test_implementation.md`.
+- **`test_implementation.md`'s checklist** was missing the "empty-delta guard applied when no blocked status was found" item `implementation.md`'s checklist already had.
+- **The `blocked`-relay wording** in both state files quoted `<concern>` unconditionally, but the schema does not force `concern` non-null even when `status: "blocked"` (documented as doc-only, not schema-enforced) — both now fall back to `summary` when `concern` is absent.
+
+### Versioning note
+MINOR: new schema, two new `validate-result` types, and new (fully optional, backward-compatible) role behavior. A result-status file's absence is handled identically to before this release; no existing config, run, or prompt breaks.
+
 ## [6.4.0] - 2026-07-13
 
 Adds `--worktree`: a per-run flag (not a config key) that isolates a pipeline

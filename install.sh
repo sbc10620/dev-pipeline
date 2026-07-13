@@ -115,7 +115,7 @@ cp "${SOURCE_TOOLS}/driver.py" "${SKILLS_DST}/driver.py"
 echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/driver.py"
 
 # Copy schemas (driver.py expects schemas/ in the same directory)
-for f in config.schema.json test-result.schema.json review-result.schema.json state.schema.json; do
+for f in config.schema.json test-result.schema.json review-result.schema.json state.schema.json implementor-result.schema.json; do
   src="${SOURCE_TOOLS}/schemas/${f}"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Schema file not found: ${src}"
@@ -123,7 +123,7 @@ for f in config.schema.json test-result.schema.json review-result.schema.json st
   fi
   cp "${src}" "${SKILLS_DST}/schemas/${f}"
 done
-echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/schemas/ (4 files)"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/schemas/ (5 files)"
 
 # Copy the config template next to driver.py so `driver bootstrap-config` can
 # seed .dev-pipeline/dev-pipeline.config.json on the first /dev-pipeline run.
