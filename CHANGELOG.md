@@ -9,6 +9,27 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.6.1] - 2026-07-14
+
+Prompt-prose consistency refactor of the skill/state/agent Markdown — **no
+behavior or state-machine change** (driver.py logic untouched; the only driver.py
+edit is this version string). Improves how reliably a host LLM follows the
+runner→result-JSON→state flow by making the instructions uniform across roles.
+
+### Changed
+- **The 5 runner state files** (`states/test.md`, `red_test.md`, `review.md`, `implementation.md`, `test_implementation.md`) now share one "run the runner → read the result JSON → branch" skeleton (`mode` bullet(s) / `ok: true` / `ok: false`). The two file-role states (`implementation`/`test_implementation`) previously described this inline as prose; they now use the same bullet structure the json-role states already used, with the `finalize-stage` handoff call restated inline and both the `mode` and `ok: true` bullets naming their next destination (`[Step 3]` → `[Step 4]`) so the status-read and empty-delta steps are never skipped. `ok: false` lead phrasing unified to "every runner failed to produce a valid result" across all five. `red_test.md` gains the same "do not run the tester yourself" reassurance note `test.md` already had. State-specific content (result filenames, `red_test`'s "pass/fail is the driver's to interpret", `review.md`'s two-mode-bullet ask/subagent split and security note) is preserved.
+- **`dp-tester.md` / `dp-reviewer.md`** step order: the "Checklist before outputting" step now comes **before** the "Output the result" step (previously after — contradicting its own name), matching `dp-implementor.md`/`dp-test-implementor.md`. Content is unchanged, only step positions/numbers. This also makes Global Rule 6/7's "Match the JSON shown in the **final step**" accurate (the JSON block is now the final step). **`dp-reviewer.md` Step 1.3's empty-diff "Skip to Step 4" is corrected to "Skip to [Step 5]"** — after the reorder Step 4 is the checklist, so the old target would have routed the empty-diff path into a review checklist that cannot apply.
+- **`SKILL.md` §Role Execution** file-role bullet split from one dense paragraph into three ordered sub-steps (validate status JSON → read status → empty-delta guard) for readability; wording/meaning unchanged. The `## 🎭 Role Execution` heading (an anchor target) was left untouched.
+
+### Fixed (intended correction, not pure prose)
+- **`implementation.md` / `test_implementation.md` checklists** now read "…**or** a `mode` handoff was executed **and** `finalize-stage` returned `ok: true`" (previously stopped at "handoff was executed"), matching the json-role states and the actual 6.6.0 behavior where file-role handoffs are validated via `finalize-stage` too.
+- **`test_implementation.md` Step 1** referenced "skip the boundary guard in `[Step 3]`" — a stale reference left over from 6.6.0 (which inserted the status-read as Step 3, pushing the boundary guard to Step 4). Corrected to `[Step 4]`.
+
+### Versioning note
+PATCH: prose consistency across the skill/state/agent Markdown plus a one-line
+`__version__` bump; no driver.py logic, schema, or test change. The full 183-test
+suite passes unchanged (it exercises driver.py, which was not touched).
+
 ## [6.6.0] - 2026-07-13
 
 `implementor`/`test_implementor`'s status JSON (added optional in 6.5.0) is now

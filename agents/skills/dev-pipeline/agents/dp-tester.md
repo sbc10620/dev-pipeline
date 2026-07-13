@@ -51,7 +51,13 @@ Status is determined purely by exit codes — never by a subjective reading of t
 - [Step 4.4] When in doubt, classify as `code` (conservative).
 - [Step 4.5] When status is `pass`, set `failure_type: null`.
 
-### [Step 5] Output the result
+### [Step 5] Checklist before outputting
+- [ ] Is `status` determined purely by exit codes?
+- [ ] Is `failure_type` set to `null` when status is `pass`?
+- [ ] Does every stage entry have name, command, exit_code, status, summary?
+- [ ] Is the output pure JSON with no surrounding text (whether given as the final answer or written to a file)?
+
+### [Step 6] Output the result
 Output **only** the following JSON, placed exactly where your prompt's output instruction directs (the result is exactly this JSON, nothing else):
 
 ```json
@@ -95,9 +101,3 @@ Field-level constraints (where a value above is written as several options joine
 - `command` is the exact command string, or `null` for a skipped stage (no command was run).
 - Per-stage records stay inside the `stages` array — never lift them to the top level or invent fields like `failure_stage`.
 - Do not add any key not shown above.
-
-### [Step 6] Checklist before outputting
-- [ ] Is `status` determined purely by exit codes?
-- [ ] Is `failure_type` set to `null` when status is `pass`?
-- [ ] Does every stage entry have name, command, exit_code, status, summary?
-- [ ] Is the output pure JSON with no surrounding text (whether given as the final answer or written to a file)?

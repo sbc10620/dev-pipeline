@@ -9,9 +9,9 @@ The advance that landed here echoed `directive: run_tester`, `iter_dir`, and `td
   python3 <driver_path> run-stage --run <run_dir> --role tester --stage-input <iter_dir>/stage-input.json
   ```
   The runner executes the configured build/install/test and writes a schema-valid `red-test-result.json` to `<iter_dir>`. For a bash runner, prefer running this in the background and checking `<iter_dir>/tester-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it (a quiet log there doesn't mean it's stuck — see that section for the check/relay cadence). Read the JSON:
-  - **`mode` is `main-session`/`subagent`** → execute the tester per [SKILL §Role Execution](../SKILL.md#-role-execution) (json role: writes `red-test-result.json` to `output_file`; `driver finalize-stage` validates), then proceed.
+  - **`mode` is `main-session`/`subagent`** → execute the tester per [SKILL §Role Execution](../SKILL.md#-role-execution) (json role: the executor runs build/install/test and writes `red-test-result.json` to `output_file`; then `driver finalize-stage` validates it), then proceed.
   - `ok: true` → a valid result was written; proceed (its pass/fail is the driver's to interpret).
-  - `ok: false` → the runner could not produce a valid result (tooling problem). Stop and report the `attempts`.
+  - `ok: false` → every runner failed to produce a valid result (a tooling problem, not a RED/GREEN outcome); stop and report the `attempts`. **Do NOT run the build/install/test yourself** (Global Rule 3 — a handoff is a `mode` result, handled by the bullet above, never `ok: false`).
 
 - [Step 2] Call driver advance:
   ```bash

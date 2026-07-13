@@ -29,7 +29,7 @@ The advance that landed here echoed `directive: run_reviewer`, `iter_dir`, `cont
       The run stays parked at `review` — nothing here changes `state.json`, so `--resume` replays this exact landing echo, and that (fresh) session will be asked the same question again — answering "continue here" there is fine, since it genuinely is a new, independent session at that point.
   - **`mode` is `subagent`** → execute the reviewer per [SKILL §Role Execution](../SKILL.md#-role-execution) (json role: the executor reads the diff + contract and writes `review-result.json` to `output_file`; then `driver finalize-stage` validates it), then proceed. **Note:** a subagent/main-session reviewer is not tool-sandboxed — if a strict read-only boundary matters here, use a `bash` reviewer instead (see the §Role Execution security note).
   - `ok: true` → a valid review result was written; proceed.
-  - `ok: false` → every reviewer runner failed; stop and report the `attempts`.
+  - `ok: false` → every runner failed to produce a valid result; stop and report the `attempts`.
 
 - [Step 3] Call driver advance. The driver applies the configured gate and, on failure, routes by where the blocking findings point (test files → `test_implementation`; production → `implementation`):
   ```bash
