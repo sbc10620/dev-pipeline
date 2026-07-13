@@ -116,7 +116,7 @@ After the role completes and validates, **you are the orchestrator again** — r
 
   Usage:
     /dev-pipeline --request "<what to build>" [--auto-run] [--worktree]
-    /dev-pipeline --plan <path-to-plan.md>   [--auto-run] [--worktree]
+    /dev-pipeline --plan <path-to-plan.md>    [--auto-run] [--worktree]
     /dev-pipeline --update-config [<path-to-plan.md>]
     /dev-pipeline --resume [<run_dir>]
     /dev-pipeline --help
@@ -126,9 +126,9 @@ After the role completes and validates, **you are the orchestrator again** — r
     --plan <path>             Run an existing plan.md (a pure spec body).
     --update-config [<plan>]  Recommend + write config.json (plan optional), then stop.
     --resume [<run_dir>]      Continue an interrupted run (default .dev-pipeline/latest).
-    --auto-run              Skip the post-plan approval gate; run end-to-end.
-    --worktree              Isolate this run in a git worktree + branch; auto-merged on done.
-    --help                  Show this help message.
+    --auto-run                Skip the post-plan approval gate; run end-to-end.
+    --worktree                Isolate this run in a git worktree + branch; auto-merged on done.
+    --help                    Show this help message.
 
   Workflow (TDD, default):
     0. planning (--request only)  Planner writes plan.md spec; you approve it
