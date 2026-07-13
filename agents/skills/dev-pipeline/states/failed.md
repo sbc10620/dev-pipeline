@@ -19,7 +19,7 @@ Stop immediately. Report:
 
 **`halt_reason: "iteration-exhausted"`**
 Report:
-- Which budget was exhausted. The `outcome` in `state.json` history distinguishes them: `test_fail_exhausted` (green test), `review_fail_exhausted` (review), or `red_not_confirmed_exhausted` (the authored tests kept passing with no implementation — the tests are likely vacuous; point the user at the test author output).
+- Which budget was exhausted. The `outcome` in `state.json` history distinguishes them: `test_fail_exhausted` (green test), `review_fail_exhausted` (review), `red_not_confirmed_exhausted` (the authored tests kept passing with no implementation — the tests are likely vacuous; point the user at the test author output), or `implementor_blocked_on_tests_exhausted` (the implementor kept reporting `status:"blocked", blocked_on:"tests"` and the test author kept re-authoring without resolving it — the implementor/test-author disagreement never converged; point the user at both sides' concerns in `attempts.md`). The latter two share the `test_implementation` iteration budget, so exhaustion may reflect either failure mode.
 - The last failure details / review findings, and a summary of all attempts from `attempts.md`.
 - If the advance echoed a `hint` (TDD review exhaustion), surface it: the blocking findings may point at tests that contradict the contract, not at a production defect — inspect the test findings before assuming the code is wrong.
 

@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "6.5.3"
+__version__ = "6.6.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -321,13 +321,14 @@ def _runner_shape_errors(cfg: dict) -> list:
             elif t in ("main-session", "subagent") and "command" in r:
                 errors.append(f"runners.{role}[{i}]: a {t} runner must not have a `command` "
                               "(the host session/subagent runs it, not a shell)")
-            # A normalizer only applies to a JSON role's output. File roles
-            # (implementor/test_implementor) produce a git delta, not JSON, so a
-            # normalizer on them is a config mistake — reject it with a clear reason.
+            # A normalizer only applies to a JSON role's output. A file role
+            # (implementor/test_implementor) always uses the `default` normalizer
+            # for its (now-mandatory) status JSON — a normalizer key there is
+            # meaningless and rejected as a config mistake.
             if "normalizer" in r:
                 if ROLE_META.get(role, {}).get("category") == "file":
                     errors.append(f"runners.{role}[{i}]: a `normalizer` is meaningless for the {role} "
-                                  "(a file role has no JSON output — its result is the git delta); remove it")
+                                  "(a file role's status JSON always uses the `default` normalizer); remove it")
                 elif r["normalizer"] not in VALID_NORMALIZERS:
                     # Name a removed/unknown normalizer (esp. the pre-6.0.0
                     # claude-cli/codex-cli) instead of the generic oneOf error.
@@ -929,6 +930,15 @@ def _review_failure_text(result: dict) -> str:
     return "\n\n".join(parts)
 
 
+def _implementor_blocked_text(result: dict) -> str:
+    """Human-readable retry context from a `status:"blocked"` implementor-result.json."""
+    parts = [f"Summary: {result.get('summary', '').strip()}"]
+    concern = result.get("concern")
+    if concern:
+        parts.append(f"Concern: {concern.strip()}")
+    return "\n\n".join(p for p in parts if p)
+
+
 def cmd_advance(args) -> None:
     run_dir = pathlib.Path(args.run).resolve()
     if not run_dir.exists():
@@ -1059,7 +1069,10 @@ def cmd_advance(args) -> None:
                               "contract_path": str(contract_path),
                               "attempts_path": attempts_path})
 
-    # --- test_implementation (TDD: author tests, no result file needed) ---
+    # --- test_implementation (TDD: author tests; its status file is mandatory
+    # at the run-stage/finalize-stage layer since 6.6.0, but advance itself
+    # never reads it — there's no other role to route a test-author "blocked"
+    # to, so this branch's own transition logic is unconditional) ---
     elif current == "test_implementation":
         iter_dir = ensure_iter_dir(run_dir, state)
         if state.get("red_phase", False):
@@ -1148,15 +1161,63 @@ def cmd_advance(args) -> None:
                                           "They are vacuous — strengthen them so they fail until the "
                                           "feature exists."})
 
-    # --- implementation → test (automatic, no result file needed) ---
+    # --- implementation ---
     elif current == "implementation":
-        iter_dir = ensure_iter_dir(run_dir, state)
-        transition("test", "implementation_done",
-                   extra={"directive": "run_tester",
-                          "iter_dir": str(iter_dir),
-                          "build_instruction":   cfg["llm"]["tester"]["build_instruction"],
-                          "install_instruction": cfg["llm"]["tester"]["install_instruction"],
-                          "test_instruction":    cfg["llm"]["tester"]["test_instruction"]})
+        # Read with the UNMUTATED counters (matches test/review's own idiom) —
+        # the result file was written into the iter_dir the last advance echoed,
+        # which get_iter_path recomputes identically as long as no counter here
+        # has changed yet. Since 6.6.0 this file is mandatory: run-stage /
+        # finalize-stage already validated it before reporting ok:true, so its
+        # absence here means a driver/runner bug, not a normal advisory gap.
+        result_file = get_iter_path(run_dir, state) / "implementor-result.json"
+        if not result_file.exists():
+            die(f"implementor-result.json not found at {result_file}. "
+                "run-stage/finalize-stage should have produced it — this indicates "
+                "a driver or runner bug, not a normal advisory-absence case. If this "
+                "run was created by a pre-6.6.0 driver (implementor-result.json was "
+                "optional then), write a valid status file to this exact path by hand "
+                'to unblock it — minimally: {"status": "implemented", "summary": '
+                '"<one-line outcome>"} — or start a new run.')
+        result = load_json(result_file)
+        errors = validate_against_schema(result, "implementor-result.schema.json")
+        if errors:
+            die("implementor-result.json schema violation:\n" + "\n".join(f"  - {e}" for e in errors))
+
+        if (result.get("status") == "blocked" and result.get("blocked_on") == "tests"
+                and state.get("tdd_mode", False)):
+            state["iterations"]["test_implementation"] += 1
+            if state["iterations"]["test_implementation"] > state["max"]["test_implementation"]:
+                transition("failed", "implementor_blocked_on_tests_exhausted",
+                           halt_reason="iteration-exhausted",
+                           extra={"directive": "report_failure",
+                                  "failure_details": result.get("concern") or result.get("summary", "")})
+            else:
+                # ensure_iter_dir AFTER the bump above — same idiom as test/review's
+                # own retry branches — so this lands in a NEW iteration directory.
+                iter_dir = ensure_iter_dir(run_dir, state)
+                _append_attempt_entry(pathlib.Path(attempts_path), "implementation",
+                                      state["iterations"], _implementor_blocked_text(result))
+                transition("test_implementation", "implementor_blocked_on_tests",
+                           extra={"directive": "run_test_implementor",
+                                  "iter_dir": str(iter_dir),
+                                  "contract_path": contract_path,
+                                  "attempts_path": attempts_path,
+                                  "test_implementor_config": cfg["llm"].get("test_implementor", {}),
+                                  "test_implementation_iter": state["iterations"]["test_implementation"],
+                                  "note": ("The implementor reported the authored tests may "
+                                           f"contradict the contract: {result.get('concern') or result.get('summary', '')}. "
+                                           "Verify against the contract and revise only what actually "
+                                           "contradicts it — the implementor's read may be wrong.")})
+        else:
+            # No counter changed — ensure_iter_dir resolves to the SAME dir as
+            # the read above (matches the old code's single iter_dir here).
+            iter_dir = ensure_iter_dir(run_dir, state)
+            transition("test", "implementation_done",
+                       extra={"directive": "run_tester",
+                              "iter_dir": str(iter_dir),
+                              "build_instruction":   cfg["llm"]["tester"]["build_instruction"],
+                              "install_instruction": cfg["llm"]["tester"]["install_instruction"],
+                              "test_instruction":    cfg["llm"]["tester"]["test_instruction"]})
 
     # --- test ---
     elif current == "test":
@@ -1772,11 +1833,10 @@ def cmd_validate_result(args) -> None:
     except json.JSONDecodeError:
         # Tolerate a stray markdown fence / surrounding prose around an otherwise
         # valid JSON object — the same leniency a json role's `default` normalizer
-        # gets. A "do not fence this JSON" prompt directive is advisory, not
-        # enforced, and this is the implementor/test_implementor's optional
-        # result-status file, not schema-validated by run-stage itself for a bash
-        # runner (see SKILL.md Global Rule 5) — losing a deliberate `blocked`
-        # signal to a stray fence would defeat the point of this file.
+        # gets. This command is a standalone/manual debugging tool since 6.6.0
+        # (the normal SKILL workflow now gets this validation for free from
+        # run-stage/finalize-stage), but stays lenient for the same reason: a
+        # "do not fence this JSON" prompt directive is advisory, not enforced.
         data = _normalize_output(raw, "default")
         if data is None:
             die(f"Invalid JSON in {result_path}")
@@ -1897,10 +1957,14 @@ def cmd_record_changes(args) -> None:
 # (The 3.0.0 "named" category and its spec_author role were removed in 5.0.0 —
 #  the plan.md body is the contract now; init validates it deterministically.)
 ROLE_META = {
-    "test_implementor": {"category": "file",  "schema": None,            "prompt": "dp-test-implementor"},
-    "implementor":      {"category": "file",  "schema": None,            "prompt": "dp-implementor"},
-    "tester":           {"category": "json",  "schema": "test-result",   "prompt": "dp-tester"},
-    "reviewer":         {"category": "json",  "schema": "review-result", "prompt": "dp-reviewer"},
+    # category drives boundary/manifest handling (the git delta is the checked
+    # artifact); schema drives JSON-result validation (judge()/finalize-stage) —
+    # the two axes are independent since 6.6.0. A file role's status JSON is
+    # validated exactly like a json role's result once it has a schema.
+    "test_implementor": {"category": "file",  "schema": "implementor-result", "prompt": "dp-test-implementor"},
+    "implementor":      {"category": "file",  "schema": "implementor-result", "prompt": "dp-implementor"},
+    "tester":           {"category": "json",  "schema": "test-result",       "prompt": "dp-tester"},
+    "reviewer":         {"category": "json",  "schema": "review-result",     "prompt": "dp-reviewer"},
 }
 
 
@@ -1942,12 +2006,13 @@ def build_stage_input(result: dict, project_dir: str) -> "dict | None":
     elif role == "reviewer" and iter_dir:
         si["output_file"] = str(pathlib.Path(iter_dir) / "review-result.json")
     elif role == "implementor" and iter_dir:
-        # A file role's PRIMARY result is still the git delta — this is an optional
-        # additional signal (see output_directive/dp-implementor.md) so a role that
-        # concludes the contract can't be satisfied has a structured channel to say
-        # so, instead of grinding indefinitely (esp. in main-session, which has no
-        # external supervision at all — see AGENTS.md "Worktree isolation" security
-        # note on main-session's lack of a hard envelope, same root cause here).
+        # A file role's PRIMARY *content* result is still the git delta — but its
+        # status JSON is a REQUIRED, schema-validated channel (see judge()/
+        # finalize-stage) so a role that concludes the contract can't be
+        # satisfied has a structured way to say so, instead of grinding
+        # indefinitely (esp. in main-session, which has no external supervision
+        # at all — see AGENTS.md "Worktree isolation" security note on
+        # main-session's lack of a hard envelope, same root cause here).
         si["output_file"] = str(pathlib.Path(iter_dir) / "implementor-result.json")
     elif role == "test_implementor" and iter_dir:
         si["output_file"] = str(pathlib.Path(iter_dir) / "test_implementor-result.json")
@@ -2223,10 +2288,14 @@ def cmd_run_stage(args) -> None:
           path to write to.
 
         implementor/test_implementor (file roles) get a THIRD, distinct branch:
-        unlike a json role, `output_file` there is an OPTIONAL additional signal,
-        not the role's primary result (the git delta still is) — so it is always
+        their status JSON is now REQUIRED and schema-validated the same way a
+        json role's result is (see judge()/finalize-stage) — the git delta
+        remains the role's primary *content* result (what boundary/manifest
+        checks), but the status JSON is no longer optional. It is still always
         "write it yourself," never a stdout-capture directive (the model's stdout
-        during a file role is tool-call chatter, not a clean JSON answer)."""
+        during a file role is tool-call chatter, not a clean JSON answer) —
+        switching to stdout-capture (as a json role can) is future work, not
+        done here; see RUNNERS.md's codex+`--worktree` known-limitation note."""
         if meta["category"] == "json":
             what = "a single valid JSON object (no markdown fences, nothing else)"
             if "{output_file}" in runner.get("command", ""):
@@ -2268,8 +2337,9 @@ def cmd_run_stage(args) -> None:
         system_file.write_text(persona + system_text, encoding="utf-8")
         directive = ""
         # json roles get output_file as their PRIMARY (only) result channel;
-        # implementor/test_implementor get it as an optional additional signal
-        # (see output_directive) — both need the directive text + a clean slate.
+        # implementor/test_implementor get it as a required status-JSON channel
+        # alongside their git delta (see output_directive) — both need the
+        # directive text + a clean slate.
         wants_output_file = meta["category"] == "json" or role in ("implementor", "test_implementor")
         if wants_output_file:
             directive += output_directive(runners[0])
@@ -2309,7 +2379,17 @@ def cmd_run_stage(args) -> None:
         # in the reason (file roles already include it; do it for json too).
         err = f" (exit {returncode}: {log_tail})" if returncode else ""
         if meta["category"] == "file":
-            return (None if returncode == 0 else f"exit {returncode}: {log_tail}"), returncode
+            if returncode != 0:
+                return f"exit {returncode}: {log_tail}", returncode
+            # The code delta is the role's primary result, but its status JSON
+            # (implementor/test_implementor) is now mandatory and validated the
+            # same way a json role's result is — a bash runner that exits 0 but
+            # fails to produce a valid status file is NOT ok:true.
+            if meta.get("schema"):
+                problem = _finalize_json(output_file, "default", meta["schema"])
+                if problem:
+                    return (problem if problem.startswith("schema:") else problem + err), returncode
+            return None, returncode
         # json role — shared normalize → schema → persist-canonical (same path a
         # subagent/main-session result takes via cmd_finalize_stage).
         problem = _finalize_json(output_file, runner.get("normalizer", "default"), meta["schema"])
@@ -2335,7 +2415,11 @@ def cmd_run_stage(args) -> None:
 
         # One error-fed retry of the SAME runner before falling back: rewrite the
         # user prompt with the validation problem so the model can self-correct.
-        if problem and meta["category"] == "json":
+        # A json role always retries on any problem. A file role only retries
+        # when it ran successfully but failed to produce a valid status JSON
+        # (exit_code == 0 there — judge() returns the nonzero returncode itself
+        # for a crash, which must NOT retry the whole implementation attempt).
+        if problem and (meta["category"] == "json" or (meta.get("schema") and exit_code == 0)):
             user_file.write_text(
                 runner_user + "\n\n## Your previous output was REJECTED\n" + problem +
                 "\nProduce a corrected result.\n", encoding="utf-8")
@@ -2350,10 +2434,10 @@ def cmd_run_stage(args) -> None:
             return
         attempts.append({"runner": idx, "exit": exit_code, "problem": problem})
 
-    # Every runner failed: for json roles (and implementor/test_implementor's
-    # optional status file), remove any partial output so a downstream `advance`
-    # (or the SKILL's result-status check) cannot mistake it for a valid result
-    # (n3 hardening).
+    # Every runner failed: for any role with a schema (json roles, and
+    # implementor/test_implementor's now-mandatory status file), remove any
+    # partial output so a downstream `advance` cannot mistake it for a valid
+    # result (n3 hardening).
     if (meta["category"] == "json" or role in ("implementor", "test_implementor")) and output_file.exists():
         output_file.unlink()
 
@@ -2367,18 +2451,22 @@ def cmd_run_stage(args) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_finalize_stage(args) -> None:
-    """Validate a json-role result the SKILL obtained from a main-session/subagent
+    """Validate a role's result the SKILL obtained from a main-session/subagent
     runner: normalize (strip fences), schema-check, and persist the canonical JSON —
-    the exact post-processing a bash json role gets inside run-stage. A file role
-    needs no finalize (its result is the git delta), so this is a no-op there."""
+    the exact post-processing a bash json role gets inside run-stage. Since 6.6.0
+    this also covers implementor/test_implementor's now-mandatory status JSON
+    (same pipeline, keyed off schema presence rather than category) — a file
+    role's git delta is still its primary content result, but its status JSON is
+    validated identically to a json role's. Only a schema-less role (none
+    currently exist) is a no-op here."""
     run_dir = pathlib.Path(args.run).resolve()
     role = args.role
     if role not in ROLE_META:
         die(f"Unknown role: {role}")
     meta = ROLE_META[role]
-    if meta["category"] != "json":
+    if not meta.get("schema"):
         emit({"ok": True, "role": role, "category": meta["category"],
-              "note": "file role — result is the git delta; nothing to finalize"})
+              "note": "no schema for this role — nothing to finalize"})
         return
     si_path = run_dir / args.stage_input if pathlib.Path(args.stage_input).name == args.stage_input else pathlib.Path(args.stage_input)
     stage_input = load_json(si_path)
@@ -2397,7 +2485,7 @@ def cmd_finalize_stage(args) -> None:
     if problem:
         emit({"ok": False, "role": role, "problem": problem, "output_file": str(output_file)})
         sys.exit(2)
-    emit({"ok": True, "role": role, "category": "json", "output_file": str(output_file)})
+    emit({"ok": True, "role": role, "category": meta["category"], "output_file": str(output_file)})
 
 
 # ---------------------------------------------------------------------------

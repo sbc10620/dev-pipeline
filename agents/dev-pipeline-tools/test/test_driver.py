@@ -113,6 +113,15 @@ def test_result(status="pass", failure_type=None, **extra):
     return obj
 
 
+def implementor_result(status="implemented", **extra):
+    """Build a schema-valid implementor-result dict (shared by test_implementor)."""
+    obj = {"status": status, "summary": "stub implementor result"}
+    if status == "blocked":
+        obj["concern"] = "stub concern"
+    obj.update(extra)
+    return obj
+
+
 def review_result(verdict="approve", findings=None, **extra):
     """Build a schema-valid review-result dict."""
     obj = {
@@ -241,6 +250,24 @@ class Pipeline:
             json.dumps(test_result(**kwargs)), encoding="utf-8"
         )
 
+    def write_implementor_result(self, **kwargs):
+        """Write the (since 6.6.0, mandatory) implementor-result.json the
+        implementation state's advance reads to decide its next transition."""
+        d = self._current_iter_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "implementor-result.json").write_text(
+            json.dumps(implementor_result(**kwargs)), encoding="utf-8"
+        )
+
+    def write_test_implementor_result(self, **kwargs):
+        """Write the (since 6.6.0, mandatory) test_implementor-result.json —
+        shares the implementor-result schema/factory."""
+        d = self._current_iter_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "test_implementor-result.json").write_text(
+            json.dumps(implementor_result(**kwargs)), encoding="utf-8"
+        )
+
     def write_red_test_result(self, **kwargs):
         """Write the red-test-result.json the red_test state consumes."""
         d = self._current_iter_dir()
@@ -290,6 +317,7 @@ class PipelineTestCase(unittest.TestCase):
         landed in `test` (i.e. the implementation→test transition output)."""
         r1 = p.advance()  # init -> implementation
         self.assertEqual(r1.json["next_state"], "implementation")
+        p.write_implementor_result(status="implemented")
         r2 = p.advance()  # implementation -> test
         self.assertEqual(r2.json["next_state"], "test")
         return r2.json
@@ -307,6 +335,7 @@ class TestHappyPath(PipelineTestCase):
         self.assertEqual(r.json["directive"], "run_implementor")
 
         # implementation -> test
+        p.write_implementor_result(status="implemented")
         r = p.advance()
         self.assertEqual(r.json["next_state"], "test")
         self.assertEqual(r.json["directive"], "run_tester")
@@ -368,6 +397,7 @@ class TestTestFailures(PipelineTestCase):
         self.assertEqual(r.json["iterations"]["test"], 1)
 
         # Re-run implementation -> test, then fail again to exhaust.
+        p.write_implementor_result(status="implemented")
         r = p.advance()
         self.assertEqual(r.json["next_state"], "test")
         p.write_test_result(status="fail", failure_type="code")
@@ -409,6 +439,7 @@ class TestReviewFailures(PipelineTestCase):
         self.assertEqual(r.json["iterations"]["review"], 1)
 
         # implementation -> test -> review again, then fail to exhaust.
+        p.write_implementor_result(status="implemented")
         self.assertEqual(p.advance().json["next_state"], "test")
         p.write_test_result(status="pass")
         self.assertEqual(p.advance().json["next_state"], "review")
@@ -662,7 +693,8 @@ class TestWorktree(PipelineTestCase):
         snap_path = p.run_dir / "config.snapshot.json"
         snap = json.loads(snap_path.read_text(encoding="utf-8"))
         snap["runners"]["implementor"] = [
-            {"type": "bash", "command": "pwd > {project_root}/cwd_marker.txt"},
+            {"type": "bash", "command": "pwd > {project_root}/cwd_marker.txt && "
+             "echo '{\"status\":\"implemented\",\"summary\":\"stub\"}' > {output_file}"},
         ]
         snap_path.write_text(json.dumps(snap), encoding="utf-8")
 
@@ -1111,6 +1143,7 @@ class TestResume(PipelineTestCase):
         p = self.started(tdd_mode=False)
         p.advance()  # init -> implementation
         window = (p.run_dir / "state.json").read_bytes()  # state == implementation
+        p.write_implementor_result(status="implemented")
         p.advance()  # implementation -> test; writes last-advance {prev:impl, next:test}
         (p.run_dir / "state.json").write_bytes(window)     # roll state.json back to the window
         res = self._resume(p)
@@ -1157,6 +1190,7 @@ class TestResume(PipelineTestCase):
         # run_self_evolution), not a gutted "nothing to resume".
         p = self.started(tdd_mode=False, run_self_evolution=True)
         p.advance()  # implementation
+        p.write_implementor_result(status="implemented")
         p.advance()  # test
         p.write_test_result(status="pass")
         p.advance()  # review
@@ -1214,6 +1248,7 @@ class TestResume(PipelineTestCase):
         # duplicated attempts line — pins the idempotency the "accepted limits" claims.
         p = self.started(tdd_mode=False)
         p.advance()  # init -> implementation
+        p.write_implementor_result(status="implemented")
         p.advance()  # implementation -> test
         p.write_test_result(status="fail", failure_type="code",
                             failure_details="boom", log_excerpt="E boom")
@@ -1581,6 +1616,7 @@ class TestTDD(PipelineTestCase):
         self._to_red_test(p)
         p.write_red_test_result(status="fail", failure_type="code")
         self.assertEqual(p.advance().json["next_state"], "implementation")  # RED confirmed
+        p.write_implementor_result(status="implemented")
         self.assertEqual(p.advance().json["next_state"], "test")
         p.write_test_result(status="pass")
         r = p.advance()
@@ -1708,6 +1744,113 @@ class TestTDD(PipelineTestCase):
         self.assertEqual(r.json["next_state"], "test_implementation")
 
 
+class TestImplementorBlockedRouting(PipelineTestCase):
+    """6.6.0: `implementation`'s advance reads implementor-result.json (now
+    mandatory) and routes status:"blocked"+blocked_on:"tests" (TDD only) to
+    test_implementation instead of test."""
+
+    def _to_implementation(self, p):
+        """TDD: init -> test_implementation -> red_test -> implementation
+        (RED confirmed)."""
+        r1 = p.advance()  # init -> test_implementation
+        self.assertEqual(r1.json["next_state"], "test_implementation")
+        r2 = p.advance()  # test_implementation -> red_test
+        self.assertEqual(r2.json["next_state"], "red_test")
+        p.write_red_test_result(status="fail", failure_type="code")
+        r3 = p.advance()  # red confirmed -> implementation
+        self.assertEqual(r3.json["next_state"], "implementation")
+        return r3
+
+    def test_blocked_on_tests_routes_to_test_implementation(self):
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        self._to_implementation(p)
+        p.write_implementor_result(status="blocked", blocked_on="tests",
+                                   concern="AC1's test asserts the wrong return value")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "test_implementation")
+        self.assertEqual(r.json["directive"], "run_test_implementor")
+        self.assertEqual(r.json["iterations"]["test_implementation"], 1)
+        self.assertEqual(r.json["test_implementation_iter"], 1)
+        self.assertIn("test_implementor_config", r.json)
+        self.assertIn("AC1's test asserts the wrong return value", r.json["note"])
+        body = (p.run_dir / "attempts.md").read_text(encoding="utf-8")
+        self.assertIn("state=implementation", body)
+        self.assertIn("AC1's test asserts the wrong return value", body)
+
+    def test_blocked_on_tests_exhausts_to_failed(self):
+        p = self.make_pipeline(tdd_mode=True, max_test_implementation_iteration=1)
+        p.init()
+        self._to_implementation(p)
+        p.write_implementor_result(status="blocked", blocked_on="tests", concern="first")
+        r1 = p.advance()
+        self.assertEqual(r1.json["next_state"], "test_implementation")
+        self.assertEqual(r1.json["iterations"]["test_implementation"], 1)
+        # Repair pass lands back on `test` (red_phase already false); fail it so
+        # the implementor runs again and can re-report blocked_on:"tests".
+        r2 = p.advance()  # test_implementation -> test (repair)
+        self.assertEqual(r2.json["next_state"], "test")
+        p.write_test_result(status="fail", failure_type="code")
+        r3 = p.advance()  # test -> implementation (retry)
+        self.assertEqual(r3.json["next_state"], "implementation")
+        p.write_implementor_result(status="blocked", blocked_on="tests", concern="second")
+        r4 = p.advance()
+        self.assertEqual(r4.json["next_state"], "failed")
+        self.assertEqual(r4.json["halt_reason"], "iteration-exhausted")
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["history"][-1]["outcome"], "implementor_blocked_on_tests_exhausted")
+
+    def test_blocked_on_tests_non_tdd_falls_through_to_test(self):
+        # blocked_on:"tests" only means something in TDD (there is no test
+        # author to hand off to otherwise) — a non-TDD run must ignore it.
+        p = self.started(tdd_mode=False)
+        p.advance()  # init -> implementation
+        p.write_implementor_result(status="blocked", blocked_on="tests", concern="irrelevant")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "test")
+
+    def test_blocked_contract_routes_to_test(self):
+        # blocked_on omitted (or "contract") is the implementor-can't-satisfy-
+        # the-contract case — routes to test as before, not test_implementation.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        self._to_implementation(p)
+        p.write_implementor_result(status="blocked", concern="the contract contradicts itself")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "test")
+        self.assertEqual(r.json["iterations"]["test_implementation"], 0)
+
+    def test_implementation_missing_result_file_dies(self):
+        p = self.started(tdd_mode=False)
+        p.advance()  # init -> implementation
+        # No implementor-result.json written.
+        r = p.advance()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("implementor-result.json not found", r.stderr)
+
+    def test_implementation_schema_invalid_result_dies(self):
+        p = self.started(tdd_mode=False)
+        p.advance()  # init -> implementation
+        p.write_raw_result_file("implementor-result.json",
+                                json.dumps({"status": "maybe"}))
+        r = p.advance()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("schema violation", r.stderr)
+
+    def test_test_implementor_result_not_read_by_advance(self):
+        # By design (6.6.0), test_implementor's status file is mandatory+
+        # validated at the run-stage/finalize-stage layer, but cmd_advance's
+        # test_implementation branch does not read it — there's no other role
+        # to route a test-author "blocked" to. A blocked test_implementor
+        # result must not change the (unconditional) red_test/test landing.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        p.write_test_implementor_result(status="blocked", concern="no meaningful test for AC2")
+        r = p.advance()  # test_implementation -> red_test, unaffected by the file above
+        self.assertEqual(r.json["next_state"], "red_test")
+
+
 class TestUpgradeSafety(PipelineTestCase):
     """A run created by an older driver (no tdd_mode/red_phase/test_implementation
     keys) must resume without crashing under the new driver."""
@@ -1715,6 +1858,7 @@ class TestUpgradeSafety(PipelineTestCase):
     def test_legacy_state_resume_does_not_crash(self):
         p = self.started()  # modern init
         p.advance()  # init -> implementation
+        p.write_implementor_result(status="implemented")
         p.advance()  # implementation -> test
 
         # Rewrite state.json into the 1.3.0 shape: strip the new keys.
@@ -1879,6 +2023,7 @@ class TestAdvanceEchoes(PipelineTestCase):
         self.assertEqual(j["build_instruction"], "make build")
         self.assertNotIn("test_paths", j)  # legacy: no test boundary
 
+        p.write_implementor_result(status="implemented")
         r2 = p.advance()  # implementation -> test
         self.assertEqual(r2.json["next_state"], "test")
         self.assertFalse(r2.json["tdd_mode"])
@@ -1946,6 +2091,7 @@ class TestStageInputWiring(PipelineTestCase):
     def test_advance_writes_tester_stage_input(self):
         p = self.started(tdd_mode=False)
         p.advance()  # init -> implementation (no iter_dir echoed yet)
+        p.write_implementor_result(status="implemented")
         p.advance()  # implementation -> test  (tester; iter_dir echoed)
         si = json.loads((p.run_dir / "iterations" / "0" / "stage-input.json").read_text(encoding="utf-8"))
         self.assertEqual(si["role"], "tester")
@@ -1955,10 +2101,12 @@ class TestStageInputWiring(PipelineTestCase):
         self.assertNotIn("tester_runners", si["inputs"])  # M1: runner arrays never reach the prompt
 
     def test_advance_writes_implementor_output_file(self):
-        # 6.5.0: implementor (a file role) gets an optional output_file too, so its
-        # prompt can be told an exact path for its result-status JSON — iter_dir
-        # itself is deliberately never exposed to a role's prompt
-        # (_STAGE_INPUT_CONTROL), so this wiring is the only way it learns the path.
+        # 6.5.0: implementor (a file role) gets an output_file too, so its prompt
+        # can be told an exact path for its status JSON — iter_dir itself is
+        # deliberately never exposed to a role's prompt (_STAGE_INPUT_CONTROL),
+        # so this wiring is the only way it learns the path. Since 6.6.0 this
+        # status JSON is mandatory (validated by judge()/finalize-stage), not
+        # merely optional.
         p = self.started(tdd_mode=False)
         p.advance()  # init -> implementation (iter_dir echoed here)
         si = json.loads((p.run_dir / "iterations" / "0" / "stage-input.json").read_text(encoding="utf-8"))
@@ -1990,7 +2138,9 @@ class TestRunStageIntegration(PipelineTestCase):
 
     def test_file_role_from_driver_written_stage_input(self):
         cfg = valid_config(tdd_mode=False)
-        cfg["runners"]["implementor"] = [{"type": "bash", "command": "true"}]
+        cfg["runners"]["implementor"] = [
+            {"type": "bash", "command": "echo '{\"status\":\"implemented\",\"summary\":\"stub\"}' > {output_file}"},
+        ]
         p, si = self._to_impl_stage_input(cfg)
         r = run_driver("run-stage", "--run", str(p.run_dir), "--role", "implementor",
                        "--stage-input", str(si))
@@ -2053,10 +2203,12 @@ class TestRunStage(unittest.TestCase):
                           "--role", role, "--stage-input", str(si_path))
 
     def test_file_role_fallback(self):
-        # 1st runner fails (exit 1), 2nd writes a file and succeeds.
+        # 1st runner fails (exit 1), 2nd writes a file + the (now-mandatory)
+        # status JSON and succeeds.
         self._cfg("implementor", [
             {"type": "bash", "command": "exit 1"},
-            {"type": "bash", "command": "echo x > {project_root}/made.py"},
+            {"type": "bash", "command": "echo x > {project_root}/made.py && "
+             "echo '{\"status\":\"implemented\",\"summary\":\"stub\"}' > {output_file}"},
         ])
         r = self._run("implementor", self._si("implementor"))
         self.assertEqual(r.returncode, 0)
@@ -2064,10 +2216,34 @@ class TestRunStage(unittest.TestCase):
         self.assertEqual(r.json["runner"], 1)
         self.assertTrue((self.proj / "made.py").exists())
 
+    def test_file_role_status_json_missing_fails_ok(self):
+        # 6.6.0: exit 0 but no status JSON produced is no longer ok:true — the
+        # role's status file is mandatory, validated the same way a json role's
+        # result is. A single runner with no fallback ends in all_runners_failed.
+        self._cfg("implementor", [{"type": "bash", "command": "true"}])
+        r = self._run("implementor", self._si("implementor"))
+        self.assertNotEqual(r.returncode, 0)
+        j = json.loads(r.stdout)
+        self.assertFalse(j["ok"])
+        self.assertEqual(j["reason"], "all_runners_failed")
+
+    def test_file_role_status_json_crash_does_not_retry(self):
+        # A non-zero exit must NOT trigger the error-fed retry (that would redo
+        # the whole implementation attempt for a plain crash) — it fails
+        # immediately, same as before 6.6.0.
+        self._cfg("implementor", [{"type": "bash", "command": "echo boom 1>&2; exit 3"}])
+        r = self._run("implementor", self._si("implementor"))
+        self.assertNotEqual(r.returncode, 0)
+        j = json.loads(r.stdout)
+        self.assertFalse(j["ok"])
+        self.assertEqual(len(j["attempts"]), 1)  # no retry attempt appended
+        self.assertIn("exit 3", j["attempts"][0]["problem"])
+
     def test_implementor_bash_prompt_gets_status_directive(self):
-        # 6.5.0: the assembled prompt for a bash-runner implementor must name the
-        # exact path for its optional result-status JSON (never guessed by the
-        # model — iter_dir/work_dir is never in the prompt's own inputs).
+        # The assembled prompt for a bash-runner implementor must name the
+        # exact path for its (mandatory, since 6.6.0) result-status JSON — never
+        # guessed by the model (iter_dir/work_dir is never in the prompt's own
+        # inputs).
         self._cfg("implementor", [{"type": "bash", "command": "true"}])
         self._run("implementor", self._si("implementor"))
         user_text = (self.run_dir / "w" / "implementor-user.txt").read_text(encoding="utf-8")
@@ -2086,7 +2262,9 @@ class TestRunStage(unittest.TestCase):
         # if resolution broke, the role would silently run on the "You are the
         # <role>." stub and emit a stderr WARNING. Assert the real prose is found
         # and assembled instead.
-        self._cfg("implementor", [{"type": "bash", "command": "true"}])
+        self._cfg("implementor", [
+            {"type": "bash", "command": "echo '{\"status\":\"implemented\",\"summary\":\"stub\"}' > {output_file}"},
+        ])
         r = self._run("implementor", self._si("implementor"))
         self.assertEqual(r.returncode, 0)
         self.assertNotIn("WARNING: prose file", r.stderr)
@@ -2241,7 +2419,8 @@ class TestRunStage(unittest.TestCase):
         marker = self.proj / "bg_marker"
         self._cfg("implementor", [
             {"type": "bash",
-             "command": f"echo shell-done; (sleep 2; echo grandchild-done; touch {{project_root}}/bg_marker) & true",
+             "command": (f"echo shell-done; (sleep 2; echo grandchild-done; touch {{project_root}}/bg_marker) & "
+                        "echo '{\"status\":\"implemented\",\"summary\":\"stub\"}' > {output_file}"),
              "timeout": 10},
         ])
         r = self._run("implementor", self._si("implementor"))
@@ -2261,7 +2440,8 @@ class TestRunStage(unittest.TestCase):
         # complete without raising (e.g. a stray `time.monotonic() + None`
         # TypeError) and without ever reporting "timeout".
         self._cfg("implementor", [
-            {"type": "bash", "command": "sleep 2; echo done"},
+            {"type": "bash", "command": "sleep 2; echo done; "
+             "echo '{\"status\":\"implemented\",\"summary\":\"stub\"}' > {output_file}"},
         ])
         r = self._run("implementor", self._si("implementor"))
         self.assertEqual(r.returncode, 0)
@@ -2276,7 +2456,8 @@ class TestRunStage(unittest.TestCase):
         # real-time claim, which this test alone would pass even under a
         # batch-write-at-exit implementation.
         self._cfg("implementor", [
-            {"type": "bash", "command": "echo hello-stdout; echo hello-stderr 1>&2"},
+            {"type": "bash", "command": "echo hello-stdout; echo hello-stderr 1>&2; "
+             "echo '{\"status\":\"implemented\",\"summary\":\"stub\"}' > {output_file}"},
         ])
         r = self._run("implementor", self._si("implementor"))
         self.assertEqual(r.returncode, 0)
@@ -2295,7 +2476,8 @@ class TestRunStage(unittest.TestCase):
         # post-sleep line must NOT appear until after it does — a batched,
         # write-at-exit implementation would fail the second assertion.
         self._cfg("implementor", [
-            {"type": "bash", "command": "printf 'PRE_MARKER\\n'; sleep 2; printf 'POST_MARKER\\n'"},
+            {"type": "bash", "command": "printf 'PRE_MARKER\\n'; sleep 2; printf 'POST_MARKER\\n'; "
+             "echo '{\"status\":\"implemented\",\"summary\":\"stub\"}' > {output_file}"},
         ])
         si_path = self._si("implementor")
         log_path = self.run_dir / "w" / "implementor-runner.log"
@@ -2349,11 +2531,12 @@ class TestRunStage(unittest.TestCase):
     def test_runner_log_truncated_fresh_each_run_stage_call(self):
         # A fresh run-stage call for the same role/work_dir must not accumulate
         # unrelated content from a PRIOR call into the new log.
-        self._cfg("implementor", [{"type": "bash", "command": "echo first-call"}])
+        status_write = " && echo '{\"status\":\"implemented\",\"summary\":\"stub\"}' > {output_file}"
+        self._cfg("implementor", [{"type": "bash", "command": "echo first-call" + status_write}])
         r1 = self._run("implementor", self._si("implementor"))
         self.assertIn("first-call", pathlib.Path(r1.json["log_file"]).read_text(encoding="utf-8"))
 
-        self._cfg("implementor", [{"type": "bash", "command": "echo second-call"}])
+        self._cfg("implementor", [{"type": "bash", "command": "echo second-call" + status_write}])
         r2 = self._run("implementor", self._si("implementor"))
         text2 = pathlib.Path(r2.json["log_file"]).read_text(encoding="utf-8")
         self.assertIn("second-call", text2)
@@ -2715,12 +2898,28 @@ class TestRunnerModes(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("problem", r.stdout)
 
-    def test_finalize_stage_file_role_is_noop(self):
+    def test_finalize_stage_file_role_validates_status_json(self):
+        # 6.6.0: a file role's status JSON is no longer a finalize-stage no-op —
+        # it goes through the identical normalize/schema/persist path a json
+        # role's result gets, keyed off schema presence rather than category.
         run_dir, proj, work, sp = self._setup("implementor", [{"type": "main-session"}], json_role=False)
+        outf = work / "implementor-output.json"
+        outf.write_text("```json\n" + json.dumps(implementor_result(status="implemented")) + "\n```\n",
+                        encoding="utf-8")
         r = run_driver("finalize-stage", "--run", str(run_dir), "--role", "implementor", "--stage-input", str(sp))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(r.json["ok"])
-        self.assertIn("file role", r.json["note"])
+        # the hardcoded "category": "json" bug (pre-6.6.0) must not resurface —
+        # a file role's emit must report its own true category.
+        self.assertEqual(r.json["category"], "file")
+        self.assertNotIn("```", outf.read_text(encoding="utf-8"))  # fence stripped, canonical persisted
+
+    def test_finalize_stage_file_role_rejects_invalid_status_json(self):
+        run_dir, proj, work, sp = self._setup("implementor", [{"type": "main-session"}], json_role=False)
+        (work / "implementor-output.json").write_text("not json at all", encoding="utf-8")
+        r = run_driver("finalize-stage", "--run", str(run_dir), "--role", "implementor", "--stage-input", str(sp))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("problem", r.stdout)
 
     def test_run_stage_file_role_handoff(self):
         # A file-role (implementor) handoff: no JSON-role output directive ("valid

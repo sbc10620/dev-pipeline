@@ -23,6 +23,11 @@
       "type": "array",
       "items": { "type": "string" },
       "description": "Optional. Smallest-reasonable-assumption notes made to resolve a contract ambiguity (not a codebase-understanding question)."
+    },
+    "blocked_on": {
+      "type": "string",
+      "enum": ["contract", "tests"],
+      "description": "Optional, meaningful only when status is 'blocked'. 'contract' (the default if omitted): the contract itself is unsatisfiable as specified. 'tests' (implementor only, TDD): the implementor is confident the authored tests — not the contract — contradict the contract; the driver routes this back to the test author instead of retrying the implementor. Not schema-enforced against status, matching this schema's existing concern/status convention."
     }
   }
 }

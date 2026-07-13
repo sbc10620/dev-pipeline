@@ -23,8 +23,10 @@ cline templates below never mention `{output_file}` literally.
 ## Bash runner prompts should be identical wherever possible
 
 `assemble_prompt()` builds one system+user prompt regardless of CLI; only the
-trailing output-instruction line (json roles only) varies, and only by command
-*shape* (does it reference `{output_file}`?), never by CLI name. Keep it that
+trailing output-instruction line varies — json roles by command *shape* (does
+it reference `{output_file}`?), file roles (implementor/test_implementor)
+always with a "write your status JSON here" instruction — and never by CLI
+name. Keep it that
 way when adding a new CLI: don't hand-craft CLI-specific prompt content in
 `dp-*.md` — if a CLI needs different framing, that's a sign the command's
 result/log strategy (below) is wrong, not that the prompt needs to diverge.
@@ -42,9 +44,10 @@ concatenate with explicit headers so the model can still tell the two apart:
 `cline` actually **does** have a `-s`/`--system <system-prompt>` flag — but it
 takes an inline string, not a file, and this project's convention is to keep
 every bash-runner invocation to a small, fixed flag set per CLI (for cline:
-`--auto-approve`, `-t`) rather than growing it ad hoc, so cline uses the same
-concatenation convention as codex instead of `-s`. If you'd rather use `-s`,
-it works too — nothing here depends on cline lacking the flag.
+`--auto-approve`, plus `-t` only if you've opted into a runner `timeout`, see
+below) rather than growing it ad hoc, so cline uses the same concatenation
+convention as codex instead of `-s`. If you'd rather use `-s`, it works too —
+nothing here depends on cline lacking the flag.
 
 ## Why the cline templates don't strip ANSI
 
@@ -178,12 +181,13 @@ Add `--output-format stream-json --verbose` before the final flag for a real-tim
 ```json
 { "type": "bash", "command": "codex exec -s workspace-write -C {project_root} --skip-git-repo-check -c model_reasoning_summary=auto \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null" }
 ```
+⚠️ **Known limitation: codex + `--worktree`.** Under `--worktree`, `{project_root}` (i.e. `-C`) substitutes to `work_root` — the isolated worktree checkout — but this role's (since 6.6.0, mandatory) status JSON lives at `{output_file}`, which is always under the *true* `project_root`'s `.dev-pipeline/`, outside codex's `workspace-write` sandbox root. codex will be unable to write it, and the run-stage attempt fails (loudly, as of 6.6.0 — see driver.py's `judge()` — rather than silently omitting the file as before). Prefer `claude` or `cline` for this role when using `--worktree`; a fix (either widening codex's writable roots or switching this role to a `-o {output_file}` stdout-capture, as tester/reviewer already use) is tracked as future work, not yet implemented here.
 
 **cline**
 ```json
-{ "type": "bash", "command": "cline --auto-approve true -t 570 \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\"" }
+{ "type": "bash", "command": "cline --auto-approve true \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\"" }
 ```
-`-t 570` gives cline its own soft timeout. The runner's `timeout` field is optional and unbounded by default — if you set one, keep `-t` a little under it so cline exits cleanly instead of being SIGKILLed by the driver; if you leave the runner's `timeout` unset, cline's own `-t` is the only cap in play.
+`-t <seconds>` is cline's own soft timeout — **optional**, omitted above (cline defaults `-t` to `0`, no timeout, matching the driver's own runner `timeout` being unset by default). If you set the runner's `timeout` field, add `-t` here too, a little under it, so cline exits cleanly on its own instead of being SIGKILLed by the driver. (A prior version of this template hardcoded `-t 570` — kept, not merely overlooked, when 6.3.0 removed the driver's own default 10-minute runner cap, on the reasoning that cline should still have *some* ceiling if the runner's own `timeout` was left unset. Removed in 6.6.0: that reasoning gave cline alone a hidden ~9.5-minute ceiling no other CLI's template carried, at odds with the driver's unbounded-by-default philosophy — a user who wants a cap can set the runner's own `timeout` explicitly, same as for any other CLI.)
 
 ## test_implementor (file role, TDD only)
 
@@ -198,10 +202,11 @@ Same shape as implementor, tools scoped to writing tests (no `Bash`):
 ```json
 { "type": "bash", "command": "codex exec -s workspace-write -C {project_root} --skip-git-repo-check -c model_reasoning_summary=auto \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null" }
 ```
+⚠️ Same codex + `--worktree` known limitation as the implementor above — see that section.
 
 **cline**
 ```json
-{ "type": "bash", "command": "cline --auto-approve true -t 570 \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\"" }
+{ "type": "bash", "command": "cline --auto-approve true \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\"" }
 ```
 Note: none of these three CLIs restrict writes by path natively (`--allowedTools`/`-s`/`--auto-approve` are not path-scoped) — the `test_paths` role boundary is enforced post-hoc by `driver check-boundary`, the same for every CLI.
 
@@ -220,7 +225,7 @@ Note: none of these three CLIs restrict writes by path natively (`--allowedTools
 
 **cline**
 ```json
-{ "type": "bash", "command": "cline --auto-approve true -t 570 \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\"", "normalizer": "default" }
+{ "type": "bash", "command": "cline --auto-approve true \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\"", "normalizer": "default" }
 ```
 See Security above: no hard sandbox for cline.
 
@@ -238,7 +243,7 @@ See Security above: no hard sandbox for cline.
 
 **cline** — ⚠️ no hard read-only sandbox (see Security); prefer claude/codex for the reviewer.
 ```json
-{ "type": "bash", "command": "cline --auto-approve true -t 570 \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\"", "normalizer": "default" }
+{ "type": "bash", "command": "cline --auto-approve true \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\"", "normalizer": "default" }
 ```
 
 ---

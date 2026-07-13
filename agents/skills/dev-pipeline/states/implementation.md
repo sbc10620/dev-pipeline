@@ -13,17 +13,14 @@ The advance that landed here echoed `directive: run_implementor`, `iter_dir`, `t
   ```bash
   python3 <driver_path> run-stage --run <run_dir> --role implementor --stage-input <iter_dir>/stage-input.json
   ```
-  For a bash runner, prefer running this in the background and checking `<iter_dir>/implementor-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it (a quiet log there doesn't mean it's stuck — see that section for the check/relay cadence). Read the JSON. **If `mode` is `main-session`/`subagent`, execute the implementor per [SKILL §Role Execution](../SKILL.md#-role-execution)** (file role: the executor edits production code; [Step 3]'s result-status check runs first, then the [Step 4] empty-delta guard catches a no-op with no `blocked` status → re-execute once, else stop), then continue. Otherwise: `ok: true` → proceed; `ok: false` → stop and report (`all_runners_failed` lists the `attempts`). The runner edits production code in `work_root` and build-checks it; the driver enforces a bash runner's tool envelope (no test/install stages, no `.dev-pipeline/` edits) via the configured command — you do not pass any flags.
+  For a bash runner, prefer running this in the background and checking `<iter_dir>/implementor-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it (a quiet log there doesn't mean it's stuck — see that section for the check/relay cadence). Read the JSON. **If `mode` is `main-session`/`subagent`, execute the implementor per [SKILL §Role Execution](../SKILL.md#-role-execution)** (file role: the executor edits production code and writes its status JSON; [Step 3]'s result-status check runs first, then the [Step 4] empty-delta guard catches a no-op with no `blocked` status → re-execute once, else stop), then continue. Otherwise: `ok: true` → proceed; `ok: false` → stop and report (`all_runners_failed` lists the `attempts` — since 6.6.0 this now also covers a runner that edited code but failed to produce a valid status JSON, not just a nonzero exit). The runner edits production code in `work_root`, build-checks it, and writes its (now-mandatory) status JSON to the exact path the output directive gave it — this is the one permitted `.dev-pipeline/` write, alongside which the driver still enforces a bash runner's tool envelope (no test/install stages) via the configured command; you do not pass any flags.
 
-- [Step 3] **Check the implementor's result status — FIRST, before the empty-delta guard in [Step 4].** After `run-stage` returns `ok: true` (or a `mode` handoff completes), check the echoed `output_file` (or, if absent from the JSON, `<iter_dir>/implementor-result.json`):
-  - **Absent** — proceed exactly as before (fully backward compatible; older prompts or a runner that doesn't produce this file).
-  - **Present**: validate it —
-    ```bash
-    python3 <driver_path> validate-result --type implementor --file <path>
-    ```
-    **A non-zero exit here is advisory only, not a state-file failure** (capture it, e.g. with `|| true`; do not apply Global Rule 6 to this specific call) — treat a schema violation the same as "absent": note it, proceed as before.
-    - **Valid, `status: "blocked"`**: this is a deliberate outcome — **skip the empty-delta guard in [Step 4] entirely.** Relay `summary`/`concern` to the user prominently: "The implementor flagged this plan as unimplementable as written: `<concern, or summary if concern is missing>`. You may want to revise plan.md." (the schema does not force `concern` to be non-null even when `blocked` — fall back to `summary` rather than printing a blank). Ask whether to (a) stop here so they can revise the plan, or (b) continue anyway (the implementor may be wrong, or a retry with different reasoning might succeed). If continuing, proceed with the rest of this state as normal (boundary check, manifest, advance) using whatever delta exists — it may be empty, and that's expected.
-    - **Valid, `status: "implemented"`**: proceed to [Step 4]'s empty-delta check as usual — a claimed-implemented result with an empty delta is now a genuine contradiction, not a silent pass-through.
+- [Step 3] **Check the implementor's result status — FIRST, before the empty-delta guard in [Step 4].** This file is mandatory since 6.6.0: `run-stage`/`finalize-stage` already validated it before reporting `ok: true` above, so by the time you reach this step it is guaranteed to exist and be schema-valid — read it directly with no separate validation call:
+  - **`status: "blocked"`**: a deliberate outcome — **skip the empty-delta guard in [Step 4] entirely, but still run the rest of Step 4 (boundary check, manifest) on whatever partial delta exists** before advancing; Rule 11 explicitly allows the implementor to leave partial changes, and skipping the boundary/manifest step would let those changes silently miss the commit/review scope (or, under `--worktree`, be lost entirely when the worktree is later cleaned up) and let an out-of-bounds test edit pass unchecked. Relay `summary`/`concern` to the user prominently, **wording it by `blocked_on`** (fall back to `summary` if `concern` is missing either way):
+    - `blocked_on` omitted or `"contract"`: "The implementor flagged this plan as unimplementable as written: `<concern>`. You may want to revise plan.md."
+    - `blocked_on: "tests"`: "The implementor believes the authored tests — not the contract — are wrong: `<concern>`. Continuing will send this to the test author to verify, not directly revise the plan."
+    Ask whether to (a) stop here so they can revise the plan, or (b) continue anyway (the implementor may be wrong, or a retry with different reasoning might succeed). If continuing, run Step 4 as above, then call `driver advance` — it reads this same file and decides the next state itself: TDD + `blocked_on: "tests"` routes to `test_implementation` (the implementor believes the tests, not the contract, are at fault), everything else routes to `test` as normal (do not treat this as a routing decision you make yourself, Global Rule 1 still applies).
+  - **`status: "implemented"`**: proceed to [Step 4]'s empty-delta check as usual — a claimed-implemented result with an empty delta is a genuine contradiction, not a silent pass-through.
 
 - [Step 4] **Compute the implementor delta and record the manifest** (git repo). Print this run's delta (modified/deleted tracked + new untracked), one `work_root`-relative path per line:
   ```bash
@@ -46,13 +43,13 @@ The advance that landed here echoed `directive: run_implementor`, `iter_dir`, `t
   ```bash
   python3 <driver_path> advance --run <run_dir>
   ```
-  Then follow `states/<next_state>.md` (it will be `test`).
+  Then follow `states/<next_state>.md` (usually `test`, or `test_implementation` if the implementor reported the tests contradict the contract — see the reported `next_state`, never assume it).
 
 **Checklist:**
 - [ ] Baseline staged before run-stage (git repos)
 - [ ] `run-stage --role implementor` returned `ok: true`, **or** a `mode` handoff was executed; else stopped/reported
 - [ ] (bash runner, host permitting) ran in the background with the runner log checked periodically (a quiet log is expected for some runners, not a hang); relayed to the user only when there was something new to say
-- [ ] Checked the result-status file (if present) BEFORE the empty-delta guard; a `blocked` status was relayed to the user with their decision on how to proceed, and never triggered a spurious re-execute
+- [ ] Checked the result-status file BEFORE the empty-delta guard; a `blocked` status was relayed to the user with their decision on how to proceed, and never triggered a spurious re-execute
 - [ ] Empty-delta guard applied when no `blocked` status was found
 - [ ] (TDD) boundary check passed (or single re-run performed)
 - [ ] Manifest recorded with the final delta

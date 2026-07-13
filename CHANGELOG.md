@@ -9,6 +9,59 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.6.0] - 2026-07-13
+
+`implementor`/`test_implementor`'s status JSON (added optional in 6.5.0) is now
+**required and schema-validated exactly like `tester`/`reviewer`'s result** —
+a bash runner that edits code but fails to produce a valid status file is no
+longer `ok: true`. On top of that mandatory foundation, `cmd_advance` can now
+route a `blocked` implementor result back to the test author instead of always
+retrying implementation, closing a gap where a genuinely wrong test could
+exhaust `test`'s retry budget with no way to recover inside the run.
+
+### Added
+- **`blocked_on` field** (`implementor-result.schema.json`, optional, `"contract"|"tests"`): when `status:"blocked"`, distinguishes "the contract itself is unsatisfiable" (`"contract"`, the default if omitted) from "I believe the authored tests — not the contract — are wrong" (`"tests"`, implementor-only, TDD-only).
+- **`cmd_advance`'s `implementation` branch now reads `implementor-result.json`** (previously it moved to `test` unconditionally, no result file). `status:"blocked"` + `blocked_on:"tests"` + TDD routes to `test_implementation` instead — incrementing `iterations.test_implementation` (shared with the existing `red_not_confirmed` re-author budget), recording an `attempts.md` entry, and echoing a `note` telling the test author to verify (not blindly obey) the implementor's claim. Every other case (`implemented`; `blocked` with `blocked_on` omitted/`"contract"`; non-TDD) still routes to `test`, unchanged.
+- **`dp-implementor.md` Rule 11 / Step 6, `dp-test-implementor.md` Rule 12**: the implementor may now report `blocked_on:"tests"` when it's confident the tests are wrong (it may read, just never edit, test files — including a retry pass's `failure_details`/`log_excerpt`, which show it the failing assertion directly); the test author, on re-entry via that `note`, is told to verify the claim against the contract before touching anything, and to leave a test unchanged if its own check finds the test was already correct.
+
+### Changed
+- **`ROLE_META`**: `implementor`/`test_implementor` gain `"schema": "implementor-result"` (was `None`). `category` (boundary/manifest handling) and `schema` (JSON-result validation) are now independent axes — a file role's git delta still drives boundary checks, but its status JSON is validated the same way a json role's result is.
+- **`judge()`** (run-stage's bash-runner path): a file role now additionally runs `_finalize_json` on its status JSON after a `returncode == 0` exit — a produce/schema failure there is a failed attempt, not silently ignored. A nonzero exit still fails immediately with no retry (unchanged); only a "ran fine but bad/missing status JSON" failure gets the same one-shot error-fed retry a json role's bad output already gets — a plain crash must not force redoing the whole implementation attempt.
+- **`cmd_finalize_stage`** (main-session/subagent handoff validation): its no-op guard now keys off `schema` presence rather than `category == "json"`, so a file role's status JSON gets the identical normalize→schema→persist-canonical treatment a json role's result already gets. Its success response now reports the role's true `category` (previously hardcoded to `"json"` — a file role finalizing would have been mislabeled).
+- **`states/implementation.md` / `states/test_implementation.md` Step 3**: dropped the "absent — proceed exactly as before" branch and the separate `validate-result` call — the file is now guaranteed present and valid by the time the state file reads it (`run-stage`/`finalize-stage` already checked it), so both state files read it directly. `states/implementation.md` Step 5's hardcoded "(it will be `test`)" is corrected to name the new `test_implementation` possibility instead of asserting a transition the driver decides.
+- **`SKILL.md` Global Rule 5 / §Role Execution**: the file-role exception added in 6.5.3 for "you still run `validate-result` yourself" is reverted — `driver finalize-stage` now covers file roles too, so the rule is unified back to one sentence for every role.
+- **`RUNNERS.md`**: the 4 cline bash-runner templates (implementor/test_implementor/tester/reviewer) drop a hardcoded `-t 570`. This was a **deliberate** 6.3.0-era choice (giving cline its own ceiling after the driver's own default 10-minute runner cap was removed that same release), not an oversight — removed now because it gave cline alone a hidden ~9.5-minute cap no other CLI's template carried, at odds with the driver's unbounded-by-default philosophy; a user who wants a cap sets the runner's own `timeout` (and `-t` alongside it) explicitly, same as for any other CLI.
+
+### Fixed (adversarial review, before release)
+- **`dp-implementor.md`'s Step 6 example JSON included `"blocked_on": null`**, which the schema rejects (unlike `concern`, `blocked_on` has no `oneOf`-with-null — it's a string enum or entirely absent). A model that copied the example literally would have every `status:"implemented"` result rejected by `_finalize_json`, retried once, and potentially fail the whole role. Removed from the example; the prose now explicitly calls out that `blocked_on` must be omitted rather than nulled.
+- **`states/implementation.md`'s "continue anyway" path after a `blocked` result dropped the boundary check and manifest recording**, calling `driver advance` directly instead of running the rest of Step 4 first. Rule 11 explicitly allows the implementor to leave partial changes when blocked — skipping Step 4 meant that partial delta never reached `changed-manifest.txt` (dropped from the `done` commit/review diff, and under `--worktree`, lost entirely once the worktree is cleaned up) and a TDD implementor's out-of-bounds test edit would pass unchecked. Restored: skip only the *empty-delta guard* sub-step, not boundary check / manifest recording.
+- **`dp-test-implementor.md`'s Rule 12 ("if the tests were already correct, leave them unchanged") deadlocked the run** — an unchanged test suite is indistinguishable from "the role didn't run" to the empty-delta guard, so this exact scenario (the one the whole `blocked_on` feature exists to allow: the implementor being wrong) triggered a re-execute, then `stop and report`. Rule 12 now directs the test author to report `status:"blocked"` with a `concern` stating the tests were verified correct, instead of silently leaving them unchanged with no signal; `states/test_implementation.md`'s relay wording was generalized from "untestable as written" to cover both this case and Rule 11's original one.
+- **No `cmd_advance` routing tests existed** for the `blocked_on` feature at all — every `write_implementor_result` call in the test suite used `status="implemented"`, and the newly-added `write_test_implementor_result` helper was never called. Added: `blocked_on:"tests"`+TDD routing (including the `attempts.md`/echo content), its exhaustion path, the non-TDD negative case (must fall through to `test`, `blocked_on` is meaningless there), the `blocked`+`"contract"` case (must still route to `test`), the `implementation`-branch `die()` paths (missing/schema-invalid file), and a test confirming `test_implementor`'s status file is validated but never read by `cmd_advance` (by design — there is no other role to route a test-author "blocked" to).
+- **`states/failed.md`'s iteration-exhausted outcome list was missing `implementor_blocked_on_tests_exhausted`** (this diff's own new outcome) and didn't note it shares the `test_implementation` budget with `red_not_confirmed_exhausted`.
+- **The `implementor-result.json not found` `die()` message told the user to "write a valid status file by hand" without showing the required shape.** Added a minimal inline example.
+- **`states/implementation.md`'s blocked-relay message always said "unimplementable as written... revise plan.md"**, even for `blocked_on:"tests"` (where the implementor is blaming the tests, not the contract). Now worded per `blocked_on`.
+
+### Known limitation
+**codex + `--worktree`, for the implementor/test_implementor roles specifically.** Under `--worktree`, codex's `-C {project_root}` substitutes to `work_root` (the isolated worktree checkout), but this role's status JSON always lives under the true `project_root`'s `.dev-pipeline/` — outside codex's `workspace-write` sandbox. Since the status file is now mandatory, this combination now fails loudly (retry, then `all_runners_failed`) where it previously failed silently (the file was just never produced, unnoticed). Documented in `RUNNERS.md` with a workaround (prefer `claude`/`cline` for these two roles under `--worktree`); a proper fix (widen codex's writable roots, or switch to a stdout-capture result channel like tester/reviewer already use) is out of scope here — it would change a `RUNNERS.md` command template this project only ships after live CLI re-verification, which this change did not do.
+
+### Versioning note
+MINOR, not MAJOR, though this narrows a previously-graceful case into a hard
+failure for one specific combination:
+1. **Standard configurations are unaffected.** `claude`/`cline` runners, and a
+   `codex` runner used without `--worktree`, have always had unrestricted
+   write access to the status-file path — and the role prompts have
+   unconditionally instructed writing this file since 6.5.0, so nothing about
+   what a well-behaved runner needs to do has changed.
+2. **The only combination that newly fails is `codex` + `--worktree`** for
+   implementor/test_implementor — and that combination was already silently
+   failing to produce the status file before this release; this makes that
+   failure visible instead of introducing a new one.
+3. **A run already parked in `implementation` when upgrading to 6.6.0** will
+   `die()` with an explicit migration note if its `implementor-result.json` is
+   absent (a pre-6.6.0 driver could reach this state without one) — the error
+   message tells the user to either write the file by hand or start a new run;
+   there is no silent data loss, but there is no automatic recovery either.
+
 ## [6.5.3] - 2026-07-13
 
 `states/review.md`: a `main-session` reviewer now **always asks the user** before
