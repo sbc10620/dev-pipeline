@@ -43,26 +43,45 @@
     Do NOT push. (In TDD, the authored tests are part of the implementation and are committed normally.)
   - If not a git repo: inform the user that commit was skipped.
 
-- [Step 2] **Merge and clean up the worktree** — only if the echoed `worktree_branch` is set (this run used `--worktree`). Skip this entire step for a normal run. `project_root` is the user's **real checkout** here, so this never merges without verifying it first — a bad merge attempt would leave the one thing `--worktree` exists to protect in a conflicted state.
+- [Step 2] **Rebase and merge the worktree branch, then clean up** — only if the echoed `worktree_branch` is set (this run used `--worktree`). Skip this entire step for a normal run. `project_root` is the user's **real checkout** here, so this never touches it without verifying first — a bad rebase/merge attempt would leave the one thing `--worktree` exists to protect in a conflicted state.
   - **Precondition check (mandatory, before attempting anything):**
     ```bash
     git -C <project_root> symbolic-ref --short -q HEAD   # empty/failure if detached
     git -C <project_root> status --porcelain --untracked-files=no
     ```
     - **Branch check** — the first command's output must equal the echoed `worktree_base_ref`. **If it fails or prints nothing** (`project_root` is on a different branch, or detached), the run may still be recoverable if `worktree_base_ref` is itself a commit SHA (i.e. the worktree was created from a detached HEAD, not a branch — `driver init --worktree` records a SHA in that case): fall back to comparing `git -C <project_root> rev-parse HEAD` against `worktree_base_ref` instead. If neither matches, the branch check fails.
-    - **Clean-tree check** — the second command's output must be empty. **Deliberately `--untracked-files=no`**: an untracked `plan.md` may still sit in `project_root` under `--plan <path>` (a user-supplied plan can live anywhere in the tracked tree, and is never committed — Global Rule 4) — `--request`-generated plans no longer hit this at all, since they're gitignored under `.dev-pipeline/plans/` by default (`states/planning.md`) — and would otherwise fail this check on every such worktree run; only *tracked* changes (modified/staged) indicate the checkout isn't safe to merge into. (Git's own merge still refuses on its own if an untracked file would be clobbered, so this doesn't weaken the actual safety net.)
-    - **If either check fails, do NOT attempt the merge.** Tell the user: "This run's worktree branch (`<worktree_branch>`) is ready to merge, but `<project_root>` is not on `<worktree_base_ref>` or has uncommitted tracked changes. Switch back to `<worktree_base_ref>`, make sure it's clean, then re-run this step (or merge manually: `git -C <project_root> merge --no-ff <worktree_branch>`, then `python3 <driver_path> cleanup-worktree --run <run_dir>`)." The worktree and branch are left exactly as they are — nothing is lost, nothing is retried automatically. (A worktree created from a detached HEAD that the user can no longer reproduce exactly is expected to require this manual path — there is no branch identity to verify a return to.)
-  - **Merge** (only once the precondition above passed):
+    - **Clean-tree check** — the second command's output must be empty. **Deliberately `--untracked-files=no`**: an untracked `plan.md` may still sit in `project_root` under `--plan <path>` (a user-supplied plan can live anywhere in the tracked tree, and is never committed — Global Rule 4) — `--request`-generated plans no longer hit this at all, since they're gitignored under `.dev-pipeline/plans/` by default (`states/planning.md`) — and would otherwise fail this check on every such worktree run; only *tracked* changes (modified/staged) indicate the checkout isn't safe to merge into. (Git's own fast-forward merge still refuses on its own if an untracked file would be clobbered, so this doesn't weaken the actual safety net — see the fast-forward merge step below.)
+    - **If either check fails, do NOT attempt the rebase.** Tell the user: "This run's worktree branch (`<worktree_branch>`) is ready to merge, but `<project_root>` is not on `<worktree_base_ref>` or has uncommitted tracked changes. Switch back to `<worktree_base_ref>`, make sure it's clean, then re-run this step (or finish manually: `git -C <work_root> rebase <worktree_base_ref>`, then `git -C <project_root> merge --ff-only <worktree_branch>`, then `python3 <driver_path> cleanup-worktree --run <run_dir>`)." The worktree and branch are left exactly as they are — nothing is lost, nothing is retried automatically. (A worktree created from a detached HEAD that the user can no longer reproduce exactly is expected to require this manual path — there is no branch identity to verify a return to.)
+  - **Work_root readiness check** (only once the precondition above passed) — the rebase below runs IN `work_root`, so it also needs a clean tracked tree there; the check above says nothing about this (it only reads `project_root`). **Run these two checks FIRST, before touching anything** — do not run `clean -xdf` until both pass, since a check failure may be exactly the thing worth investigating (e.g. leftover untracked files from a still-unresolved manual step), and discarding that silently before the user sees it would repeat the same mistake this step's conflict-handling explicitly avoids elsewhere:
     ```bash
-    git -C <project_root> merge --no-ff <worktree_branch>
+    git -C <work_root> symbolic-ref --short -q HEAD   # must equal <worktree_branch>
+    git -C <work_root> status --porcelain --untracked-files=no
+    ```
+    - **If the HEAD check doesn't match `<worktree_branch>`, or the status check is non-empty** (tracked, uncommitted changes — e.g. a test-stage side effect outside the manifest that [Step 1] didn't commit), **STOP — this is a precondition failure, not a rebase conflict** (do not follow the "Rebase" conflict-recovery instructions below for this). Do **not** run `clean -xdf`. Tell the user exactly that distinction, show the offending path(s), and ask them to commit or discard it in `work_root` (or investigate why HEAD moved) before re-running this step.
+    - **Only once both checks above pass**, drop untracked leftovers (e.g. test-stage caches) before rebasing:
+      ```bash
+      git -C <work_root> clean -xdf
+      ```
+  - **Rebase** (only once both precondition checks above passed) — replays the worktree branch's commits onto `worktree_base_ref`'s current tip, producing linear history with no merge commit. The worktree shares `project_root`'s underlying git object database, so this sees the branch's LIVE tip with no fetch needed, correctly picking up any commits `project_root` gained since the worktree was created (for a branch `worktree_base_ref`; a detached-HEAD SHA `worktree_base_ref` is frozen by definition, and the precondition above already requires `project_root` to still be at that exact SHA, so this is consistent either way):
+    ```bash
+    git -C <work_root> rebase <worktree_base_ref>
+    ```
+    - **Success** → proceed to the fast-forward merge below.
+    - **Conflict/failure** → **STOP**. Do not run `git rebase --abort` yourself — the user may already be resolving it, and discarding that silently would be worse than leaving it. Show the conflicting files (`git -C <work_root> diff --name-only --diff-filter=U`) and give the user two distinct paths, each with its own next action (do not conflate them into one generic "then re-run"):
+      - **Resolve and `git -C <work_root> rebase --continue`** — once the rebase itself reports done, re-run this step (it will re-check both preconditions and proceed to the fast-forward merge), or finish manually: `git -C <project_root> merge --ff-only <worktree_branch>`, then `python3 <driver_path> cleanup-worktree --run <run_dir>`.
+      - **Abort with `git -C <work_root> rebase --abort`** — recoverable: this restores the pre-rebase branch, nothing is lost, though the worktree sits mid-rebase until then, not simply untouched. This alone does **not** resolve the conflict — merely re-running this step will hit the same conflict again. Only re-run once the user has actually done something to change the outcome (fixed the offending commit(s) on the branch, or `worktree_base_ref` has since moved).
+      The worktree and branch are preserved either way.
+  - **Fast-forward merge** (only immediately after a successful rebase above) — the rebase just replayed the branch directly onto `project_root`'s current tip, so this is normally a pure fast-forward, never a 3-way merge:
+    ```bash
+    git -C <project_root> merge --ff-only <worktree_branch>
     ```
     - **Success** → proceed to cleanup below.
-    - **Conflict/failure** → **STOP**. Do not run `git merge --abort` yourself — the user may already be resolving it, and discarding that silently would be worse than leaving it. Show the conflicting files (`git -C <project_root> diff --name-only --diff-filter=U`) and tell the user to either resolve and commit the merge, or abort it (`git -C <project_root> merge --abort`), then run `python3 <driver_path> cleanup-worktree --run <run_dir>` themselves once the branch is fully merged (or they've decided to discard it). The worktree and branch are preserved either way.
-  - **Cleanup** (only immediately after a successful merge above):
+    - **Failure** → **STOP** and report; do not force anything. Two known causes, both safe (neither moves `project_root`'s HEAD): (a) a race — `project_root`'s branch moved again in the narrow window between the two commands, or (b) an **ignore-not-covered untracked file in `project_root`** collides with a path the rebased commits add (`"untracked working tree files would be overwritten"` — git's own protection, not a bug). For (a), re-running this step (which re-checks both preconditions and re-rebases onto the new tip) is the correct recovery. For (b), re-running alone will loop — tell the user which path(s) collided (from the error output) and ask them to move/remove/commit it in `project_root` first.
+  - **Cleanup** (only immediately after a successful fast-forward merge above):
     ```bash
     python3 <driver_path> cleanup-worktree --run <run_dir>
     ```
-    Report `worktree_removed` / `branch_removed` from the JSON to the user. `branch_removed: false` should not happen right after a successful merge (the branch is then fully merged into `project_root`'s HEAD, so the safe delete `-d` succeeds) — if it does, relay the `branch_error` and leave it for the user to inspect rather than forcing a delete yourself.
+    Report `worktree_removed` / `branch_removed` from the JSON to the user. `branch_removed: false` should not happen right after a successful fast-forward merge (the branch is then fully merged into `project_root`'s HEAD, so the safe delete `-d` succeeds) — if it does, relay the `branch_error` and leave it for the user to inspect rather than forcing a delete yourself.
 
 - [Step 3] **Update the project's agent memory doc** (`AGENTS.md`, the open standard read by Codex/Cline/Cursor/…; some hosts use `CLAUDE.md`, often a symlink to it — update whichever the project has) — only if there is genuinely new context worth adding. Be conservative.
 
@@ -98,7 +117,7 @@
   - <issues, or "No issues">
   ```
 
-  Fill each `Runner/method` with the concrete agent/command actually used; note multi-iteration states. Be honest — if the workflow was not followed precisely (an advance out of order, a skipped validation, a boundary re-run), note it. (Worktree runs: note whether the merge in [Step 2] needed manual intervention.)
+  Fill each `Runner/method` with the concrete agent/command actually used; note multi-iteration states. Be honest — if the workflow was not followed precisely (an advance out of order, a skipped validation, a boundary re-run), note it. (Worktree runs: note whether the rebase/merge in [Step 2] needed manual intervention.)
 
 - [Step 5] **Self-evolution** — only if the echoed `run_self_evolution` is true.
   - Use the retrospective findings as input. Identify which agent `.md` files (or SKILL.md / its `states/*.md`) need updating.
@@ -122,7 +141,7 @@
 
 **Checklist:**
 - [ ] Commit done against `work_root` (or skipped with notification); plan.md/.dev-pipeline (incl. contract.md) NOT committed
-- [ ] (worktree run) precondition checked before any merge attempt; merge succeeded and `cleanup-worktree` ran, **or** the run stopped with the worktree/branch preserved and clear manual instructions given
+- [ ] (worktree run) both preconditions (`project_root` AND `work_root`) checked before any rebase attempt; rebase + fast-forward merge succeeded and `cleanup-worktree` ran, **or** the run stopped with the worktree/branch preserved and clear manual instructions given (including which of the three failure classes — precondition / rebase conflict / fast-forward failure — applied)
 - [ ] Retrospective output with the orchestrator model and a section per state that ran (TDD states included only when tdd_mode)
 - [ ] Self-evolution skipped or done conservatively (committed separately, against `project_root`, if any change)
 - [ ] Next-step recommendations provided

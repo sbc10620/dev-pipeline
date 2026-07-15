@@ -9,6 +9,69 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.6.2] - 2026-07-15
+
+`--worktree` runs now merge back into `project_root` at `done` via **rebase +
+fast-forward** (`git rebase <base>` then `git merge --ff-only`) instead of
+`git merge --no-ff`, so the resulting history is linear — no merge commit —
+replacing the old strategy outright (not a config option).
+
+### Changed
+- **`states/done.md` Step 2** ("Merge and clean up the worktree" → "Rebase and merge the worktree branch, then clean up"): the `project_root` precondition check (branch + clean-tree) keeps its command block and both sub-checks unchanged; only its failure-message's manual-recovery command was updated to the new rebase+ff two-step form. A **new `work_root` readiness check** precedes the rebase — the rebase runs *in* `work_root`, which the old merge-based flow never touched, so it needs its own guard: `work_root`'s `HEAD` must equal the echoed `worktree_branch`, and its tracked tree must be clean (a test-stage side effect outside the manifest could otherwise leave it dirty and unnoticed) — **checked before anything destructive runs**; only once both pass does `git clean -xdf` drop untracked leftovers (e.g. test-stage caches) ahead of the rebase, so a precondition failure never discards evidence worth investigating. The old single **Merge** step is now two: **Rebase** (`git -C <work_root> rebase <worktree_base_ref>` — sees the base branch's live tip with no fetch needed, since a worktree shares the main repo's object database) and **Fast-forward merge** (`git -C <project_root> merge --ff-only <worktree_branch>` — always a pure fast-forward after a clean rebase, never a 3-way merge). Conflict/failure handling is split by failure class instead of one generic "conflict" bucket: a `work_root` precondition failure (STOP, not a rebase conflict — the old `--continue`/`--abort` recovery doesn't apply), a mid-rebase conflict (STOP, `rebase --continue`/`rebase --abort` — abort safely restores the pre-rebase branch), or a fast-forward failure (STOP — either a race, recoverable by re-running the step, or an ignore-not-covered untracked file in `project_root` colliding with a path the rebase adds, which needs the user to move/remove/commit it before re-running). `driver cleanup-worktree` (unchanged) still runs only after a successful fast-forward.
+- **`AGENTS.md` / `README.md`**: the worktree-isolation description updated to describe rebase + fast-forward instead of `merge --no-ff`; "leaving the worktree/branch intact" softened to "recoverable" (a rebase conflict leaves the worktree mid-rebase, not literally untouched).
+
+### Fixed (adversarial review, before release)
+- **The `work_root` readiness check's `git clean -xdf` ran unconditionally**,
+  before the HEAD/tracked-clean checks it sat next to were evaluated — a
+  precondition-check failure (HEAD mismatch, or a dirty tracked tree) would
+  have already discarded any untracked files worth investigating (e.g. a
+  scratch patch the user left mid-resolution) before the state file even told
+  them there was a problem, contradicting this same step's own
+  "discarding that silently would be worse than leaving it" principle for
+  rebase conflicts a few lines below. Reordered so `clean -xdf` only runs
+  after both checks pass.
+- **The rebase-conflict recovery text conflated two different recovery paths
+  into one "then re-run this step."** Read literally, aborting
+  (`rebase --abort`) and then re-running would just reproduce the same
+  conflict — re-running is only valid after the branch or the base has
+  actually changed. Split into two explicit paths with their own next action.
+- **`README.md` still said a stopped run "leaves the worktree + branch in
+  place"** — inconsistent with `AGENTS.md`'s "recoverable" wording, and
+  inaccurate for a mid-conflict rebase (the worktree sits mid-rebase, not
+  literally untouched). Aligned to the same "recoverable" language.
+
+### Design note
+This is a full replacement, not an option — no new config key or CLI flag was
+added (deliberately; adding a `driver.worktree_merge_strategy` toggle was
+considered and rejected to keep the config surface unchanged for a single-user
+default swap).
+
+### Known regression surface (documented, not fixed — none of it loses work)
+- **Rebase can conflict where the old 3-way merge would have auto-resolved.**
+  A 3-way merge reconciles final trees in one shot; `git rebase` replays commits
+  one at a time, so a history where an early commit touches a line and a later
+  commit in the same branch fixes it back can conflict mid-replay even though
+  the *net* change is identical to what a 3-way merge would have taken cleanly.
+- **`work_root` must now be tracked-clean before `done` can proceed** — a new
+  precondition the old merge-based flow didn't have (it only ever read the
+  branch ref, never `work_root`'s working tree). A test-stage side effect
+  outside the change manifest will now stop the run at `done` instead of being
+  silently absorbed into a merge commit.
+Both failure modes are safe (stop-and-preserve, nothing lost, no history
+corruption) and fall well short of this project's own MAJOR-bump criterion
+("an existing install would break"), consistent with the PATCH classification
+below.
+
+### Versioning note
+PATCH: this project's PATCH/MINOR line is drawn by **change scope** (prose-only
+== PATCH — see 6.5.1–6.5.3), not by behavioral semantics. No driver.py logic,
+schema, or test change — `states/done.md` (a Markdown file whose git commands
+the host LLM orchestrator executes, not driver.py) is the only behavioral
+change; `driver.py`'s only edit is this version string. `cmd_cleanup_worktree`
+and `cmd_init`'s worktree creation are both merge-strategy-agnostic and
+required no change (confirmed: `cmd_cleanup_worktree`'s own docstring already
+states merging is the SKILL's job, not the driver's).
+
 ## [6.6.1] - 2026-07-14
 
 Prompt-prose consistency refactor of the skill/state/agent Markdown — **no
