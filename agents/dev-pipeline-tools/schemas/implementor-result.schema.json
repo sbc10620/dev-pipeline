@@ -28,6 +28,10 @@
       "type": "string",
       "enum": ["contract", "tests"],
       "description": "Optional, meaningful only when status is 'blocked'. 'contract' (the default if omitted): the contract itself is unsatisfiable as specified. 'tests' (implementor only, TDD): the implementor is confident the authored tests — not the contract — contradict the contract; the driver routes this back to the test author instead of retrying the implementor. Not schema-enforced against status, matching this schema's existing concern/status convention."
+    },
+    "red_expected": {
+      "type": "boolean",
+      "description": "Optional, test_implementor only, meaningful only when status is 'implemented' AND the driver's one-time RED gate (state.red_phase) is still pending — i.e. on the first authoring pass or any red_not_confirmed re-entry, never after RED has been confirmed or skipped once in this run. Defaults to true (the normal case — these tests should fail without an implementation). Set to false ONLY when EVERY test authored in this pass targets behavior that already exists in the codebase (e.g. added regression/coverage tests, no new implementation-requiring AC in this same pass) — the driver then skips the RED-confirmation tester run entirely and proceeds straight to the GREEN test run. Not schema-enforced against status or against red_phase, matching this schema's existing concern/blocked_on convention."
     }
   }
 }

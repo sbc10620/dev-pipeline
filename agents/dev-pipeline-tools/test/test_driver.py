@@ -1081,6 +1081,7 @@ class TestAttemptAutoRecord(PipelineTestCase):
         p = self.make_pipeline(tdd_mode=True)
         p.init()
         self.assertEqual(p.advance().json["next_state"], "test_implementation")
+        p.write_test_implementor_result(status="implemented")
         self.assertEqual(p.advance().json["next_state"], "red_test")
         p.write_red_test_result(status="pass")   # RED not confirmed (vacuous tests)
         r = p.advance()                            # red_test -> test_implementation (re-author)
@@ -1163,6 +1164,7 @@ class TestResume(PipelineTestCase):
         # A TDD run replays a JSON-role echo (red_test) with its tester runners.
         p = self.started(tdd_mode=True)
         p.advance()        # init -> test_implementation
+        p.write_test_implementor_result(status="implemented")
         adv = p.advance()  # test_implementation -> red_test
         self.assertEqual(adv.json["next_state"], "red_test")
         res = self._resume(p)
@@ -1606,6 +1608,7 @@ class TestTDD(PipelineTestCase):
         r1 = p.advance()  # init -> test_implementation
         self.assertEqual(r1.json["next_state"], "test_implementation")
         self.assertEqual(r1.json["directive"], "run_test_implementor")
+        p.write_test_implementor_result(status="implemented")
         r2 = p.advance()  # test_implementation -> red_test
         self.assertEqual(r2.json["next_state"], "red_test")
         self.assertEqual(r2.json["directive"], "run_tester")
@@ -1650,6 +1653,7 @@ class TestTDD(PipelineTestCase):
         self.assertEqual(r.json["iterations"]["test_implementation"], 1)
 
         # test_implementation -> red_test again, fail to confirm RED -> exhaust.
+        p.write_test_implementor_result(status="implemented")
         self.assertEqual(p.advance().json["next_state"], "red_test")
         p.write_red_test_result(status="pass")
         r = p.advance()
@@ -1754,6 +1758,7 @@ class TestImplementorBlockedRouting(PipelineTestCase):
         (RED confirmed)."""
         r1 = p.advance()  # init -> test_implementation
         self.assertEqual(r1.json["next_state"], "test_implementation")
+        p.write_test_implementor_result(status="implemented")
         r2 = p.advance()  # test_implementation -> red_test
         self.assertEqual(r2.json["next_state"], "red_test")
         p.write_red_test_result(status="fail", failure_type="code")
@@ -1837,18 +1842,155 @@ class TestImplementorBlockedRouting(PipelineTestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("schema violation", r.stderr)
 
-    def test_test_implementor_result_not_read_by_advance(self):
-        # By design (6.6.0), test_implementor's status file is mandatory+
-        # validated at the run-stage/finalize-stage layer, but cmd_advance's
-        # test_implementation branch does not read it — there's no other role
-        # to route a test-author "blocked" to. A blocked test_implementor
-        # result must not change the (unconditional) red_test/test landing.
+    def test_blocked_test_implementor_result_does_not_change_routing(self):
+        # Since 6.7.0, cmd_advance's test_implementation branch DOES read
+        # test_implementor-result.json while red_phase is pending (to honor a
+        # status:"implemented" + red_expected:false declaration) — but a
+        # status:"blocked" result still falls through to red_test
+        # unconditionally, same as before 6.7.0: there's still no other role
+        # to route a test-author "blocked" to.
         p = self.make_pipeline(tdd_mode=True)
         p.init()
         p.advance()  # init -> test_implementation
         p.write_test_implementor_result(status="blocked", concern="no meaningful test for AC2")
-        r = p.advance()  # test_implementation -> red_test, unaffected by the file above
+        r = p.advance()  # test_implementation -> red_test, routing unaffected by "blocked"
         self.assertEqual(r.json["next_state"], "red_test")
+
+
+class TestRedExpected(PipelineTestCase):
+    """6.7.0: test_implementation's red_phase branch honors a
+    status:"implemented" + red_expected:false declaration by skipping RED
+    confirmation and landing directly on `test` — for authoring passes whose
+    tests all target already-existing behavior."""
+
+    def test_red_expected_false_skips_red_test(self):
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        p.write_test_implementor_result(status="implemented", red_expected=False)
+        r = p.advance()  # test_implementation -> test, RED confirmation skipped
+        self.assertEqual(r.json["next_state"], "test")
+        self.assertEqual(r.json["directive"], "run_tester")
+        self.assertIn("red_expected", r.json["note"])
+
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertFalse(state["red_phase"])
+        # No re-author loop was taken — the counter never moved.
+        self.assertEqual(state["iterations"]["test_implementation"], 0)
+
+    def test_red_expected_omitted_defaults_to_normal_red_confirmation(self):
+        # Explicit regression case: omitting red_expected (or setting it True)
+        # must reproduce the pre-6.7.0 behavior exactly — straight to red_test.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        p.write_test_implementor_result(status="implemented")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "red_test")
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertTrue(state["red_phase"])
+
+    def test_red_expected_true_explicit_also_runs_red_test(self):
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        p.write_test_implementor_result(status="implemented", red_expected=True)
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "red_test")
+
+    def test_blocked_status_with_red_expected_field_still_routes_to_red_test(self):
+        # Defensive: the schema doesn't forbid red_expected alongside
+        # status:"blocked" (not schema-enforced against status), but the
+        # driver checks status=="implemented" first, so it's inert here.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        p.write_test_implementor_result(status="blocked", concern="stub",
+                                        red_expected=False)
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "red_test")
+
+    def test_red_expected_false_ignored_on_repair_pass(self):
+        # On a repair pass (red_phase already false), the red_phase branch is
+        # never entered, so red_expected is never read at all — it's a no-op.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        p.write_test_implementor_result(status="implemented")
+        p.advance()  # -> red_test
+        p.write_red_test_result(status="fail", failure_type="code")
+        p.advance()  # RED confirmed -> implementation, red_phase -> false
+        p.write_implementor_result(status="blocked", blocked_on="tests",
+                                   concern="tests look wrong")
+        r1 = p.advance()  # -> test_implementation (repair pass, red_phase false)
+        self.assertEqual(r1.json["next_state"], "test_implementation")
+        p.write_test_implementor_result(status="implemented", red_expected=False)
+        r2 = p.advance()  # repair pass always lands on test regardless of red_expected
+        self.assertEqual(r2.json["next_state"], "test")
+        self.assertNotIn("red_expected", r2.json.get("note", ""))
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        # Took the plain repair-pass path ("tests_repaired"), not the
+        # red_expected:false path ("tests_added_no_red_expected") — proves
+        # the field was never read on this pass at all.
+        self.assertEqual(state["history"][-1]["outcome"], "tests_repaired")
+
+    def test_missing_test_implementor_result_dies_during_red_phase(self):
+        # Symmetry with the `implementation` branch's own die()-on-missing —
+        # the file is mandatory since 6.6.0, so its absence here is a driver/
+        # runner bug, not a normal advisory gap.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        # No test_implementor-result.json written.
+        r = p.advance()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("test_implementor-result.json not found", r.stderr)
+
+    def test_schema_invalid_test_implementor_result_dies_during_red_phase(self):
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        p.write_raw_result_file("test_implementor-result.json",
+                                json.dumps({"status": "maybe"}))
+        r = p.advance()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("schema violation", r.stderr)
+
+    def test_red_expected_skip_surfaces_note_to_reviewer(self):
+        # The reviewer is the sole backstop against a wrongly-declared
+        # red_expected:false hiding a genuinely vacuous test (see
+        # dp-test-implementor.md Rule 13) — it must be told this happened,
+        # not just the driver's own history.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        p.write_test_implementor_result(status="implemented", red_expected=False,
+                                        summary="added regression tests for existing parser")
+        p.advance()  # -> test (RED confirmation skipped)
+        p.write_test_result(status="pass")
+        r = p.advance()  # -> review
+        self.assertEqual(r.json["next_state"], "review")
+        self.assertIn("red_confirmation_skipped_note", r.json)
+        self.assertIn("added regression tests for existing parser", r.json["red_confirmation_skipped_note"])
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertTrue(state["red_confirmation_skipped"])
+
+    def test_normal_red_confirmed_run_has_no_skip_note_at_review(self):
+        # Regression: a run that went through genuine RED confirmation must
+        # NOT carry a stale/spurious red_confirmation_skipped_note.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        p.write_test_implementor_result(status="implemented")
+        p.advance()  # -> red_test
+        p.write_red_test_result(status="fail", failure_type="code")
+        p.advance()  # RED confirmed -> implementation
+        p.write_implementor_result(status="implemented")
+        p.advance()  # -> test
+        p.write_test_result(status="pass")
+        r = p.advance()  # -> review
+        self.assertEqual(r.json["next_state"], "review")
+        self.assertNotIn("red_confirmation_skipped_note", r.json)
 
 
 class TestUpgradeSafety(PipelineTestCase):
@@ -2047,6 +2189,7 @@ class TestAdvanceEchoes(PipelineTestCase):
         self.assertTrue(r1.json["tdd_mode"])
         self.assertEqual(r1.json["test_implementor_runners"], p._config["runners"]["test_implementor"])
 
+        p.write_test_implementor_result(status="implemented")
         r2 = p.advance()  # test_implementation -> red_test (red phase)
         self.assertEqual(r2.json["next_state"], "red_test")
         self.assertTrue(r2.json["tdd_mode"])

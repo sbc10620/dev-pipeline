@@ -9,6 +9,79 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.7.0] - 2026-07-17
+
+A legitimate TDD authoring pass — adding regression/coverage tests for
+behavior that **already exists**, with no new implementation-requiring AC in
+the same pass — used to be indistinguishable from a vacuous test suite: the
+tests pass immediately with no implementation present, and `red_test` always
+routed that to a re-author loop (`red_not_confirmed`), burning
+`iterations.test_implementation` budget on a pass that was correct as
+written and could eventually exhaust the run. (`cmd_advance`'s own comment
+already flagged this ambiguity: `"RED not confirmed (vacuous tests **or
+feature exists**)"`.)
+
+### Added
+- **`test_implementor-result.json` gains an optional `red_expected` boolean**
+  (`implementor-result.schema.json`, shared with `implementor`; not schema-
+  enforced against `status`/`red_phase`, matching the existing
+  `concern`/`blocked_on` convention). Meaningful only when `status:
+  "implemented"` and the driver's one-time RED gate (`state.red_phase`) is
+  still pending. Defaults to `true` (normal RED-confirmation behavior,
+  unchanged). Set to `false` only when EVERY test authored in this pass
+  targets already-existing behavior — the driver then skips the
+  RED-confirmation `red_test` run entirely and lands directly on `test`
+  (the GREEN run), flipping `red_phase` to `false` in the same step `red_test`
+  itself would have.
+- **`cmd_advance`'s `test_implementation` branch now reads this file while
+  `red_phase` is pending** (die()-on-missing/invalid, mirroring the 6.6.0
+  `implementation`-branch pattern — the file has been mandatory since 6.6.0,
+  so this is not a new compatibility gap). `status: "blocked"` still always
+  falls through to `red_test` unconditionally, same as before — there is
+  still no other role to route a test-author "blocked" to; `red_expected`
+  only affects the `status: "implemented"` path.
+- **Safety**: skipping RED confirmation never skips GREEN verification. If
+  `red_expected: false` turns out to be wrong because the feature genuinely
+  isn't implemented yet, the unmodified `test` branch's existing
+  test↔implementation retry loop (`iterations.test`, not
+  `iterations.test_implementation`) catches it exactly like any other test
+  failure. The one case this doesn't protect against — a genuinely vacuous
+  test wrongly declared `red_expected: false` — bypasses the only automatic
+  vacuous-test detector (`red_test`) and reaches GREEN too; `reviewer` is the
+  backstop for that case. `dp-test-implementor.md`'s new Rule 13 documents
+  this asymmetry. **The `reviewer` backstop is now actually informed of it**
+  (adversarial-review fix, before release): `state.red_confirmation_skipped`
+  persists across however many test↔implementation retries happen before
+  review is reached, and `dest_echoes("review")` surfaces it to the reviewer
+  as `red_confirmation_skipped_note` — without this, the reviewer had no way
+  to know which tests bypassed RED confirmation, and `dp-reviewer.md`'s own
+  default severity ceiling (test-file nitpicks capped at `medium`, below the
+  default blocking threshold) meant a wrongly-skipped vacuous test could
+  reach `done` without ever being flagged at a blocking severity.
+  `dp-reviewer.md` gained a rule to escalate a vacuous/non-asserting finding
+  in that case to at least `high`.
+- `dp-test-implementor.md`: Rule 3 gains an exception for tests expected to
+  pass immediately under Rule 13; Rule 8 and Step 3.5 gain a carve-out so a
+  `red_not_confirmed` re-entry — the field's primary use case — can resolve
+  via `red_expected: false` instead of being forced to "always strengthen";
+  new Rule 13 spells out the all-or-nothing scope, that it's valid on any
+  pass while `red_phase` is pending (not just the first), verification
+  requirements (read the actual code, don't trust `attempts.md`'s "vacuous"
+  framing at face value), and the safety asymmetry above.
+
+### Changed
+- `states/test_implementation.md`, `states/test.md`, `AGENTS.md` (`red_phase`
+  description + the `test_implementation`/`red_test` transition rules):
+  updated to describe the new third arrival path at `test`.
+- `test_driver.py`: `test_test_implementor_result_not_read_by_advance`
+  renamed to `test_blocked_test_implementor_result_does_not_change_routing`
+  and its comment corrected — the `test_implementation` branch now reads
+  this file when `red_phase` is pending; it just doesn't change the routing
+  for a `status: "blocked"` result. All other call sites that advance from
+  `test_implementation` while `red_phase` is true were retrofitted to write
+  a valid `test_implementor-result.json` first (mandatory since 6.6.0, now
+  actually enforced by this branch).
+
 ## [6.6.2] - 2026-07-15
 
 `--worktree` runs now merge back into `project_root` at `done` via **rebase +
