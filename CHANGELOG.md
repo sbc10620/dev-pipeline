@@ -9,6 +9,60 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.8.0] - 2026-07-20
+
+On a **repair pass** (a `test_implementation` re-entry driven by a reviewer
+finding about a test file, or the implementor's `blocked_on:"tests"` reroute),
+`cmd_advance` transitioned to `test` **unconditionally** — it never read the
+(mandatory since 6.6.0) `test_implementor-result.json`. So when the test author
+verified its tests correct and reported `status:"blocked"`, the run re-ran the
+tester against unchanged tests (which passed), returned to `review`, re-raised
+the same finding, and spun `test → review → test_implementation` until the
+`review` budget was exhausted — **the implementor was never reached**. This is
+the missing mirror of the implementor's `blocked_on:"tests"` reroute
+(`implementation → test_implementation`): there was no reverse route, and no
+prose telling the test author how to signal "the production code is the gap".
+
+### Added
+- **`blocked_on` gains an `"implementation"` value** (`implementor-result.schema.json`,
+  shared enum → `["contract", "tests", "implementation"]`; not schema-enforced
+  against `status`/role, matching the existing convention). **test_implementor
+  only, and only on a repair pass** — it is inert during `red_phase` (a `blocked`
+  authoring pass still falls through to `red_test` regardless of `blocked_on`).
+  The test author sets it when it verified the authored tests correct and the
+  production code is what must change.
+- **`cmd_advance`'s repair-pass `test_implementation` branch now reads
+  `test_implementor-result.json`** (die()-on-missing/invalid, keeping the
+  pre-6.6.0 hand-fix hint) and routes `status:"blocked"` + `blocked_on:"implementation"`
+  → `implementation` (symmetric to the implementor's `blocked_on:"tests"`
+  reroute; takes **no** counter bump, mirroring `red_confirmed → implementation`,
+  so the standoff stays bounded by the `implementation → test_implementation`
+  edge). Every other result (`implemented`, or `blocked` with
+  `contract`/omitted/`tests`) → `test`, exactly as before.
+
+### Changed
+- **`dp-test-implementor.md` Rule 12** widened to cover BOTH repair-pass
+  re-entry causes (implementor concern **and** reviewer finding), with distinct
+  guidance: fix a genuinely-wrong or vacuous test (`implemented`); report
+  `blocked_on:"implementation"` (quoting the disputed finding) only when the
+  tests are verified correct and the production code is the gap; report a Rule 11
+  contract block (`blocked_on` `contract`/omitted) when the AC is untestable as
+  specified. Without this the reported bug reproduced unchanged — the driver
+  route existed but the author never emitted the value that keys it.
+- **`dp-implementor.md`**: corrected the `blocked_on` doc (the shared schema now
+  also defines `"implementation"`, which is test-author-only — the implementor
+  must never set it), and added a rule: on a re-entry note saying the tests were
+  verified correct, re-verify against the contract rather than re-asserting
+  `blocked_on:"tests"` with no new evidence (avoids a zero-information standoff).
+- **Standoff exhaust messaging** (`implementor_blocked_on_tests_exhausted` and
+  the TDD `review_fail_exhausted` hint) generalized to name an
+  author↔implementor standoff — the ping-pong can now be initiated from either
+  side, so the failure no longer reads as solely the implementor's fault.
+- **State prose** (`states/test_implementation.md`, `states/implementation.md`)
+  and the **Key transition rules** (`AGENTS.md`) updated to describe the new
+  route; the driver's `advance` still decides the destination from `blocked_on`
+  (the SKILL never routes it).
+
 ## [6.7.0] - 2026-07-17
 
 A legitimate TDD authoring pass — adding regression/coverage tests for

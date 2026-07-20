@@ -2,7 +2,7 @@
 
 **Goal:** Run the implementor runner to write (and build-check) production code, enforce the role boundary (TDD), record the manifest, advance.
 
-The advance that landed here echoed `directive: run_implementor`, `iter_dir`, `tdd_mode`, and **`work_root`**. The driver persisted the implementor's full context (`contract_path`, `design_instruction`, `build_instruction`, `test_paths`, retry/failure context) to `<iter_dir>/stage-input.json` — you do not assemble any of it. **All git commands below run against `work_root`, not `project_root`** — identical under a normal run, but `work_root` is the isolated worktree checkout under `--worktree` (see `states/init.md`).
+The advance that landed here echoed `directive: run_implementor`, `iter_dir`, `tdd_mode`, and **`work_root`**. The driver persisted the implementor's full context (`contract_path`, `design_instruction`, `build_instruction`, `test_paths`, retry/failure context — including, when the test author rerouted here with `blocked_on: "implementation"`, its `note` that the tests were verified correct and the production code is the gap) to `<iter_dir>/stage-input.json` — you do not assemble any of it. **All git commands below run against `work_root`, not `project_root`** — identical under a normal run, but `work_root` is the isolated worktree checkout under `--worktree` (see `states/init.md`).
 
 - [Step 1] **Stage a boundary/manifest baseline** when `work_root` is a git repo (`git rev-parse --git-dir`). This makes the git index the "before" snapshot so [Step 3] sees only the implementor's changes:
   ```bash
