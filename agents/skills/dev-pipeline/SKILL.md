@@ -33,12 +33,12 @@ The `plan.md` is a pure **spec body** (Requirements, Acceptance Criteria, Interf
 The per-state procedures live in separate files under `states/` so this file stays small and each state is self-contained. The loop is:
 
 1. Do **[Step 0]** below once (arguments, driver location, config bootstrap, clean-tree reminder).
-2. If invoked with `--resume`, follow `states/resume.md` to continue an interrupted run from where it stopped (no new run, no planning/config-gate/init), then run the normal advance loop (step 7) from the recovered state.
+2. If invoked with `--resume`, follow `states/resume.md` to continue an interrupted run from where it stopped (no new run, no planning/config-gate/init), then run the normal advance loop (step 7) from the recovered state — **a resumed run drives the FULL loop through every subsequent state until `done`/`failed`, exactly like a non-resumed run; it is not finished when the recovered state ends.**
 3. If invoked with `--update-config`, run **only** the config-setup state by following `states/update_config.md` (with `plan_path` if one was given), then **stop** (report the config is ready; the user re-invokes with `--plan`/`--request` to run the pipeline).
 4. If invoked with `--request`, run the **planning** state by following `states/planning.md` (build + approve the `plan.md` spec). With `--plan`, skip straight to the config gate.
 5. **Config gate:** if Step 0 reported `config_complete: false`, run the config-setup state by following `states/update_config.md` (using `plan_path`) before continuing. If `config_complete` was true, skip it.
 6. Run the **init** state by following `states/init.md`.
-7. After **every** `driver advance`, read its JSON output, take `next_state`, and **open and follow `states/<next_state>.md`** (e.g. `next_state: "red_test"` → follow `states/red_test.md`). Repeat until `next_state` is `done` or `failed`. (This is also where `--resume` rejoins the loop.)
+7. After **every** `driver advance`, read its JSON output, take `next_state`, and **open and follow `states/<next_state>.md`** (e.g. `next_state: "red_test"` → follow `states/red_test.md`). Keep looping until `next_state` is `done` or `failed` — and **`done`/`failed` are themselves states you must open and execute**: the commit/merge/retrospective is performed **inside** `states/done.md`, the report **inside** `states/failed.md`. So the loop stops *after* you run that final state file, not the moment advance returns `done` — **never treat `next_state: "done"` as "nothing left to do."** Each advance also echoes a `next_action` string restating this; follow it. (This is also where `--resume` rejoins the loop.)
 
 ### Run Context (the only state you carry between steps)
 
@@ -198,4 +198,4 @@ Now: `--resume` → follow `states/resume.md`; `--update-config` → follow `sta
 
 ## ⚠️ Reminder
 
-The driver decides every transition. After each `driver advance`, follow the `next_state` it reports by opening `states/<next_state>.md` — do not assume any outcome (pass/fail/approve) in advance, and do not skip a `driver advance` call. There is no fixed "happy path"; the only correct sequence is whatever the driver returns.
+The driver decides every transition. After each `driver advance`, follow the `next_state` it reports by opening `states/<next_state>.md` — do not assume any outcome (pass/fail/approve) in advance, and do not skip a `driver advance` call. There is no fixed "happy path"; the only correct sequence is whatever the driver returns. Every advance echoes a `next_action` cue for exactly this; `done` is a state you **execute** (its commit lives inside `states/done.md`), not a stop signal.

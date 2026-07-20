@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "6.7.0"
+__version__ = "6.8.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -589,6 +589,31 @@ def ensure_iter_dir(run_dir: pathlib.Path, state: dict) -> pathlib.Path:
 
 
 # ---------------------------------------------------------------------------
+# Orchestrator "what to do next" cue
+# ---------------------------------------------------------------------------
+
+def _next_action_for(state: str) -> str:
+    """Imperative, English "what to do next" cue for a landed state, echoed on
+    every advance / resume so a context-thin orchestrator (esp. all-main-session
+    + --resume, where per-stage compaction strips the SKILL loop rules) always has
+    an explicit "keep going / execute this state" instruction in its freshest tool
+    result. Computed in ONE place so transition(), the already-terminal advance
+    emit, and cmd_resume's legacy fallback all speak identically — a fixed per-site
+    string would read as "loop until done" even when the state already IS done.
+    This is a cue for the orchestrator only; it is excluded from stage-input
+    (`_STAGE_INPUT_CONTROL`) so it never reaches a role's own prompt."""
+    if state == "done":
+        return ("Open and EXECUTE states/done.md now — the commit / merge / "
+                "retrospective happen there. 'done' is NOT a stop signal; stop only "
+                "after done.md completes.")
+    if state == "failed":
+        return "Open states/failed.md, report per its steps, then stop."
+    return (f"This run is NOT finished. Open and follow states/{state}.md, run its "
+            "steps, then continue the advance loop (call `driver advance` again). "
+            "Do not stop after this state.")
+
+
+# ---------------------------------------------------------------------------
 # Review pass/fail gate
 # ---------------------------------------------------------------------------
 
@@ -1032,6 +1057,11 @@ def cmd_advance(args) -> None:
             # (Global Rule 9) — state files must git -C <work_root>, not
             # <project_root>, for baseline/delta/review-diff/commit.
             "work_root": state.get("work_root") or state.get("project_dir", ""),
+            # Explicit "what to do next" cue for the orchestrator on EVERY transition
+            # (see _next_action_for) — non-terminal → keep looping; done → execute
+            # done.md; failed → report + stop. Excluded from stage-input so it never
+            # reaches a role's prompt.
+            "next_action": _next_action_for(new_state),
         }
         result.update(dest_echoes(new_state))
         if extra:
@@ -1387,7 +1417,12 @@ def cmd_advance(args) -> None:
                 transition(target, "review_fail_retry", extra=extra)
 
     elif current in ("done", "failed"):
-        emit({"next_state": current, "message": f"Pipeline already in terminal state: {current}"})
+        # A resumed session may call advance while already parked at a terminal
+        # state — echo the state's next_action so "already in terminal state" is not
+        # misread as "nothing to do" (a run parked at done still owes done.md's commit).
+        emit({"next_state": current,
+              "message": f"Pipeline already in terminal state: {current}",
+              "next_action": _next_action_for(current)})
 
     else:
         die(f"Unknown state: {current}")
@@ -1494,6 +1529,16 @@ def cmd_resume(args) -> None:
     def out(payload: dict) -> None:
         payload.update(ctx)
         payload["resumed"] = True
+        # A run interrupted under a NEW driver already carries next_action in its
+        # replayed landing echo; a run from an OLDER driver does not — synthesize it,
+        # keyed on the state being resumed into so a run parked at `done` gets the
+        # execute-done.md cue, not a "loop until done" one. Skip the directive:"advance"
+        # branches (init-parked / crash-window): there the instruction is "call advance"
+        # (which then emits the real next_action), NOT "open states/<state>.md" — for
+        # init-parked that would even tell the orchestrator to open init.md, which
+        # resume.md forbids.
+        if not payload.get("next_action") and payload.get("directive") != "advance":
+            payload["next_action"] = _next_action_for(payload.get("next_state", current))
         if possibly_live:
             payload["possibly_live"] = True
         emit(payload)
@@ -2044,6 +2089,11 @@ _STAGE_INPUT_CONTROL = {
     # is defense-in-depth for a byte-identical re-persist.
     "resumed", "resume_note", "message", "possibly_live",
     "run_dir", "project_dir", "plan_path",
+    # orchestrator-only "what to do next" cue (echoed on every advance) — an
+    # instruction to the ORCHESTRATOR ("open states/*.md, continue the advance
+    # loop"), never a stage input; leaking it would inject orchestrator directives
+    # into a runner role's own prompt.
+    "next_action",
 }
 
 
@@ -2383,7 +2433,8 @@ def cmd_run_stage(args) -> None:
             "inputs you are given are your ONLY source of truth — follow them and "
             "nothing else.\n\n"
             "Do ONLY the work THIS role's instructions below define, then STOP and "
-            "hand back — do NOT take on the OTHER pipeline stages. (e.g. as the "
+            "hand back to the orchestrator (which then continues the pipeline loop) — "
+            "do NOT take on the OTHER pipeline stages yourself. (e.g. as the "
             "implementor you write and build-check your code exactly as your "
             "instructions say, then stop; you do NOT run the project's test suite or "
             "review the diff — separate tester and reviewer roles do that.) Where this "

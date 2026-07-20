@@ -1292,6 +1292,127 @@ class TestResume(PipelineTestCase):
         self.assertNotIn("config.snapshot", res.stderr)
 
 
+class TestNextActionCue(PipelineTestCase):
+    """6.8.0: every advance / resume echoes a `next_action` cue so a context-thin
+    orchestrator (all-main-session + --resume) always has an explicit "keep looping /
+    execute this state" instruction. Non-terminal → continue the loop; done → execute
+    done.md; failed → report + stop. It is orchestrator-only and never a stage input."""
+
+    def _resume(self, p):
+        return run_driver("resume", "--run", str(p.run_dir))
+
+    def test_nonterminal_advance_echoes_continue_cue(self):
+        p = self.started(tdd_mode=False)
+        r = p.advance()  # init -> implementation
+        self.assertEqual(r.json["next_state"], "implementation")
+        na = r.json["next_action"]
+        self.assertIn("NOT finished", na)
+        self.assertIn("states/implementation.md", na)
+        self.assertIn("continue the advance loop", na)
+
+    def test_done_advance_echoes_execute_done_cue(self):
+        p = self.started(tdd_mode=False)
+        p.advance()  # implementation
+        p.write_implementor_result(status="implemented")
+        p.advance()  # test
+        p.write_test_result(status="pass")
+        p.advance()  # review
+        p.write_review_result(verdict="approve")
+        done = p.advance()  # done
+        self.assertEqual(done.json["next_state"], "done")
+        na = done.json["next_action"]
+        self.assertIn("states/done.md", na)
+        self.assertIn("not a stop signal", na.lower())
+
+    def test_failed_advance_echoes_report_cue(self):
+        # Exhaust the test budget (max_test_iteration=1 -> 2 attempts) to reach failed.
+        p = self.started(tdd_mode=False, max_test_iteration=1)
+        p.advance()  # -> implementation
+        p.write_implementor_result(status="implemented")
+        p.advance()  # -> test
+        p.write_test_result(status="fail", failure_type="code")
+        p.advance()  # -> implementation (retry)
+        p.write_implementor_result(status="implemented")
+        p.advance()  # -> test
+        p.write_test_result(status="fail", failure_type="code")
+        r = p.advance()  # -> failed
+        self.assertEqual(r.json["next_state"], "failed")
+        self.assertIn("states/failed.md", r.json["next_action"])
+
+    def test_terminal_advance_emit_carries_cue(self):
+        # advance() called while ALREADY parked at done still tells the orchestrator
+        # to execute done.md (not "nothing to do").
+        p = self.started(tdd_mode=False)
+        p.advance(); p.write_implementor_result(status="implemented")
+        p.advance(); p.write_test_result(status="pass")
+        p.advance(); p.write_review_result(verdict="approve")
+        p.advance()  # -> done
+        again = p.advance()  # advance while already at done
+        self.assertEqual(again.json["next_state"], "done")
+        self.assertIn("already in terminal state", again.json["message"])
+        self.assertIn("states/done.md", again.json["next_action"])
+
+    def test_next_action_excluded_from_stage_input(self):
+        # The cue must never reach a role's prompt (tester stage-input here).
+        p = self.started(tdd_mode=False)
+        p.advance()  # implementation
+        p.write_implementor_result(status="implemented")
+        p.advance()  # test -> tester stage-input written
+        si = json.loads((p.run_dir / "iterations" / "0" / "stage-input.json").read_text(encoding="utf-8"))
+        self.assertNotIn("next_action", si["inputs"])
+
+    def test_resume_new_run_replays_next_action(self):
+        # A run interrupted under the CURRENT driver already carries next_action in
+        # its replayed landing echo.
+        p = self.started(tdd_mode=False)
+        p.advance()  # implementation
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("states/implementation.md", res.json["next_action"])
+
+    def test_resume_legacy_echo_synthesizes_next_action(self):
+        # A run interrupted under an OLDER driver (no next_action in last-advance.json)
+        # gets a synthesized, state-aware cue on resume.
+        p = self.started(tdd_mode=False)
+        p.advance()  # implementation
+        la = p.run_dir / "last-advance.json"
+        echo = json.loads(la.read_text(encoding="utf-8"))
+        echo.pop("next_action", None)  # simulate a pre-6.8.0 landing echo
+        la.write_text(json.dumps(echo), encoding="utf-8")
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("states/implementation.md", res.json["next_action"])
+        self.assertIn("NOT finished", res.json["next_action"])
+
+    def test_resume_legacy_echo_done_gets_done_specific_cue(self):
+        # The legacy fallback is STATE-AWARE: a run parked at done gets the
+        # execute-done.md cue, NOT a "loop until done" one (regression guard for the
+        # fixed-string bug the adversarial review caught).
+        p = self.started(tdd_mode=False)
+        p.advance(); p.write_implementor_result(status="implemented")
+        p.advance(); p.write_test_result(status="pass")
+        p.advance(); p.write_review_result(verdict="approve")
+        p.advance()  # -> done
+        la = p.run_dir / "last-advance.json"
+        echo = json.loads(la.read_text(encoding="utf-8"))
+        echo.pop("next_action", None)
+        la.write_text(json.dumps(echo), encoding="utf-8")
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["next_state"], "done")
+        na = res.json["next_action"]
+        self.assertIn("states/done.md", na)
+        self.assertNotIn("continue the advance loop", na)  # NOT the loop cue
+
+    def test_resume_init_parked_has_no_open_state_cue(self):
+        # Init-parked resume uses directive:"advance" (call advance, do NOT open
+        # init.md), so it must NOT synthesize an "open states/init.md" cue.
+        p = self.started(tdd_mode=False)
+        res = self._resume(p)
+        self.assertEqual(res.json["directive"], "advance")
+        self.assertNotIn("next_action", res.json)
+
+
 class TestBootstrapConfig(unittest.TestCase):
     """bootstrap-config seeds the config from the template deterministically."""
 
@@ -2242,6 +2363,8 @@ class TestStageInputWiring(PipelineTestCase):
         self.assertIn("build_instruction", si["inputs"])
         self.assertNotIn("directive", si["inputs"])  # control keys excluded
         self.assertNotIn("tester_runners", si["inputs"])  # M1: runner arrays never reach the prompt
+        # 6.8.0: the orchestrator-only next_action cue must NOT leak into a role's prompt.
+        self.assertNotIn("next_action", si["inputs"])
 
     def test_advance_writes_implementor_output_file(self):
         # 6.5.0: implementor (a file role) gets an output_file too, so its prompt

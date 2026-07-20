@@ -9,6 +9,45 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [6.8.0] - 2026-07-20
+
+When every role is configured as a `main-session` runner and an interrupted
+run is `--resume`d, the orchestrator would finish **only** the single
+recovered state and stop — never re-entering the advance loop to drive the
+run to `done`/`failed`. At the review→done boundary this showed up as
+"reaches `done` and just stops": `states/done.md`'s commit / merge /
+retrospective never ran. Root cause is context loss, not the state machine —
+each `main-session` stage compacts the session (thinning the SKILL loop
+rules), and `--resume` starts from an already-thin session, so at the moment
+the recovered state's closing `advance` returns, the orchestrator has lost the
+"keep looping" / "`done` is a state to execute" context. `done` is also the
+one `next_state` that reads as an English stop-word rather than an action.
+
+### Added
+- **Every `advance` echo (and every `resume` payload) now carries a
+  `next_action` string** — an explicit, imperative "what to do next" cue for
+  the orchestrator, computed in one place (`_next_action_for`): non-terminal
+  states say "not finished — open `states/<state>.md` and continue the advance
+  loop"; `done` says "execute `states/done.md` now, this is not a stop
+  signal"; `failed` says "report per `states/failed.md`, then stop". It lands
+  in the freshest tool result the orchestrator reads, so it survives the
+  per-stage compaction that strips prose context. The already-terminal
+  `advance` emit and `cmd_resume`'s legacy-run fallback use the same
+  state-keyed helper, so a run parked at `done` always gets the execute-done
+  cue (never a "loop until done" one). `next_action` is orchestrator-only —
+  added to `_STAGE_INPUT_CONTROL` so it never leaks into a runner role's
+  prompt.
+
+### Changed
+- **`SKILL.md` loop / resume wording + `states/resume.md`** clarified so
+  `done`/`failed` are stated to be states you **open and execute** before the
+  loop stops, and a resumed run is stated to drive the **full** loop to a
+  terminal state (not finish a single state). The `main-session`/`subagent`
+  persona preamble's hand-back clause now names the continuation ("hand back
+  to the orchestrator, which then continues the pipeline loop") instead of a
+  bare "then STOP", so a compacted reviewer's most-recent instruction no
+  longer reads as "stop the whole run."
+
 ## [6.7.0] - 2026-07-17
 
 A legitimate TDD authoring pass — adding regression/coverage tests for
