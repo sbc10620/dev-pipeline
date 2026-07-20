@@ -26,8 +26,8 @@
     },
     "blocked_on": {
       "type": "string",
-      "enum": ["contract", "tests"],
-      "description": "Optional, meaningful only when status is 'blocked'. 'contract' (the default if omitted): the contract itself is unsatisfiable as specified. 'tests' (implementor only, TDD): the implementor is confident the authored tests — not the contract — contradict the contract; the driver routes this back to the test author instead of retrying the implementor. Not schema-enforced against status, matching this schema's existing concern/status convention."
+      "enum": ["contract", "tests", "implementation"],
+      "description": "Optional, meaningful only when status is 'blocked'. 'contract' (the default if omitted): the contract itself is unsatisfiable as specified — settable by either role. 'tests' (implementor only, TDD): the implementor is confident the authored tests — not the contract — contradict the contract; the driver routes this back to the test author instead of retrying the implementor. 'implementation' (test_implementor only, TDD, and only on a repair pass): the test author verified the authored tests are correct and the production code — not the tests — is what must change; the driver routes this to the implementor instead of re-running the tester. It is inert during the RED phase (a 'blocked' first/red-not-confirmed authoring pass falls through to red_test regardless of blocked_on), so set it only when re-entered on a repair pass. Not schema-enforced against status or role, matching this schema's existing concern/status convention."
     },
     "red_expected": {
       "type": "boolean",

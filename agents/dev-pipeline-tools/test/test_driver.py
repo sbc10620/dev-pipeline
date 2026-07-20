@@ -1691,7 +1691,9 @@ class TestTDD(PipelineTestCase):
         self.assertEqual(r.json["next_state"], "test_implementation")
         self.assertEqual(r.json["directive"], "run_test_implementor")
         self.assertEqual(r.json["iterations"]["review"], 1)
-        # repair: test_implementation -> test (green re-run, NOT implementation)
+        # repair: test author fixes the flagged test (status:"implemented") ->
+        # test (green re-run, NOT implementation)
+        p.write_test_implementor_result(status="implemented")
         r2 = p.advance()
         self.assertEqual(r2.json["next_state"], "test")
         self.assertEqual(r2.json["directive"], "run_tester")
@@ -1705,12 +1707,81 @@ class TestTDD(PipelineTestCase):
                               findings=[finding(severity="critical",
                                                 file="tests/test_foo.py")])
         self.assertEqual(p.advance().json["next_state"], "test_implementation")
+        p.write_test_implementor_result(status="implemented")  # test author fixed the flagged test
         self.assertEqual(p.advance().json["next_state"], "test")  # repair: re-run GREEN
         # The tightened test now fails against the existing implementation.
         p.write_test_result(status="fail", failure_type="code")
         r = p.advance()
         self.assertEqual(r.json["next_state"], "implementation")
         self.assertEqual(r.json["directive"], "run_implementor")
+
+    def test_review_test_finding_test_author_blocked_on_impl_routes_to_implementation(self):
+        # 6.8.0: a review test-finding routes to test_implementation; the test
+        # author verifies its tests correct and reports blocked_on:"implementation"
+        # -> the driver reroutes to the implementor (NOT back to the tester).
+        p = self.started_tdd()
+        self._to_review(p)
+        p.write_review_result(verdict="needs-attention",
+                              findings=[finding(severity="critical",
+                                                file="tests/test_foo.py")])
+        self.assertEqual(p.advance().json["next_state"], "test_implementation")
+        p.write_test_implementor_result(status="blocked", blocked_on="implementation",
+                                        concern="tests verified correct; the production code is the gap")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "implementation")
+        self.assertEqual(r.json["directive"], "run_implementor")
+        # The disputed concern reaches the implementor via the echoed note.
+        self.assertIn("production code is the gap", r.json["note"])
+        # No counter bumped on this reroute (mirrors red_confirmed -> implementation).
+        self.assertEqual(r.json["iterations"]["test_implementation"], 0)
+
+    def test_repair_blocked_contract_stays_on_test(self):
+        # A repair-pass blocked WITHOUT blocked_on:"implementation" (contract /
+        # omitted) is NOT the implementor's problem -> stays on `test`, exactly as
+        # before 6.8.0. Documents the split.
+        p = self.started_tdd()
+        self._to_review(p)
+        p.write_review_result(verdict="needs-attention",
+                              findings=[finding(severity="critical",
+                                                file="tests/test_foo.py")])
+        self.assertEqual(p.advance().json["next_state"], "test_implementation")
+        p.write_test_implementor_result(status="blocked",
+                                        concern="AC3 is untestable as specified")
+        r = p.advance()
+        self.assertEqual(r.json["next_state"], "test")
+        self.assertEqual(r.json["directive"], "run_tester")
+
+    def test_repair_pass_missing_test_implementor_result_dies(self):
+        # 6.8.0: the repair branch now reads the (mandatory) result file too, so a
+        # missing one dies with the pre-6.6.0 hand-fix hint.
+        p = self.started_tdd()
+        self._to_review(p)
+        p.write_review_result(verdict="needs-attention",
+                              findings=[finding(severity="critical",
+                                                file="tests/test_foo.py")])
+        self.assertEqual(p.advance().json["next_state"], "test_implementation")
+        # No test_implementor-result.json written for the repair pass.
+        r = p.advance()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("test_implementor-result.json not found", r.stderr)
+        self.assertIn("by hand", r.stderr)
+
+    def test_repair_pass_bogus_blocked_on_rejected(self):
+        # 6.8.0: the shared schema's blocked_on enum now includes "implementation";
+        # a value outside the enum is still rejected on the repair-pass read.
+        p = self.started_tdd()
+        self._to_review(p)
+        p.write_review_result(verdict="needs-attention",
+                              findings=[finding(severity="critical",
+                                                file="tests/test_foo.py")])
+        self.assertEqual(p.advance().json["next_state"], "test_implementation")
+        p.write_raw_result_file(
+            "test_implementor-result.json",
+            json.dumps({"status": "blocked", "summary": "x",
+                        "concern": "x", "blocked_on": "nonsense"}))
+        r = p.advance()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("schema violation", r.stderr)
 
     def test_default_max_test_implementation_iteration_is_three(self):
         # When the key is omitted from config, the driver default applies.
@@ -1791,8 +1862,10 @@ class TestImplementorBlockedRouting(PipelineTestCase):
         r1 = p.advance()
         self.assertEqual(r1.json["next_state"], "test_implementation")
         self.assertEqual(r1.json["iterations"]["test_implementation"], 1)
-        # Repair pass lands back on `test` (red_phase already false); fail it so
+        # Repair pass lands back on `test` (red_phase already false); the test
+        # author writes valid tests (status:"implemented"), then fail the test so
         # the implementor runs again and can re-report blocked_on:"tests".
+        p.write_test_implementor_result(status="implemented")
         r2 = p.advance()  # test_implementation -> test (repair)
         self.assertEqual(r2.json["next_state"], "test")
         p.write_test_result(status="fail", failure_type="code")
@@ -1804,6 +1877,32 @@ class TestImplementorBlockedRouting(PipelineTestCase):
         self.assertEqual(r4.json["halt_reason"], "iteration-exhausted")
         state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["history"][-1]["outcome"], "implementor_blocked_on_tests_exhausted")
+
+    def test_repair_blocked_on_impl_standoff_exhausts(self):
+        # 6.8.0: the implementor(blocked_on:tests) <-> test_author(blocked_on:
+        # implementation) standoff terminates. The test-author reroute takes no
+        # counter bump, so the loop is bounded by the implementation ->
+        # test_implementation edge; it exhausts to `failed` with the generalized
+        # standoff hint.
+        p = self.make_pipeline(tdd_mode=True, max_test_implementation_iteration=1)
+        p.init()
+        self._to_implementation(p)
+        p.write_implementor_result(status="blocked", blocked_on="tests", concern="tests wrong")
+        r1 = p.advance()  # implementation -> test_implementation (test_impl=1)
+        self.assertEqual(r1.json["next_state"], "test_implementation")
+        self.assertEqual(r1.json["iterations"]["test_implementation"], 1)
+        # Test author disagrees: the tests are correct, the code is the gap.
+        p.write_test_implementor_result(status="blocked", blocked_on="implementation",
+                                        concern="tests correct; code is the gap")
+        r2 = p.advance()  # test_implementation -> implementation (NO bump)
+        self.assertEqual(r2.json["next_state"], "implementation")
+        self.assertEqual(r2.json["iterations"]["test_implementation"], 1)
+        # Implementor holds its ground; the next reroute bumps past the budget.
+        p.write_implementor_result(status="blocked", blocked_on="tests", concern="still tests")
+        r3 = p.advance()
+        self.assertEqual(r3.json["next_state"], "failed")
+        self.assertEqual(r3.json["halt_reason"], "iteration-exhausted")
+        self.assertIn("standoff", r3.json.get("hint", "").lower())
 
     def test_blocked_on_tests_non_tdd_falls_through_to_test(self):
         # blocked_on:"tests" only means something in TDD (there is no test
