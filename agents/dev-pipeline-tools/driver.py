@@ -7,7 +7,7 @@ Usage:
   python3 driver.py apply-config     --config <path> --values-file <path>
   python3 driver.py init             --plan <path> [--config <path>] [--project <dir>] [--worktree]
   python3 driver.py advance          --run <run_dir>
-  python3 driver.py resume           --run <run_dir>
+  python3 driver.py resume           --run <run_dir> [--summary <text> | --summary-file <path>]
   python3 driver.py cleanup-worktree --run <run_dir>
   python3 driver.py status           --run <run_dir>
   python3 driver.py validate-config  --config <path> [--plan <path>]
@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "7.0.0"
+__version__ = "7.1.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -1471,6 +1471,19 @@ def cmd_resume(args) -> None:
         die(f"Corrupt state.json (no 'state' field) at {sp}. Cannot resume; "
             f"inspect the run or start a new one.")
 
+    # Optional prior-session task summary (7.1.0): surfaced to the resuming
+    # orchestrator via the resume output only. It is pure handoff narrative — it
+    # rides in ctx (merged by out() AFTER build_stage_input runs on the pristine
+    # echo), so it reaches states/resume.md but never a role's stage-input. Not
+    # persisted: a bare resume carries nothing, so a stale summary is never reused.
+    task_summary = getattr(args, "summary", None)
+    if getattr(args, "summary_file", None):
+        sf = pathlib.Path(args.summary_file)
+        try:
+            task_summary = sf.read_text(encoding="utf-8")
+        except OSError as e:
+            die(f"--summary-file {sf} could not be read: {e}")
+
     # Context a resuming SKILL session needs but that a landing echo does not carry:
     # project root, the source plan (provenance), the contract, the run dir.
     ctx = {
@@ -1490,6 +1503,10 @@ def cmd_resume(args) -> None:
         "worktree_branch": state.get("worktree_branch"),
         "worktree_base_ref": state.get("worktree_base_ref"),
     }
+    # Only present it when a summary was actually supplied — a bare resume must be
+    # byte-for-byte unchanged from before this feature.
+    if task_summary is not None:
+        ctx["task_summary"] = task_summary
 
     # Concurrency guard (best-effort): a state.json touched more recently than a
     # runner could still be executing may belong to a live session — flag it so the
@@ -2730,6 +2747,14 @@ def main() -> None:
 
     p_res = sub.add_parser("resume")
     p_res.add_argument("--run", required=True)
+    g_res = p_res.add_mutually_exclusive_group()
+    g_res.add_argument("--summary",
+                       help="optional prior-session task summary; surfaced to the "
+                            "resuming orchestrator as task_summary (not persisted, "
+                            "not passed to any role)")
+    g_res.add_argument("--summary-file",
+                       help="path to a file holding the prior-session task summary "
+                            "(alternative to --summary, for long text)")
 
     p_cw = sub.add_parser("cleanup-worktree")
     p_cw.add_argument("--run", required=True)

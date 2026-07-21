@@ -9,6 +9,24 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [7.1.0] - 2026-07-21
+
+**`driver resume` optionally carries a prior-session task summary to the resuming
+orchestrator.** When the host session fills its context and hands off to a fresh
+session, that new orchestrator starts cold — it has the precise state echo but no
+narrative of what the prior session was doing/decided/planned. `resume` now takes
+an optional summary so the fresh session can re-orient.
+
+### Added
+- **`resume --summary <text>` / `--summary-file <path>`** (mutually exclusive). The
+  text is surfaced in the resume output as `task_summary`, which `states/resume.md`
+  reads as prior-session handoff context (distinct from `contract.md` and
+  `attempts.md`). It rides in the resume `ctx` — merged *after* `build_stage_input`
+  runs on the pristine echo — so it reaches the orchestrator but **never** a role's
+  `stage-input.json` (a role stays fed only by the contract/attempts). Explicit-only
+  and **not persisted**: a bare `resume` carries no summary and is byte-for-byte
+  unchanged, so a stale summary is never auto-reused (pass it again to reuse).
+
 ## [7.0.0] - 2026-07-21
 
 **Removed `red_expected`** (the 6.7.0 in-flow "these tests target pre-existing

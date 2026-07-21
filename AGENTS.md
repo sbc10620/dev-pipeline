@@ -33,8 +33,11 @@ python3 agents/dev-pipeline-tools/driver.py init --plan plan.md --config <projec
 python3 agents/dev-pipeline-tools/driver.py advance --run <run_dir>
 
 # Re-emit the current state's landing echo to continue an INTERRUPTED run (no new
-# init, no redone stages); replays <run_dir>/last-advance.json (written every advance)
-python3 agents/dev-pipeline-tools/driver.py resume --run <run_dir>
+# init, no redone stages); replays <run_dir>/last-advance.json (written every advance).
+# Optionally carry the prior session's task summary into the resume output as
+# task_summary (7.1.0) — surfaced to the resuming orchestrator only (never a role's
+# prompt), not persisted, so a bare resume is unchanged.
+python3 agents/dev-pipeline-tools/driver.py resume --run <run_dir> [--summary <text> | --summary-file <path>]
 
 # Tear down a --worktree run's checkout + branch (idempotent; no-op for a non-worktree
 # run); normally called by states/done.md after a successful merge, or by hand after

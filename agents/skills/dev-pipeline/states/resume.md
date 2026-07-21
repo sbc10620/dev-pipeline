@@ -4,12 +4,14 @@
 
 - [Step 1] **Locate the run.** If the user passed `--resume <run_dir>`, use that path. Otherwise resolve `project_root` (Step 0) and use `<project_root>/.dev-pipeline/latest`. Verify the path exists; if not, stop: "No run to resume — `<path>` not found. Start a run with `--plan`/`--request`, or pass `--resume <run_dir>`."
 
-- [Step 2] **Ask the driver where to resume:**
+- [Step 2] **Ask the driver where to resume** (optionally handing it the prior session's task summary):
   ```bash
-  python3 <driver_path> resume --run <run_dir>
+  python3 <driver_path> resume --run <run_dir> [--summary "<text>" | --summary-file <path>]
   ```
+  Pass `--summary`/`--summary-file` only if the user carried over a task summary from the interrupted session (what was decided / done / planned next); it is optional and never required.
   - Non-zero exit → the driver prints the reason and (for a run with no `last-advance.json`) an exact manual recipe. Relay it and stop.
   - On success, parse the JSON and **restore the Run Context** from it: `project_root` (from `project_dir`), `plan_path`, `contract_path`, `tdd_mode`, `run_dir`, and **`work_root`, `worktree_branch`, `worktree_base_ref`**. These replace the values `init` normally seeds — in particular, **use the restored `work_root` for every git command below and in the resumed state file, never `project_root`**, exactly as a fresh run would (a run predating this feature has no `work_root` in `state.json`; `driver resume` falls back to `project_dir` for it, so this restore always yields a usable value).
+  - **`task_summary`** (present only when you passed `--summary`/`--summary-file`) is the prior session's **handoff context** — read it to re-orient yourself as the orchestrator (what was in progress, decisions taken, next steps), distinct from `contract.md` (the spec) and `attempts.md` (the failure log). It is orchestrator-only context: the driver does **not** forward it to any role's prompt, and a bare `resume` (no flag) never carries it.
   - `possibly_live` is a **best-effort** flag (the run's `state.json` was written recently). It can miss a genuinely live session and can fire on a benign quick retry, so treat it as a nudge, not a guarantee: **always** make sure no other session is still driving this run before continuing — a second driver on the same run corrupts its state. If `possibly_live` is set and you can't confirm the run is idle, stop.
 
 - [Step 3] **Dispatch on the driver's output.** It reports a `next_state` (the state to resume in) and sometimes a `directive`:
@@ -39,7 +41,7 @@
 
 **Checklist:**
 - [ ] Run located (`--resume <run_dir>` or `latest`); stopped cleanly if absent
-- [ ] `driver resume` ran; Run Context (`project_root`, `plan_path`, `contract_path`, `tdd_mode`, `work_root`, `worktree_branch`, `worktree_base_ref`) restored; confirmed the run is idle (esp. if `possibly_live`)
+- [ ] `driver resume` ran (with `--summary`/`--summary-file` if a prior-session summary was carried over); Run Context (`project_root`, `plan_path`, `contract_path`, `tdd_mode`, `work_root`, `worktree_branch`, `worktree_base_ref`) restored, and any echoed `task_summary` read as handoff context; confirmed the run is idle (esp. if `possibly_live`)
 - [ ] Dispatched correctly: `advance` directive re-advanced (never opened `init.md`); terminal always followed its state file; authoring vs JSON-role routed right
 - [ ] (authoring re-entry) recovered the working-tree-vs-index delta (against `work_root`) minus the manifest, boundary-checked the remainder (TDD, no auto-revert), and `record-changes`d it **before** entering the state file
 - [ ] Continued the normal loop from the recovered state

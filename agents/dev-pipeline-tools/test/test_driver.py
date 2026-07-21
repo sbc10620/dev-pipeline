@@ -1136,6 +1136,55 @@ class TestResume(PipelineTestCase):
         self.assertEqual(res.json["next_state"], "init")
         self.assertEqual(res.json["directive"], "advance")
 
+    def test_resume_summary_surfaces_in_output(self):
+        # 7.1.0: --summary is surfaced to the resuming orchestrator as task_summary.
+        p = self.started(tdd_mode=False)
+        p.advance()  # -> implementation
+        res = run_driver("resume", "--run", str(p.run_dir),
+                         "--summary", "wip: added parse(), next: empty-input error path")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["task_summary"],
+                         "wip: added parse(), next: empty-input error path")
+
+    def test_resume_summary_file(self):
+        # --summary-file reads the summary from a file (for long text).
+        p = self.started(tdd_mode=False)
+        p.advance()  # -> implementation
+        sf = p.run_dir / "handoff.md"
+        sf.write_text("multi\nline\nsummary", encoding="utf-8")
+        res = run_driver("resume", "--run", str(p.run_dir), "--summary-file", str(sf))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["task_summary"], "multi\nline\nsummary")
+
+    def test_resume_bare_has_no_task_summary(self):
+        # A bare resume (no flag) is byte-for-byte unchanged — no task_summary key.
+        p = self.started(tdd_mode=False)
+        p.advance()  # -> implementation
+        res = self._resume(p)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("task_summary", res.json)
+
+    def test_resume_summary_flags_mutually_exclusive(self):
+        # --summary and --summary-file cannot be combined (argparse error).
+        p = self.started(tdd_mode=False)
+        p.advance()
+        res = run_driver("resume", "--run", str(p.run_dir),
+                         "--summary", "a", "--summary-file", "b")
+        self.assertNotEqual(res.returncode, 0)
+
+    def test_resume_summary_does_not_leak_into_stage_input(self):
+        # task_summary is orchestrator-only: it rides in ctx (merged after
+        # build_stage_input runs on the pristine echo), so a role's stage-input
+        # written by resume must NOT contain it.
+        p = self.started(tdd_mode=False)
+        p.advance()  # -> implementation (a role-bearing state)
+        res = run_driver("resume", "--run", str(p.run_dir), "--summary", "SECRET-HANDOFF")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["task_summary"], "SECRET-HANDOFF")
+        si = json.loads((p._current_iter_dir() / "stage-input.json").read_text(encoding="utf-8"))
+        self.assertNotIn("task_summary", si.get("inputs", {}))
+        self.assertNotIn("SECRET-HANDOFF", json.dumps(si))
+
     def test_resume_stale_window_reruns_advance(self):
         # A REAL crash window — advance wrote last-advance.json, then died before
         # save_state. Reconstruct it by snapshotting state.json before an advance and
