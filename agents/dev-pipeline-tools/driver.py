@@ -1097,22 +1097,28 @@ def cmd_advance(args) -> None:
     # confirmation is skipped and the run lands directly on "test" instead.) ---
     elif current == "test_implementation":
         iter_dir = ensure_iter_dir(run_dir, state)
-        if state.get("red_phase", False):
-            result_file = iter_dir / "test_implementor-result.json"
-            if not result_file.exists():
-                die(f"test_implementor-result.json not found at {result_file}. "
-                    "run-stage/finalize-stage should have produced it (mandatory since "
-                    "6.6.0) — this indicates a driver or runner bug. If this run was "
-                    "created by a pre-6.6.0 driver, write a valid status file to this "
-                    "exact path by hand — minimally: "
-                    '{"status": "implemented", "summary": "<one-line outcome>"} — '
-                    "or start a new run.")
-            result = load_json(result_file)
-            errors = validate_against_schema(result, "implementor-result.schema.json")
-            if errors:
-                die("test_implementor-result.json schema violation:\n" +
-                    "\n".join(f"  - {e}" for e in errors))
+        # The test author's status file is mandatory since 6.6.0 (run-stage/
+        # finalize-stage validated it before reporting ok:true) — BOTH the
+        # red-phase and the repair-pass paths below read it, so read and validate
+        # it once here (one die-hint to keep in sync, not two). Its absence means
+        # a driver/runner bug, not an advisory gap; the hand-fix hint covers a
+        # pre-6.6.0 run (no red_phase → resolves False → lands on the repair path).
+        result_file = iter_dir / "test_implementor-result.json"
+        if not result_file.exists():
+            die(f"test_implementor-result.json not found at {result_file}. "
+                "run-stage/finalize-stage should have produced it (mandatory since "
+                "6.6.0) — this indicates a driver or runner bug. If this run was "
+                "created by a pre-6.6.0 driver, write a valid status file to this "
+                "exact path by hand — minimally: "
+                '{"status": "implemented", "summary": "<one-line outcome>"} — '
+                "or start a new run.")
+        result = load_json(result_file)
+        errors = validate_against_schema(result, "implementor-result.schema.json")
+        if errors:
+            die("test_implementor-result.json schema violation:\n" +
+                "\n".join(f"  - {e}" for e in errors))
 
+        if state.get("red_phase", False):
             if result.get("status") == "implemented" and result.get("red_expected", True) is False:
                 # The test author declared every test in this pass targets pre-existing
                 # behavior — skip RED confirmation, land exactly where a repair pass does.
@@ -1154,25 +1160,8 @@ def cmd_advance(args) -> None:
                                   "test_instruction":    cfg["llm"]["tester"]["test_instruction"]})
         else:
             # Repair pass (driven by a review finding about tests, or the
-            # implementor's blocked_on:"tests" reroute): code already exists.
-            # Read the (mandatory since 6.6.0) status FIRST — run-stage/
-            # finalize-stage already validated it before reporting ok:true, so
-            # its absence here means a driver/runner bug, not an advisory gap.
-            result_file = iter_dir / "test_implementor-result.json"
-            if not result_file.exists():
-                die(f"test_implementor-result.json not found at {result_file}. "
-                    "run-stage/finalize-stage should have produced it (mandatory since "
-                    "6.6.0) — this indicates a driver or runner bug. If this run was "
-                    "created by a pre-6.6.0 driver, write a valid status file to this "
-                    "exact path by hand — minimally: "
-                    '{"status": "implemented", "summary": "<one-line outcome>"} — '
-                    "or start a new run.")
-            result = load_json(result_file)
-            errors = validate_against_schema(result, "implementor-result.schema.json")
-            if errors:
-                die("test_implementor-result.json schema violation:\n" +
-                    "\n".join(f"  - {e}" for e in errors))
-
+            # implementor's blocked_on:"tests" reroute): code already exists, and
+            # `result` was read + validated above the red_phase split.
             if (result.get("status") == "blocked"
                     and result.get("blocked_on") == "implementation"):
                 # The test author verified the authored tests are correct and the
