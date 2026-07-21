@@ -2009,6 +2009,21 @@ class TestTestImplementorResultGuard(PipelineTestCase):
         state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
         self.assertTrue(state["red_phase"])
 
+    def test_red_expected_field_is_rejected_by_schema(self):
+        # Regression guard for the 7.0.0 removal: the shared schema is
+        # additionalProperties:false, so a result still carrying the removed
+        # `red_expected` field must now be rejected outright.
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation
+        p.write_raw_result_file(
+            "test_implementor-result.json",
+            json.dumps({"status": "implemented", "summary": "x",
+                        "red_expected": False}))
+        r = p.advance()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("schema violation", r.stderr)
+
 
 class TestUpgradeSafety(PipelineTestCase):
     """A run created by an older driver (no tdd_mode/red_phase/test_implementation
