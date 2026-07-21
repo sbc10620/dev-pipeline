@@ -41,7 +41,7 @@ The advance that landed here echoed `directive: run_test_implementor`, `iter_dir
   ```bash
   python3 <driver_path> advance --run <run_dir>
   ```
-  Then follow `states/<next_state>.md` (`red_test` in the red phase, `test` directly if the test author reported `status: "implemented"` + `red_expected: false` — these tests target pre-existing behavior, so RED confirmation is skipped — `implementation` on a repair pass when the test author reported `status: "blocked"` + `blocked_on: "implementation"` (tests verified correct, production code is the gap), or `test` on any other repair pass).
+  Then follow `states/<next_state>.md` (`red_test` in the red phase, `implementation` on a repair pass when the test author reported `status: "blocked"` + `blocked_on: "implementation"` (tests verified correct, production code is the gap), or `test` on any other repair pass).
 
 **Checklist:**
 - [ ] Baseline staged (git repos) before run-stage

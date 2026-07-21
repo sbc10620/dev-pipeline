@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "6.8.0"
+__version__ = "7.0.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -979,20 +979,6 @@ def cmd_advance(args) -> None:
             e["test_implementor_runners"] = runners.get("test_implementor", [])
         elif new_state in ("red_test", "test"):
             e["tester_runners"] = runners.get("tester", [])
-        elif new_state == "review" and state.get("red_confirmation_skipped"):
-            # 6.7.0: surfaces a red_expected:false skip to the reviewer — the
-            # ONLY other place in the pipeline that could catch a test that was
-            # wrongly declared "targets pre-existing behavior" when it was
-            # actually just vacuous (the test↔implementation retry loop only
-            # catches the OTHER failure mode: a genuinely unimplemented feature).
-            e["red_confirmation_skipped_note"] = (
-                "RED confirmation was skipped for tests authored earlier in this run "
-                "(test_implementor declared red_expected: false — "
-                f"{state.get('red_confirmation_skip_summary', '')}). These specific "
-                "tests never went through the pipeline's automatic vacuous-test "
-                "detector (red_test). Give them extra scrutiny: confirm they contain "
-                "real, meaningful assertions of already-existing behavior, not just "
-                "code that happens to run without asserting anything.")
         elif new_state == "done":
             e["run_self_evolution"] = cfg.get("driver", {}).get("run_self_evolution", False)
             # Needed to merge the worktree branch back and then tear it down;
@@ -1089,12 +1075,10 @@ def cmd_advance(args) -> None:
 
     # --- test_implementation (TDD: author tests; its status file is mandatory
     # at the run-stage/finalize-stage layer since 6.6.0. While red_phase is
-    # pending, advance now reads it (6.7.0) — not to route a "blocked" status
-    # anywhere (there is still no other role to route a test-author "blocked"
-    # to, so that case falls through to red_test unconditionally as before),
-    # but to honor a status:"implemented" + red_expected:false declaration:
-    # every test in this pass targets pre-existing behavior, so RED
-    # confirmation is skipped and the run lands directly on "test" instead.) ---
+    # pending the driver reads it (die-on-missing) but routes unconditionally to
+    # red_test: existing-behavior work is a plan-time non-TDD decision (7.0.0),
+    # so a red_phase authoring pass is always a genuinely-new feature whose tests
+    # must prove RED first — there is no in-flow "skip RED" path any more.) ---
     elif current == "test_implementation":
         iter_dir = ensure_iter_dir(run_dir, state)
         # The test author's status file is mandatory since 6.6.0 (run-stage/
@@ -1119,45 +1103,24 @@ def cmd_advance(args) -> None:
                 "\n".join(f"  - {e}" for e in errors))
 
         if state.get("red_phase", False):
-            if result.get("status") == "implemented" and result.get("red_expected", True) is False:
-                # The test author declared every test in this pass targets pre-existing
-                # behavior — skip RED confirmation, land exactly where a repair pass does.
-                state["red_phase"] = False
-                # Persisted (not just echoed) so it survives however many
-                # test<->implementation retries happen before review is reached —
-                # the reviewer needs to know these specific tests bypassed the
-                # pipeline's only automatic vacuous-test detector (see dest_echoes
-                # for "review" below and dp-reviewer.md's severity rule for it).
-                state["red_confirmation_skipped"] = True
-                state["red_confirmation_skip_summary"] = result.get("summary", "")
-                transition("test", "tests_added_no_red_expected",
-                           extra={"directive": "run_tester",
-                                  "iter_dir": str(iter_dir),
-                                  "note": ("The test author declared these tests target "
-                                           "pre-existing behavior (red_expected: false), "
-                                           "skipping RED confirmation: "
-                                           f"{result.get('summary', '')}"),
-                                  "build_instruction":   cfg["llm"]["tester"]["build_instruction"],
-                                  "install_instruction": cfg["llm"]["tester"]["install_instruction"],
-                                  "test_instruction":    cfg["llm"]["tester"]["test_instruction"]})
-            else:
-                # First authoring pass (or a re-entry without red_expected:false):
-                # prove the tests FAIL (RED) before any code.
-                transition("red_test", "tests_authored",
-                           extra={"directive": "run_tester",
-                                  "iter_dir": str(iter_dir),
-                                  "red_test": True,
-                                  "result_filename": "red-test-result.json",
-                                  "red_phase_context": (
-                                      "RED phase: production code for the feature under test is "
-                                      "intentionally not implemented yet. A failure caused by the feature "
-                                      "being absent (missing module/function/symbol, import error, or compile "
-                                      "error referencing the contract's intended interface) MUST be classified "
-                                      "failure_type=code (the expected RED). Reserve environment for failures "
-                                      "unrelated to the missing feature (toolchain/framework/network/permissions)."),
-                                  "build_instruction":   cfg["llm"]["tester"]["build_instruction"],
-                                  "install_instruction": cfg["llm"]["tester"]["install_instruction"],
-                                  "test_instruction":    cfg["llm"]["tester"]["test_instruction"]})
+            # First authoring pass (or a red_not_confirmed re-entry): prove the
+            # tests FAIL (RED) before any code. The status file is read above only
+            # for the mandatory-status guard; routing here is unconditional.
+            transition("red_test", "tests_authored",
+                       extra={"directive": "run_tester",
+                              "iter_dir": str(iter_dir),
+                              "red_test": True,
+                              "result_filename": "red-test-result.json",
+                              "red_phase_context": (
+                                  "RED phase: production code for the feature under test is "
+                                  "intentionally not implemented yet. A failure caused by the feature "
+                                  "being absent (missing module/function/symbol, import error, or compile "
+                                  "error referencing the contract's intended interface) MUST be classified "
+                                  "failure_type=code (the expected RED). Reserve environment for failures "
+                                  "unrelated to the missing feature (toolchain/framework/network/permissions)."),
+                              "build_instruction":   cfg["llm"]["tester"]["build_instruction"],
+                              "install_instruction": cfg["llm"]["tester"]["install_instruction"],
+                              "test_instruction":    cfg["llm"]["tester"]["test_instruction"]})
         else:
             # Repair pass (driven by a review finding about tests, or the
             # implementor's blocked_on:"tests" reroute): code already exists, and
@@ -1229,7 +1192,10 @@ def cmd_advance(args) -> None:
                               "iter_dir": str(iter_dir),
                               "contract_path": contract_path,
                               "attempts_path": attempts_path})
-        else:  # status == "pass" → RED not confirmed (vacuous tests or feature exists)
+        else:  # status == "pass" → RED not confirmed: the tests are vacuous
+            # (existing-behavior work is a plan-time non-TDD decision as of 7.0.0,
+            # so a passing red_test in a TDD run means weak/non-asserting tests,
+            # not "the feature already exists").
             state["iterations"]["test_implementation"] += 1
             if state["iterations"]["test_implementation"] > state["max"]["test_implementation"]:
                 transition("failed", "red_not_confirmed_exhausted",

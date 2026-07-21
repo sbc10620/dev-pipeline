@@ -9,6 +9,51 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [7.0.0] - 2026-07-21
+
+**Removed `red_expected`** (the 6.7.0 in-flow "these tests target pre-existing
+behavior, skip RED confirmation" escape hatch) and moved the TDD-vs-non-TDD
+decision to **plan time**. `red_expected` encoded a question — *"is this
+genuinely-new-feature work whose test truly fails first, or existing-behavior
+work?"* — that belongs to planning, not a mid-flow test-author declaration. It
+also carried real weight (a schema field, a driver branch, `red_confirmation_skipped`
+state + a reviewer echo, and the long Rule 13) and entangled with the 6.8.0
+routing work. With the decision made up front, it is unnecessary.
+
+New principle: **TDD** is only for genuinely new behavior where a freshly-written
+test *actually fails first* (real RED); **non-TDD** covers regression tests,
+maintenance, bug fixes, refactors, and coverage for already-existing behavior.
+
+### Removed (BREAKING)
+- **`red_expected`** from `implementor-result.schema.json` (the schema is
+  `additionalProperties:false`, so a result JSON still carrying the field is now
+  rejected — affects only an in-flight run created by ≤6.8.0 resuming under 7.0.0).
+- The driver's red-phase skip branch: a `test_implementation` red-phase pass now
+  **always** → `red_test` (the mandatory test-author status file is still read for
+  the die-on-missing guard, but routing no longer depends on its content). The
+  `tests_added_no_red_expected` transition, the `red_confirmation_skipped` /
+  `red_confirmation_skip_summary` state, and the reviewer's
+  `red_confirmation_skipped_note` echo (`dest_echoes`) are gone.
+- `dp-test-implementor.md` Rule 13 and its cross-references (Rule 3 exception,
+  Rule 8, Step 3.5, Step 5 JSON/prose, checklist); `dp-reviewer.md`'s
+  `red_confirmation_skipped_note` severity rule; the `red_expected`/`red_confirmation`
+  clauses in `states/test_implementation.md`, `states/test.md`, `states/review.md`,
+  and the `AGENTS.md` transition rules. `red_test`'s `red_not_confirmed` now
+  unambiguously means "vacuous tests" (existing-behavior work never reaches it).
+
+### Changed
+- **The planner classifies TDD vs non-TDD** (`dp-planner.md`) and recommends
+  `driver.tdd_mode` through the existing planning → `--update-config` flow —
+  non-TDD for regression/maintenance/existing-behavior work, TDD only when a
+  written test genuinely fails until new code exists. The `plan.md` body stays
+  config-free.
+- **The non-TDD implementor owns tests too** (`dp-implementor.md`): Rule 9's
+  test-file boundary is explicitly TDD-only (it already keys on `test_paths` being
+  provided), and the implementor now carries concise test-writing guidance for
+  non-TDD runs (meaningful asserting tests, edge/error cases, existing
+  conventions) — since a non-TDD run has no test-author role, this is how
+  regression/coverage tests for existing behavior get written.
+
 ## [6.8.0] - 2026-07-20
 
 On a **repair pass** (a `test_implementation` re-entry driven by a reviewer

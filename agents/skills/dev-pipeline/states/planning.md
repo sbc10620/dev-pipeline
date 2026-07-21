@@ -14,7 +14,7 @@
 
 - [Step 3] **Approval.** Under the default flow (no `--auto-run`), show the user the finished plan (Requirements, Acceptance Criteria, Interface) for sign-off. If they decline, revise per their feedback (loop to [Step 1]/[Step 2]). Under `--auto-run`, skip this prompt. (Executable/gate config values are **not** decided here — they are confirmed in `states/update_config.md`, whose batched approval is honored even under `--auto-run`.)
 
-- [Step 4] **Hand off.** Continue with `plan_path` in the Run Context to the **config gate**: if `config_complete` is false, follow `states/update_config.md` (using `plan_path`) first, then `states/init.md`; otherwise go straight to `states/init.md`.
+- [Step 4] **Hand off.** Continue with `plan_path` in the Run Context to the **config gate**: if `config_complete` is false, follow `states/update_config.md` (using `plan_path`) first, then `states/init.md`; otherwise go straight to `states/init.md`. **Exception — reconcile the mode:** if the plan's `## Mode` recommendation conflicts with the configured `driver.tdd_mode` (e.g. the planner classified this as regression/existing-behavior → no-TDD but the config still has `tdd_mode: true`), route through `states/update_config.md` to reconcile it **even when `config_complete` is true** — the mode must match the work, and config is only ever changed there.
 
 **Checklist:**
 - [ ] Followed `dp-planner.md` conversationally; explored read-only; wrote the plan to `.dev-pipeline/plans/<YYYYMMDD>-<slug>.md` (or the user-named path) and saved `plan_path`

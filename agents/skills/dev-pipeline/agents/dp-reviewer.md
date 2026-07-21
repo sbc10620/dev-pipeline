@@ -59,8 +59,6 @@ Note: If `review_block_severity` is configured in the pipeline, the driver deter
 
 **Test code (TDD runs).** The gate subject is the production code's compliance with the contract. For findings about the *test* files: pure style/coverage nitpicks are at most `medium`. But a test that **asserts behavior contradicting the contract** (a wrong or misleading test) is a legitimate `high` finding — a green suite built on a wrong test is worse than no test. Report those at the severity their impact deserves.
 
-**`red_confirmation_skipped_note` (6.7.0, if present in your inputs).** This means the test author declared some tests in this run target pre-existing behavior (`red_expected: false`) and the driver skipped RED confirmation for them — they never went through the pipeline's automatic vacuous-test detector. For those specific tests, escalate a vacuous/non-asserting/empty-assertion finding to at least `high` (not the usual `medium` nitpick ceiling) — you are the only remaining check for this failure mode. A test that merely runs without asserting anything real is exactly as dangerous here as one that asserts something wrong.
-
 ### [Step 4] Checklist before outputting
 - [ ] Have I read the full contract including Acceptance Criteria?
 - [ ] Have I reviewed all changed and new files?

@@ -1,6 +1,6 @@
 # STATE: test  (GREEN)
 
-**Goal:** Run the tester runner, advance. (Reached after implementation, after a test-repair pass in TDD, or directly from test_implementation when the test author reported `status: "implemented"` + `red_expected: false`.) `run-stage` succeeding means a *valid result* was produced; the driver's `advance` interprets pass/fail.
+**Goal:** Run the tester runner, advance. (Reached after implementation, or after a test-repair pass in TDD.) `run-stage` succeeding means a *valid result* was produced; the driver's `advance` interprets pass/fail.
 
 The advance that landed here echoed `directive: run_tester` and `iter_dir`. The driver persisted the tester context (the three `*_instruction`s) to `<iter_dir>/stage-input.json`, with `output_file` set to `<iter_dir>/test-result.json`.
 
