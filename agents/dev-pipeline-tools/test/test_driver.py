@@ -1172,6 +1172,25 @@ class TestResume(PipelineTestCase):
                          "--summary", "a", "--summary-file", "b")
         self.assertNotEqual(res.returncode, 0)
 
+    def test_resume_summary_file_missing_dies_cleanly(self):
+        # A nonexistent --summary-file path dies with a clear message (OSError catch),
+        # not a raw traceback.
+        p = self.started(tdd_mode=False)
+        p.advance()
+        res = run_driver("resume", "--run", str(p.run_dir),
+                         "--summary-file", str(p.run_dir / "nope.md"))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("could not be read", res.stderr)
+
+    def test_resume_empty_summary_is_surfaced(self):
+        # An empty inline summary is still a supplied value (not None), so it is
+        # surfaced as an empty task_summary rather than omitted — harmless handoff.
+        p = self.started(tdd_mode=False)
+        p.advance()
+        res = run_driver("resume", "--run", str(p.run_dir), "--summary", "")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.json["task_summary"], "")
+
     def test_resume_summary_does_not_leak_into_stage_input(self):
         # task_summary is orchestrator-only: it rides in ctx (merged after
         # build_stage_input runs on the pristine echo), so a role's stage-input
