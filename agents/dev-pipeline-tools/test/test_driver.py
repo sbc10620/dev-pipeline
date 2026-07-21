@@ -1903,6 +1903,8 @@ class TestImplementorBlockedRouting(PipelineTestCase):
         self.assertEqual(r3.json["next_state"], "failed")
         self.assertEqual(r3.json["halt_reason"], "iteration-exhausted")
         self.assertIn("standoff", r3.json.get("hint", "").lower())
+        state = json.loads((p.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["history"][-1]["outcome"], "implementor_blocked_on_tests_exhausted")
 
     def test_blocked_on_tests_non_tdd_falls_through_to_test(self):
         # blocked_on:"tests" only means something in TDD (there is no test
@@ -1953,6 +1955,18 @@ class TestImplementorBlockedRouting(PipelineTestCase):
         p.advance()  # init -> test_implementation
         p.write_test_implementor_result(status="blocked", concern="no meaningful test for AC2")
         r = p.advance()  # test_implementation -> red_test, routing unaffected by "blocked"
+        self.assertEqual(r.json["next_state"], "red_test")
+
+    def test_blocked_on_implementation_is_inert_during_red_phase(self):
+        # 6.8.0: blocked_on:"implementation" reroutes to the implementor ONLY on a
+        # repair pass. During red_phase it is inert — a blocked result still falls
+        # through to red_test regardless of blocked_on (schema documents this).
+        p = self.make_pipeline(tdd_mode=True)
+        p.init()
+        p.advance()  # init -> test_implementation (red_phase)
+        p.write_test_implementor_result(status="blocked", blocked_on="implementation",
+                                        concern="code is the gap")
+        r = p.advance()
         self.assertEqual(r.json["next_state"], "red_test")
 
 

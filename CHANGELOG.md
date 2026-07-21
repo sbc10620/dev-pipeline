@@ -58,10 +58,12 @@ prose telling the test author how to signal "the production code is the gap".
   the TDD `review_fail_exhausted` hint) generalized to name an
   author↔implementor standoff — the ping-pong can now be initiated from either
   side, so the failure no longer reads as solely the implementor's fault.
-- **State prose** (`states/test_implementation.md`, `states/implementation.md`)
-  and the **Key transition rules** (`AGENTS.md`) updated to describe the new
-  route; the driver's `advance` still decides the destination from `blocked_on`
-  (the SKILL never routes it).
+- **State prose** (`states/test_implementation.md`, `states/implementation.md`,
+  `states/failed.md`) and the **Key transition rules** (`AGENTS.md`) updated to
+  describe the new route and the generalized standoff exhaustion; the driver's
+  `advance` still decides the destination from `blocked_on` (the SKILL never
+  routes it). `states/failed.md` now surfaces the echoed `hint` verbatim rather
+  than paraphrasing the review-exhaust one, and names both standoff initiators.
 
 ## [6.7.0] - 2026-07-17
 
