@@ -3123,6 +3123,9 @@ class TestRunnerModes(unittest.TestCase):
         sys_text = pathlib.Path(r.json["system_file"]).read_text(encoding="utf-8")
         self.assertIn("acting SOLELY as the dev-pipeline tester", sys_text)
         self.assertIn("do NOT take on the OTHER pipeline stages", sys_text)
+        # 7.1.1: the role's own output must not be mistaken for the run being
+        # finished — regression guard for the "declares done without advancing" bug.
+        self.assertIn("you are NOT done for this turn", sys_text)
 
     def test_finalize_stage_normalizes_fenced_json(self):
         run_dir, proj, work, sp = self._setup("tester", [{"type": "subagent", "normalizer": "default"}])

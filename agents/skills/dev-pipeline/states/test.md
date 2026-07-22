@@ -10,7 +10,7 @@ The advance that landed here echoed `directive: run_tester` and `iter_dir`. The 
   ```
   The runner executes the configured build/install/test and writes a schema-valid `test-result.json` to `<iter_dir>`. For a bash runner, prefer running this in the background and checking `<iter_dir>/tester-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it (a quiet log there doesn't mean it's stuck — see that section for the check/relay cadence). Read the JSON:
   - **`mode` is `main-session`/`subagent`** → execute the tester per [SKILL §Role Execution](../SKILL.md#-role-execution) (json role: the executor runs build/install/test and writes `test-result.json` to `output_file`; then `driver finalize-stage` validates it), then continue to [Step 2] below and call driver advance — do not stop here.
-  - `ok: true` → a valid result was written; proceed.
+  - `ok: true` → a valid result was written; continue to [Step 2] below and call driver advance — do not stop here.
   - `ok: false` → every runner failed to produce a valid result; stop and report the `attempts`. **Do NOT run the build/install/test yourself** (Global Rule 3 — a handoff is a `mode` result, handled by the bullet above, never `ok: false`).
 
 - [Step 2] Call driver advance:

@@ -48,6 +48,15 @@ review feels like completion" framing at the one point most likely to trigger it
   — the normal advance loop continues through whichever state was resumed into until `next_state`
   is `done` or `failed`; reaching the first resumed-into state file is not itself the task.
 
+An adversarial self-review of this fix (before push) caught two gaps and closed both: (1) the
+persona preamble's own implementor example still used the word "stop" immediately before the new
+"you are NOT done" paragraph — the same word choice that caused the original bug — reworded to
+avoid it; (2) the "name the next Step" fix had only touched `test.md`/`red_test.md`/`review.md`'s
+main-session/subagent bullets, leaving their sibling **bash-runner** `ok: true` bullets — the more
+common path — with the same vague "proceed."; reworded those three to match. Also added a
+regression-guard test pinning the new preamble text (`test_driver.py`), mirroring the existing
+assertion on the original wording.
+
 No schema/CLI/driver-logic changed and no test-visible behavior changed beyond the preamble string
 (the existing substring assertion on it still passes) — prose-only reliability fix, PATCH bump.
 
