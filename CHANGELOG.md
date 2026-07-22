@@ -9,6 +9,56 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [7.2.0] - 2026-07-22
+
+**Tightened the implementor/test_implementor result contract: `blocked_on` is now required (no implicit
+default) whenever `status` is `"blocked"`, and `concern` is now genuinely enforced non-empty in that case
+too — both were previously documented as required but not schema-enforced.** Before this, `blocked_on` was
+optional with `"contract"` described as "the default if omitted"; the driver's routing only special-cased
+`"tests"`/`"implementation"`, so an omitted value, `"contract"`, and any unknown value all fell through the
+same branch. An omitted value silently meaning `"contract"` is an ambiguous soft-contract — a role reporting
+`blocked` must now pick `contract`/`tests`/`implementation` explicitly every time.
+
+Also removed two result-schema fields found to have zero downstream consumers in a full field-by-field
+audit: `implementor-result.assumptions` (written by the implementor/test_implementor role prose, never read
+by the driver, any state file, or the reviewer) and `review-result.next_steps` (echoed once into an
+unconsumed review-retry payload, never surfaced by any state file). `test-result.stages`/`summary` and the
+reviewer finding's `body`/`line_start`/`line_end`/`confidence`/`recommendation` were audited too and kept —
+the former is the tester's structured human-debugging record, the latter is relayed to the user via the
+echoed finding objects.
+
+### Added
+- **`_validate()` (`driver.py`) gained minimal `if`/`then`/`else` + `const` support** — the lightweight
+  built-in schema validator previously supported only unconditional `required`/`type`/`enum`/`oneOf`/etc.
+  This lets a single conditional rule ("`blocked_on` and `concern` are required when `status` is `blocked`")
+  live in the schema itself and apply uniformly at every validation call site (`cmd_advance`'s three
+  `implementation`/`test_implementation`/`review` branches, `run-stage`, `finalize-stage`), instead of
+  imperative code at each site.
+
+### Changed
+- **`implementor-result.schema.json`** (shared by `implementor`/`test_implementor`) gained an `if status ==
+  "blocked"` conditional requiring both `blocked_on` and a non-empty `concern`. The `blocked_on` description
+  no longer calls `"contract"` a default-on-omission; it now states the value is required with no default,
+  and `"contract"` is the value to use whenever the blocker can't be attributed specifically to the tests or
+  the production code. The `assumptions` property was removed.
+- **`review-result.schema.json`** dropped `next_steps` from both `required` and `properties`; `driver.py`'s
+  review-retry echo no longer includes it (its only reference).
+- **Role prose** (`dp-implementor.md`, `dp-test-implementor.md`) — the "omit it, or set `contract`" `blocked_on`
+  guidance is now "always set `blocked_on` explicitly when blocked; never omit it," and the removed
+  `assumptions` field's purpose (surfacing a Rule 5/10 assumption) folds into the existing `summary` field.
+  `dp-reviewer.md`'s JSON example dropped `next_steps`. `states/implementation.md`/`states/test_implementation.md`
+  updated their `blocked_on`-based user-facing wording to match (no more "omitted or contract" phrasing).
+
+### Compatibility note
+A run interrupted at exactly a legacy `blocked`-without-`blocked_on` result and resumed under this driver
+would now fail re-validation on resume — narrow and expected, since results are validated the moment they're
+produced, not deferred.
+
+No routing/state-machine logic changed — `cmd_advance`'s existing `blocked_on == "tests"`/`"implementation"`
+checks are unaffected; this only changes what counts as a schema-valid result. MINOR bump (new required-field
+enforcement is backward-incompatible for any hand-crafted legacy result missing `blocked_on`, but no existing
+transition behavior changed).
+
 ## [7.1.2] - 2026-07-22
 
 **Fixed a reliability gap: under the default (no `--auto-run`) `--request` flow, the orchestrator could

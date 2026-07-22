@@ -114,10 +114,15 @@ def test_result(status="pass", failure_type=None, **extra):
 
 
 def implementor_result(status="implemented", **extra):
-    """Build a schema-valid implementor-result dict (shared by test_implementor)."""
+    """Build a schema-valid implementor-result dict (shared by test_implementor).
+    Since 7.2.0 `blocked_on` is required (no default) whenever status is
+    "blocked" — default it to "contract" here so existing blocked-result callers
+    stay schema-valid without each specifying it; callers that care about routing
+    pass blocked_on= explicitly via **extra."""
     obj = {"status": status, "summary": "stub implementor result"}
     if status == "blocked":
         obj["concern"] = "stub concern"
+        obj["blocked_on"] = "contract"
     obj.update(extra)
     return obj
 
@@ -128,7 +133,6 @@ def review_result(verdict="approve", findings=None, **extra):
         "verdict": verdict,
         "summary": "stub review result",
         "findings": findings if findings is not None else [],
-        "next_steps": [],
     }
     obj.update(extra)
     return obj
@@ -557,8 +561,23 @@ class TestTerminalAndGuards(PipelineTestCase):
         p.advance()  # -> review
         p.write_raw_result_file(
             "review-result.json",
-            json.dumps({"verdict": "ok", "summary": "x",
-                        "findings": [], "next_steps": []}),
+            json.dumps({"verdict": "ok", "summary": "x", "findings": []}),
+        )
+        r = p.advance()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("schema violation", r.stderr)
+
+    def test_review_result_rejects_next_steps_field(self):
+        # `next_steps` was removed (7.2.0, dead field — written but never read
+        # by the driver or surfaced by any state file); additionalProperties:false
+        # must reject a result that still carries it.
+        p = self.started()
+        self.to_test_state(p)
+        p.write_test_result(status="pass")
+        p.advance()  # -> review
+        p.write_raw_result_file(
+            "review-result.json",
+            json.dumps(review_result(verdict="approve", next_steps=["do the thing"])),
         )
         r = p.advance()
         self.assertNotEqual(r.returncode, 0)
@@ -986,14 +1005,52 @@ class TestValidateResult(PipelineTestCase):
     # fix landed (a 2-way ternary would have silently routed a third --type
     # value into review-result.schema.json — verified this does NOT happen).
     def test_valid_implementor_result_passes(self):
-        path = self._write({"status": "implemented", "summary": "done", "concern": None, "assumptions": []})
+        path = self._write({"status": "implemented", "summary": "done", "concern": None})
         r = run_driver("validate-result", "--type", "implementor", "--file", path)
         self.assertEqual(r.returncode, 0)
         self.assertTrue(r.json["valid"])
 
+    def test_implementor_result_rejects_assumptions_field(self):
+        # `assumptions` was removed (7.2.0, dead field — never consumed anywhere);
+        # additionalProperties:false must reject a result that still carries it.
+        path = self._write({"status": "implemented", "summary": "done", "assumptions": []})
+        r = run_driver("validate-result", "--type", "implementor", "--file", path)
+        self.assertNotEqual(r.returncode, 0)
+
     def test_valid_implementor_blocked_result_passes(self):
         path = self._write({"status": "blocked", "summary": "cannot proceed",
+                            "concern": "contract contradicts itself on X",
+                            "blocked_on": "contract"})
+        r = run_driver("validate-result", "--type", "implementor", "--file", path)
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.json["valid"])
+
+    def test_blocked_result_missing_blocked_on_fails(self):
+        # 7.2.0: blocked_on is now required (no implicit "contract" default)
+        # whenever status is "blocked".
+        path = self._write({"status": "blocked", "summary": "cannot proceed",
                             "concern": "contract contradicts itself on X"})
+        r = run_driver("validate-result", "--type", "implementor", "--file", path)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_blocked_result_null_concern_fails(self):
+        # 7.2.0: concern must be non-null/non-empty whenever status is "blocked"
+        # (previously documented but not schema-enforced).
+        path = self._write({"status": "blocked", "summary": "cannot proceed",
+                            "concern": None, "blocked_on": "contract"})
+        r = run_driver("validate-result", "--type", "implementor", "--file", path)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_blocked_result_missing_concern_fails(self):
+        path = self._write({"status": "blocked", "summary": "cannot proceed",
+                            "blocked_on": "contract"})
+        r = run_driver("validate-result", "--type", "implementor", "--file", path)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_implemented_result_blocked_on_not_required(self):
+        # The if/then only fires when status is "blocked" — an "implemented"
+        # result needs no blocked_on at all.
+        path = self._write({"status": "implemented", "summary": "done"})
         r = run_driver("validate-result", "--type", "implementor", "--file", path)
         self.assertEqual(r.returncode, 0)
         self.assertTrue(r.json["valid"])
@@ -1022,7 +1079,8 @@ class TestValidateResult(PipelineTestCase):
         # `blocked` signal as absent just because of a stray ```json fence.
         tmp = tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", delete=False, encoding="utf-8")
-        tmp.write('```json\n{"status": "blocked", "summary": "cannot proceed"}\n```\n')
+        tmp.write('```json\n{"status": "blocked", "summary": "cannot proceed", '
+                  '"concern": "x", "blocked_on": "contract"}\n```\n')
         tmp.close()
         r = run_driver("validate-result", "--type", "implementor", "--file", tmp.name)
         self.assertEqual(r.returncode, 0)
@@ -1804,16 +1862,16 @@ class TestTDD(PipelineTestCase):
         self.assertEqual(r.json["iterations"]["test_implementation"], 0)
 
     def test_repair_blocked_contract_stays_on_test(self):
-        # A repair-pass blocked WITHOUT blocked_on:"implementation" (contract /
-        # omitted) is NOT the implementor's problem -> stays on `test`, exactly as
-        # before 6.8.0. Documents the split.
+        # A repair-pass blocked WITHOUT blocked_on:"implementation" (blocked_on:
+        # "contract") is NOT the implementor's problem -> stays on `test`, exactly
+        # as before 6.8.0. Documents the split.
         p = self.started_tdd()
         self._to_review(p)
         p.write_review_result(verdict="needs-attention",
                               findings=[finding(severity="critical",
                                                 file="tests/test_foo.py")])
         self.assertEqual(p.advance().json["next_state"], "test_implementation")
-        p.write_test_implementor_result(status="blocked",
+        p.write_test_implementor_result(status="blocked", blocked_on="contract",
                                         concern="AC3 is untestable as specified")
         r = p.advance()
         self.assertEqual(r.json["next_state"], "test")
@@ -1984,8 +2042,8 @@ class TestImplementorBlockedRouting(PipelineTestCase):
         self.assertEqual(r.json["next_state"], "test")
 
     def test_blocked_contract_routes_to_test(self):
-        # blocked_on omitted (or "contract") is the implementor-can't-satisfy-
-        # the-contract case — routes to test as before, not test_implementation.
+        # blocked_on:"contract" is the implementor-can't-satisfy-the-contract
+        # case — routes to test as before, not test_implementation.
         p = self.make_pipeline(tdd_mode=True)
         p.init()
         self._to_implementation(p)

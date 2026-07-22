@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "7.1.2"
+__version__ = "7.2.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -189,6 +189,11 @@ def _validate(data, schema: dict, path: str = "", root_schema: dict = None) -> l
         if enum is not None and data not in enum:
             errors.append(f"{path}: must be one of {enum}, got {data!r}")
 
+    # const: a one-value equality constraint (JSON Schema keyword; treated as a
+    # single-value enum so it works for any type, not just strings).
+    if "const" in schema and data != schema["const"]:
+        errors.append(f"{path or 'root'}: must equal {schema['const']!r}, got {data!r}")
+
     # numeric constraints — apply when data is int/float regardless of how type is declared
     if isinstance(data, (int, float)) and not isinstance(data, bool):
         types_list = t if isinstance(t, list) else ([t] if t else [])
@@ -206,6 +211,17 @@ def _validate(data, schema: dict, path: str = "", root_schema: dict = None) -> l
         match_count = sum(1 for s in one_of if not _validate(data, s, path, root_schema))
         if match_count == 0:
             errors.append(f"{path}: matches none of the oneOf schemas")
+
+    # if/then/else: evaluate "if" silently (its own errors are never reported);
+    # zero errors there means it matched, so validate against "then" (else
+    # "else", if present). Lets a single conditional-required rule (e.g. "blocked_on
+    # is required when status is blocked") live in the schema instead of imperative
+    # code, and apply uniformly at every validate_against_schema call site.
+    if "if" in schema:
+        matched = not _validate(data, schema["if"], path, root_schema)
+        branch = schema.get("then") if matched else schema.get("else")
+        if branch:
+            errors.extend(_validate(data, branch, path, root_schema))
 
     return errors
 
@@ -1392,8 +1408,7 @@ def cmd_advance(args) -> None:
                          "attempts_path": attempts_path,
                          "verdict": result.get("verdict"),
                          "summary": result.get("summary", ""),
-                         "findings": result.get("findings", []),
-                         "next_steps": result.get("next_steps", [])}
+                         "findings": result.get("findings", [])}
                 if touches_tests:
                     extra["test_implementor_config"] = cfg["llm"].get("test_implementor", {})
                 _append_attempt_entry(pathlib.Path(attempts_path), "review",

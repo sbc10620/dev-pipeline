@@ -83,9 +83,6 @@ Output **only** the following JSON, placed exactly where your prompt's output in
       "confidence": 0.8,
       "recommendation": "<concrete change to reduce risk>"
     }
-  ],
-  "next_steps": [
-    "<actionable next step>"
   ]
 }
 ```

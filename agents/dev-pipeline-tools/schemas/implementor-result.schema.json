@@ -17,17 +17,22 @@
         { "type": "string", "minLength": 1 },
         { "type": "null" }
       ],
-      "description": "Required (non-null) when status is 'blocked': what the contract asks for, what makes it impossible as specified, and what would need to change in the plan. Always null when status is 'implemented'."
-    },
-    "assumptions": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Optional. Smallest-reasonable-assumption notes made to resolve a contract ambiguity (not a codebase-understanding question)."
+      "description": "What the contract asks for, what makes it impossible as specified, and what would need to change in the plan. Required (non-null, non-empty) when status is 'blocked' — enforced by this schema's if/then. Always null when status is 'implemented'."
     },
     "blocked_on": {
       "type": "string",
       "enum": ["contract", "tests", "implementation"],
-      "description": "Optional, meaningful only when status is 'blocked'. 'contract' (the default if omitted): the contract itself is unsatisfiable as specified — settable by either role. 'tests' (implementor only, TDD): the implementor is confident the authored tests — not the contract — contradict the contract; the driver routes this back to the test author instead of retrying the implementor. 'implementation' (test_implementor only, TDD, and only on a repair pass): the test author verified the authored tests are correct and the production code — not the tests — is what must change; the driver routes this to the implementor instead of re-running the tester. It is inert during the RED phase (a 'blocked' first/red-not-confirmed authoring pass falls through to red_test regardless of blocked_on), so set it only when re-entered on a repair pass. Not schema-enforced against status or role, matching this schema's existing concern/status convention."
+      "description": "Required when status is 'blocked' — there is no default; the role must set it explicitly (enforced by this schema's if/then). Omit it entirely when status is 'implemented'. 'contract': the contract itself is unsatisfiable as specified — settable by either role, and the value to use whenever the blocker can't be attributed specifically to the tests or the production code. 'tests' (implementor only, TDD): the implementor is confident the authored tests — not the contract — contradict the contract; the driver routes this back to the test author instead of retrying the implementor. 'implementation' (test_implementor only, TDD, and only on a repair pass): the test author verified the authored tests are correct and the production code — not the tests — is what must change; the driver routes this to the implementor instead of re-running the tester. It is inert during the RED phase (a 'blocked' first/red-not-confirmed authoring pass falls through to red_test regardless of blocked_on), so a red-phase block should use 'contract'. The per-role/per-phase restrictions above are prose-only — this shared schema has no role/phase context and enforces only that some enum value is present when blocked."
+    }
+  },
+  "if": {
+    "properties": { "status": { "const": "blocked" } },
+    "required": ["status"]
+  },
+  "then": {
+    "required": ["blocked_on", "concern"],
+    "properties": {
+      "concern": { "type": "string", "minLength": 1 }
     }
   }
 }
