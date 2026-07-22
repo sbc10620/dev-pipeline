@@ -9,6 +9,39 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [7.1.2] - 2026-07-22
+
+**Fixed a reliability gap: under the default (no `--auto-run`) `--request` flow, the orchestrator could
+proceed straight from writing `plan.md` into running the pipeline — the `--plan` downstream path — without
+the user ever actually approving it in the conversation.** `--request` and `--plan` are architecturally
+designed to converge on one downstream path (config gate → `states/init.md`) once `plan_path` is set, so
+this isn't a literal mode-switch bug — it's the plan-approval step lacking a genuine stop. `states/planning.md`
+Step 3 only said "show the user the finished plan... for sign-off," with no hard-stop verb and no instruction
+to wait for a reply; its checklist item audited that the plan was *shown*, not that a *reply arrived*. Since
+7.1.1 added Global Rule 11 ("always advance, don't stop early") to fix a different bug, that pressure could
+now make an orchestrator *more* likely to blow through this pause, absent an explicit carve-out.
+
+As with the 7.1.1 fix, there is no code-level barrier available here: `driver init` has no
+approval/consent concept, and a human-approved plan is a byte-identical input to one nobody looked at — any
+orchestrator-supplied "approved" flag would be self-certified by the same actor skipping the gate. The fix is
+prose-only, mirroring how the reviewer's main-session gate was hardened previously.
+
+### Changed
+- **`states/planning.md` Step 3** now reads as a genuine blocking stop: show the plan, then **STOP and wait
+  for the user's reply** — do not continue to Step 4/the config gate/`init`/any downstream state until they
+  have actually responded. Displaying the plan, or the orchestrator's own judgement that it looks ready, is
+  explicitly **not** approval. States that **Global Rule 11 does not override this pause**. `--auto-run`'s
+  documented skip of this prompt is unchanged.
+- **`states/planning.md`'s checklist** now audits that the flow **blocked for an explicit reply**, not merely
+  that the plan was shown.
+- **`SKILL.md` Global Rule 11** gains a reconciling sentence: it governs not mistaking a role's finished
+  output for a finished state, and is not license to skip a genuine human-approval gate — naming both such
+  gates (`states/planning.md`'s sign-off, `states/review.md`'s reviewer question) so the carve-out holds
+  regardless of which file is being read.
+
+No schema/CLI/driver-logic changed and no test-visible behavior changed — prose-only reliability fix, PATCH
+bump.
+
 ## [7.1.1] - 2026-07-21
 
 **Fixed a reliability gap: a main-session/subagent role's own output could be mistaken for run
