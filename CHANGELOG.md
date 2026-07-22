@@ -27,17 +27,27 @@ orchestrator-supplied "approved" flag would be self-certified by the same actor 
 prose-only, mirroring how the reviewer's main-session gate was hardened previously.
 
 ### Changed
-- **`states/planning.md` Step 3** now reads as a genuine blocking stop: show the plan, then **STOP and wait
-  for the user's reply** — do not continue to Step 4/the config gate/`init`/any downstream state until they
-  have actually responded. Displaying the plan, or the orchestrator's own judgement that it looks ready, is
-  explicitly **not** approval. States that **Global Rule 11 does not override this pause**. `--auto-run`'s
-  documented skip of this prompt is unchanged.
+- **`states/planning.md` Step 3** leads with the `--auto-run` split (matching `states/review.md`'s proven
+  mode-first structure) and, under the default flow, gives a genuine blocking stop with two concrete paths:
+  the user replies now (an explicit affirmative reply releases the gate; display or the orchestrator's own
+  judgement does not), or comes back later by re-invoking `/dev-pipeline --plan <plan_path>` themselves —
+  a disk-anchored off-ramp symmetric to `review.md`'s "open a new session" branch, since nothing has run yet
+  and that plan file already exists. States that **Global Rule 11 does not override this pause**.
 - **`states/planning.md`'s checklist** now audits that the flow **blocked for an explicit reply**, not merely
   that the plan was shown.
-- **`SKILL.md` Global Rule 11** gains a reconciling sentence: it governs not mistaking a role's finished
-  output for a finished state, and is not license to skip a genuine human-approval gate — naming both such
-  gates (`states/planning.md`'s sign-off, `states/review.md`'s reviewer question) so the carve-out holds
-  regardless of which file is being read.
+- **`SKILL.md` Global Rule 11** gains a reconciling sentence distinguishing an **approval gate** (e.g.
+  `states/planning.md`'s sign-off — skipped under `--auto-run`) from a **runtime safety confirmation** (e.g.
+  `states/review.md`'s main-session reviewer question — not an approval gate, not skipped by `--auto-run`),
+  matching the distinction `states/review.md`/`SKILL.md` already draw elsewhere, so the carve-out doesn't
+  introduce a terminology mismatch about which gates `--auto-run` actually skips.
+
+An adversarial Opus review of the initial fix found the reviewer-question example in Global Rule 11 had been
+mislabeled a "human-approval pause," contradicting `review.md`/`SKILL.md`'s own "runtime safety confirmation,
+not an approval gate" framing for that exact question — corrected above. It also noted `states/planning.md`'s
+stop, unlike `states/review.md`'s, had no disk-anchored off-ramp (review.md's "open a new session" branch is
+backed by the run being parked on disk at `review` for `--resume` to replay) — addressed by the "come back
+later via `--plan <plan_path>`" path above, and by leading with the `--auto-run` check rather than burying it
+at the end of the stop paragraph.
 
 No schema/CLI/driver-logic changed and no test-visible behavior changed — prose-only reliability fix, PATCH
 bump.
