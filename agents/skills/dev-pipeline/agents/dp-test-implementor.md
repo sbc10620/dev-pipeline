@@ -67,4 +67,4 @@ The orchestrator provides **absolute file paths** and the `test_implementor` con
 ```
 `status` is `"implemented"` (tests written) or `"blocked"` (Rule 11 / Rule 12). `concern` is required (non-null) when `status` is `"blocked"`, and must stay `null` when `"implemented"`. `assumptions` is optional — list any Rule 10 assumptions you made. **`blocked_on` is a separate, optional field — include it only when `status` is `"blocked"`** (the schema does not accept `null` for it, only a string or its total absence): set it to `"implementation"` **only on a repair pass** when you verified the tests correct and the production code is the gap (Rule 12) — this reroutes the run to the implementor; omit it, or set `"contract"`, when the contract itself is unsatisfiable (Rule 11). Never set `"tests"` (that value is the implementor's). This is **in addition to** your test files, not instead of them. Do not fence this JSON or add any other text to the file.
 
-Once the checklist passes and this file is written, stop. Do not run tests or builds.
+Once the checklist passes and this file is written, you are done authoring — do not run tests or builds.

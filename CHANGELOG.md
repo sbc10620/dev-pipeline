@@ -29,14 +29,20 @@ review feels like completion" framing at the one point most likely to trigger it
   point — even when the output looks like the task is finished (an approving review) — and
   restates concretely what "hand back" requires: complete the dispatching state file's remaining
   steps through `driver advance`, then open whatever `states/<next_state>.md` it returns. The
-  "acting SOLELY as …" persona text is unchanged.
+  "acting SOLELY as …" persona text is unchanged. The implementor sub-example that used to say
+  "...then stop" was reworded to "...without also running the project's test suite or reviewing
+  the diff" — reusing the trigger word right next to the new "not a stopping point" paragraph
+  undermined it.
 - **`SKILL.md` gains Global Rule 11**: finishing a role's own output is not the end of the state,
   for any role in any state; cross-referenced from the existing §Role Execution "you are the
   orchestrator again" paragraph.
-- **`states/test.md`, `states/red_test.md`, `states/review.md`**: the main-session/subagent
-  mode-dispatch bullets now name the exact next Step to continue to and say "do not stop here"
-  (matching the pattern `states/implementation.md`/`states/test_implementation.md` already used),
-  instead of the vague "then proceed."
+- **`states/test.md`, `states/red_test.md`, `states/review.md`**: **every** mode-dispatch bullet —
+  main-session, subagent, and the plain bash-runner `ok: true` path alike — now names the exact
+  next Step to continue to and says "do not stop here" (matching the pattern
+  `states/implementation.md`/`states/test_implementation.md` already used), instead of the vague
+  "then proceed."; `states/review.md`'s three bullets also each state that an approving verdict
+  does not end the run (Global Rule 11), so none of the three review paths is under-reinforced
+  relative to the others.
 - **`states/review.md`**: Step 4 and its checklist item now say a passing review is not itself
   completion — only `driver advance` decides the next state, and it still routes to
   `states/done.md`, which has real work left.
@@ -47,15 +53,15 @@ review feels like completion" framing at the one point most likely to trigger it
 - **`states/resume.md`**: restates that resuming re-enters the same loop a non-resumed run follows
   — the normal advance loop continues through whichever state was resumed into until `next_state`
   is `done` or `failed`; reaching the first resumed-into state file is not itself the task.
+- **`dp-implementor.md`/`dp-test-implementor.md`**: the closing "...this file is written, **stop**."
+  line — the last words the executor reads, since the persona preamble is prepended to the role
+  body — reworded to "...you are done authoring..." for the same reason as the persona example
+  above. (`dp-reviewer.md`/`dp-tester.md` already ended cleanly, on schema-formatting instructions.)
 
-An adversarial self-review of this fix (before push) caught two gaps and closed both: (1) the
-persona preamble's own implementor example still used the word "stop" immediately before the new
-"you are NOT done" paragraph — the same word choice that caused the original bug — reworded to
-avoid it; (2) the "name the next Step" fix had only touched `test.md`/`red_test.md`/`review.md`'s
-main-session/subagent bullets, leaving their sibling **bash-runner** `ok: true` bullets — the more
-common path — with the same vague "proceed."; reworded those three to match. Also added a
-regression-guard test pinning the new preamble text (`test_driver.py`), mirroring the existing
-assertion on the original wording.
+### Added
+- A regression-guard test (`test_driver.py`, `test_run_stage_main_session_handoff`) pins the new
+  preamble text ("you are NOT done for this turn") in the assembled system prompt, mirroring the
+  existing assertion on the original wording, so this fix can't silently regress.
 
 No schema/CLI/driver-logic changed and no test-visible behavior changed beyond the preamble string
 (the existing substring assertion on it still passes) — prose-only reliability fix, PATCH bump.
