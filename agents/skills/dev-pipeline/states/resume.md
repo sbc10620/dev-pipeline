@@ -39,9 +39,11 @@
 
 **Note (accepted limits):** attempts are recorded by `advance` itself (before it persists the transition), so an interrupted advance never loses the retry context — at worst a crash mid-advance duplicates one attempt log line when the advance re-runs (harmless; the context is re-derived from the on-disk result file). A file role interrupted mid-edit may leave a partial file in the working tree; Step 4 surfaces and records it but does **not** auto-roll-back — inspect `git status` if a stage looks half-done.
 
+**Resuming does not shrink the loop.** Whichever `states/<next_state>.md` Step 3 sends you into, the normal advance loop continues from there exactly as a non-resumed run would (SKILL.md's main loop: keep calling `driver advance` and opening the next state file until `next_state` is `done` or `failed`, per Global Rule 11). Reaching that first state file is not itself the task — finish the run.
+
 **Checklist:**
 - [ ] Run located (`--resume <run_dir>` or `latest`); stopped cleanly if absent
 - [ ] `driver resume` ran (with `--summary`/`--summary-file` if a prior-session summary was carried over); Run Context (`project_root`, `plan_path`, `contract_path`, `tdd_mode`, `work_root`, `worktree_branch`, `worktree_base_ref`) restored, and any echoed `task_summary` read as handoff context; confirmed the run is idle (esp. if `possibly_live`)
 - [ ] Dispatched correctly: `advance` directive re-advanced (never opened `init.md`); terminal always followed its state file; authoring vs JSON-role routed right
 - [ ] (authoring re-entry) recovered the working-tree-vs-index delta (against `work_root`) minus the manifest, boundary-checked the remainder (TDD, no auto-revert), and `record-changes`d it **before** entering the state file
-- [ ] Continued the normal loop from the recovered state
+- [ ] Continued the normal loop from the recovered state — kept calling `driver advance` through every subsequent state, whichever state that turned out to be, until `next_state` is `done` or `failed` (reaching the first resumed-into state file is not itself the task)

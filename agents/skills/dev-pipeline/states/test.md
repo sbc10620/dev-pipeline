@@ -9,7 +9,7 @@ The advance that landed here echoed `directive: run_tester` and `iter_dir`. The 
   python3 <driver_path> run-stage --run <run_dir> --role tester --stage-input <iter_dir>/stage-input.json
   ```
   The runner executes the configured build/install/test and writes a schema-valid `test-result.json` to `<iter_dir>`. For a bash runner, prefer running this in the background and checking `<iter_dir>/tester-runner.log` per [SKILL §Role Execution](../SKILL.md#-role-execution) if your host supports it (a quiet log there doesn't mean it's stuck — see that section for the check/relay cadence). Read the JSON:
-  - **`mode` is `main-session`/`subagent`** → execute the tester per [SKILL §Role Execution](../SKILL.md#-role-execution) (json role: the executor runs build/install/test and writes `test-result.json` to `output_file`; then `driver finalize-stage` validates it), then proceed.
+  - **`mode` is `main-session`/`subagent`** → execute the tester per [SKILL §Role Execution](../SKILL.md#-role-execution) (json role: the executor runs build/install/test and writes `test-result.json` to `output_file`; then `driver finalize-stage` validates it), then continue to [Step 2] below and call driver advance — do not stop here.
   - `ok: true` → a valid result was written; proceed.
   - `ok: false` → every runner failed to produce a valid result; stop and report the `attempts`. **Do NOT run the build/install/test yourself** (Global Rule 3 — a handoff is a `mode` result, handled by the bullet above, never `ok: false`).
 
@@ -19,7 +19,7 @@ The advance that landed here echoed `directive: run_tester` and `iter_dir`. The 
   ```
   On a code-failure retry (`next_state == "implementation"`) the driver **records the failure to `attempts.md` automatically** (`failure_details` + `log_excerpt`) — you do not log it yourself.
 
-- [Step 3] Follow `states/<next_state>.md` (`review` on pass, `implementation` on a code failure, `failed` if exhausted/environment).
+- [Step 3] Follow `states/<next_state>.md` (`review` on pass, `implementation` on a code failure, `failed` if exhausted/environment). **A passing test run is not the end** — `review` still has to approve before this run is finished.
 
 **Checklist:**
 - [ ] `run-stage --role tester` returned `ok: true` (valid `test-result.json` written), **or** a `mode` handoff was executed and `finalize-stage` returned `ok: true`; else stopped/reported

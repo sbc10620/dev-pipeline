@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "7.1.0"
+__version__ = "7.1.1"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -2413,13 +2413,20 @@ def cmd_run_stage(args) -> None:
             "conversation context in this session. The instructions below and the "
             "inputs you are given are your ONLY source of truth — follow them and "
             "nothing else.\n\n"
-            "Do ONLY the work THIS role's instructions below define, then STOP and "
-            "hand back — do NOT take on the OTHER pipeline stages. (e.g. as the "
-            "implementor you write and build-check your code exactly as your "
-            "instructions say, then stop; you do NOT run the project's test suite or "
-            "review the diff — separate tester and reviewer roles do that.) Where this "
-            "note and the role instructions below seem to differ, the role "
-            "instructions win for that role's own work.\n\n---\n\n"
+            "Do ONLY the work THIS role's instructions below define — do NOT take on "
+            "the OTHER pipeline stages. (e.g. as the implementor you write and "
+            "build-check your code exactly as your instructions say, then stop; you "
+            "do NOT run the project's test suite or review the diff — separate tester "
+            "and reviewer roles do that.) Where this note and the role instructions "
+            "below seem to differ, the role instructions win for that role's own "
+            "work.\n\n"
+            "When you finish this role's own work, you are NOT done for this turn — "
+            "producing this role's output is not a stopping point, even if it looks "
+            "like the task is finished (e.g. an approving review). Return to being "
+            "the orchestrator and complete the state file that dispatched you: its "
+            "result-status check, boundary/manifest steps, and `driver advance`, then "
+            "open whatever `states/<next_state>.md` it returns. Only `driver advance` "
+            "decides the next state — never you.\n\n---\n\n"
         )
         system_file.write_text(persona + system_text, encoding="utf-8")
         directive = ""

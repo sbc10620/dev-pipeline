@@ -9,6 +9,48 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [7.1.1] - 2026-07-21
+
+**Fixed a reliability gap: a main-session/subagent role's own output could be mistaken for run
+completion, most visibly an approving `main-session` reviewer causing the orchestrator to declare
+"done" without ever calling `driver advance` or running `states/done.md`'s finalization (commit,
+worktree merge/cleanup, self-evolution).** The state machine and its echoes were always correct —
+the review-pass branch of `cmd_advance` returns `next_state:"done"` plus everything `done.md`
+needs, and `done.md` is self-sufficient from that echo. The gap was entirely in the **prose** that
+drives the LLM orchestrator, and it generalized beyond review→done to any main-session/subagent
+role finishing in any state: the driver-injected persona-switch preamble said "STOP and hand back"
+without saying what handing back concretely requires; several state files' mode-dispatch bullets
+said the vague "then proceed" with no step named; and nothing locally countered the "an approving
+review feels like completion" framing at the one point most likely to trigger it.
+
+### Changed
+- **`driver.py`'s persona-switch preamble** (prepended to every main-session/subagent role's system
+  prompt, for every role) now explicitly says finishing the role's own work is not a stopping
+  point — even when the output looks like the task is finished (an approving review) — and
+  restates concretely what "hand back" requires: complete the dispatching state file's remaining
+  steps through `driver advance`, then open whatever `states/<next_state>.md` it returns. The
+  "acting SOLELY as …" persona text is unchanged.
+- **`SKILL.md` gains Global Rule 11**: finishing a role's own output is not the end of the state,
+  for any role in any state; cross-referenced from the existing §Role Execution "you are the
+  orchestrator again" paragraph.
+- **`states/test.md`, `states/red_test.md`, `states/review.md`**: the main-session/subagent
+  mode-dispatch bullets now name the exact next Step to continue to and say "do not stop here"
+  (matching the pattern `states/implementation.md`/`states/test_implementation.md` already used),
+  instead of the vague "then proceed."
+- **`states/review.md`**: Step 4 and its checklist item now say a passing review is not itself
+  completion — only `driver advance` decides the next state, and it still routes to
+  `states/done.md`, which has real work left.
+- **`states/test.md`**: Step 3 notes a passing test run is not the end — `review` is still ahead.
+- **`states/done.md`**: a new line up front states that completing Step 1 (the commit) is not the
+  end of this state — the literal form of the reported bug is stopping after the commit and
+  skipping the worktree merge, retrospective, self-evolution, and next-step recommendations.
+- **`states/resume.md`**: restates that resuming re-enters the same loop a non-resumed run follows
+  — the normal advance loop continues through whichever state was resumed into until `next_state`
+  is `done` or `failed`; reaching the first resumed-into state file is not itself the task.
+
+No schema/CLI/driver-logic changed and no test-visible behavior changed beyond the preamble string
+(the existing substring assertion on it still passes) — prose-only reliability fix, PATCH bump.
+
 ## [7.1.0] - 2026-07-21
 
 **`driver resume` optionally carries a prior-session task summary to the resuming

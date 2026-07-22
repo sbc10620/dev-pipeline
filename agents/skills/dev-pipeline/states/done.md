@@ -2,6 +2,8 @@
 
 **Goal:** Commit, merge and clean up a worktree run, retrospective feedback, optional self-evolution, next-step recommendations.
 
+**Completing [Step 1] (the commit) is not the end of this state** — continue through [Step 6] (or the applicable skip conditions in between) before telling the user the run is finished; the checklist below lists everything that must be true first.
+
 - [Step 1] **Commit** (if in a git repository). The advance that landed here echoed `tdd_mode`, `run_self_evolution`, `work_root`, `worktree_branch`, and `worktree_base_ref` — use them; do not read `config.snapshot.json`. **Run every command below against `work_root`, not `project_root`** — identical under a normal run, but `work_root` is the isolated worktree checkout under `--worktree` (see `states/init.md`); this commit lands on the worktree's own branch there, not on `project_root`'s checkout — [Step 2] is what brings it into `project_root`.
   - Check: `git rev-parse --git-dir 2>/dev/null`.
   - **Manifest-based staging** (commit only files the pipeline produced, so untracked junk — cscope/ctags/build caches — never gets committed). The manifest is `<run_dir>/changed-manifest.txt`, written by `record-changes` during the authoring states.
