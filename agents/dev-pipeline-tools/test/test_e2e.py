@@ -86,11 +86,14 @@ class E2ETestCase(unittest.TestCase):
                 "reviewer": {"focus": "dummy — adversarial review", "scope": "working-tree"},
             },
             "runners": {
-                # file roles: write a real file (production vs test dirs)
+                # file roles: write a real file (production vs test dirs) AND the
+                # mandatory-since-6.6.0 status JSON to {output_file}.
                 "implementor": [{"type": "bash",
-                                 "command": "mkdir -p {project_root}/src && printf 'impl\\n' > {project_root}/src/impl.txt"}],
+                                 "command": "mkdir -p {project_root}/src && printf 'impl\\n' > {project_root}/src/impl.txt "
+                                            "&& printf '{\"status\":\"implemented\",\"summary\":\"dummy\"}' > {output_file}"}],
                 "test_implementor": [{"type": "bash",
-                                      "command": "mkdir -p {project_root}/tests && printf 'test\\n' > {project_root}/tests/gen.txt"}],
+                                      "command": "mkdir -p {project_root}/tests && printf 'test\\n' > {project_root}/tests/gen.txt "
+                                                 "&& printf '{\"status\":\"implemented\",\"summary\":\"dummy\"}' > {output_file}"}],
                 # tester: fail until the implementor's file exists (RED->GREEN), else pass
                 "tester": [{"type": "bash", "normalizer": "passthrough",
                             "command": f"if [ -f {{project_root}}/src/impl.txt ]; then cat {shlex.quote(str(pass_j))}; else cat {shlex.quote(str(fail_j))}; fi > {{output_file}}"}],

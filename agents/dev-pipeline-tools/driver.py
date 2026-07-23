@@ -2070,6 +2070,17 @@ ROLE_META = {
 }
 
 
+def _produces_result(meta: dict) -> bool:
+    """True when a role emits a schema-validated result file that run-stage must
+    produce → clean → validate (json roles: their result; file roles: their
+    mandatory-since-6.6.0 status JSON). Equivalent to `bool(meta.get("schema"))`
+    — every current run-stage role qualifies — but named for intent at the
+    output-file guards. NOTE: the retry guard in judge()'s caller is deliberately
+    NOT this predicate: a file role retries only on exit_code == 0, so it keeps
+    its own `... or exit_code == 0` form rather than calling this."""
+    return bool(meta.get("schema"))
+
+
 # Maps an advance `directive` to the run-stage role it drives.
 _DIRECTIVE_ROLE = {
     "run_test_implementor": "test_implementor",
@@ -2304,6 +2315,19 @@ def _finalize_json(output_file: pathlib.Path, normalizer: str, schema_name) -> "
     return None
 
 
+def _load_stage_input(run_dir: pathlib.Path, stage_input_arg: str, role: str) -> dict:
+    """Resolve a --stage-input path (a bare filename → under run_dir, else taken
+    as-given), load it, and reject a stage-input whose role doesn't match --role
+    (a mismatched iteration/role path — the SKILL always passes the matching one).
+    Shared by run-stage and finalize-stage so the resolution + guard stay in sync."""
+    si_path = (run_dir / stage_input_arg if pathlib.Path(stage_input_arg).name == stage_input_arg
+               else pathlib.Path(stage_input_arg))
+    stage_input = load_json(si_path)
+    if stage_input.get("role") and stage_input["role"] != role:
+        die(f"stage-input role {stage_input['role']!r} != --role {role!r}; wrong --stage-input path.")
+    return stage_input
+
+
 def cmd_run_stage(args) -> None:
     """Execute a role's configured runner(s): assemble the prompt, run the LLM CLI
     (subprocess), and validate by category. The LLM choice/flags live entirely in
@@ -2317,8 +2341,7 @@ def cmd_run_stage(args) -> None:
     # stage-input.json is written by cmd_advance into each iteration dir; it
     # carries the dynamic, advance-computed context. The static runner array and
     # project root come from the run's own files (driver-owned, not the SKILL).
-    si_path = run_dir / args.stage_input if pathlib.Path(args.stage_input).name == args.stage_input else pathlib.Path(args.stage_input)
-    stage_input = load_json(si_path)
+    stage_input = _load_stage_input(run_dir, args.stage_input, role)
     cfg = load_json(run_dir / "config.snapshot.json")
     state = load_state(run_dir)
     # stage_input["project_root"] already carries work_root (build_stage_input sets
@@ -2327,11 +2350,6 @@ def cmd_run_stage(args) -> None:
     # worktree run still resolves to its worktree, not the main checkout.
     project_root = pathlib.Path(stage_input.get("project_root") or state.get("work_root")
                                 or state.get("project_dir") or ".").resolve()
-
-    # Guard against passing the wrong stage-input (a mismatched iteration/role
-    # path) — the SKILL always passes the matching path.
-    if stage_input.get("role") and stage_input["role"] != role:
-        die(f"stage-input role {stage_input['role']!r} != --role {role!r}; wrong --stage-input path.")
 
     runners = cfg.get("runners", {}).get(role, [])
     if not runners:
@@ -2449,7 +2467,7 @@ def cmd_run_stage(args) -> None:
         # implementor/test_implementor get it as a required status-JSON channel
         # alongside their git delta (see output_directive) — both need the
         # directive text + a clean slate.
-        wants_output_file = meta["category"] == "json" or role in ("implementor", "test_implementor")
+        wants_output_file = _produces_result(meta)
         if wants_output_file:
             directive += output_directive(runners[0])
             if output_file.exists():
@@ -2479,7 +2497,7 @@ def cmd_run_stage(args) -> None:
         """Run one command and judge it by category. Returns (problem|None, exit).
         `problem` is None on success, else a short reason string (also fed back on
         the retry)."""
-        if (meta["category"] == "json" or role in ("implementor", "test_implementor")) and output_file.exists():
+        if _produces_result(meta) and output_file.exists():
             output_file.unlink()  # clean slate so a stale file isn't mistaken for success
         returncode, log_tail = _run_one(command, subst, project_root, timeout, log_path)
         if returncode is None:
@@ -2547,7 +2565,7 @@ def cmd_run_stage(args) -> None:
     # implementor/test_implementor's now-mandatory status file), remove any
     # partial output so a downstream `advance` cannot mistake it for a valid
     # result (n3 hardening).
-    if (meta["category"] == "json" or role in ("implementor", "test_implementor")) and output_file.exists():
+    if _produces_result(meta) and output_file.exists():
         output_file.unlink()
 
     emit({"ok": False, "role": role, "category": meta["category"],
@@ -2577,10 +2595,7 @@ def cmd_finalize_stage(args) -> None:
         emit({"ok": True, "role": role, "category": meta["category"],
               "note": "no schema for this role — nothing to finalize"})
         return
-    si_path = run_dir / args.stage_input if pathlib.Path(args.stage_input).name == args.stage_input else pathlib.Path(args.stage_input)
-    stage_input = load_json(si_path)
-    if stage_input.get("role") and stage_input["role"] != role:
-        die(f"stage-input role {stage_input['role']!r} != --role {role!r}; wrong --stage-input path.")
+    stage_input = _load_stage_input(run_dir, args.stage_input, role)
     cfg = load_json(run_dir / "config.snapshot.json")
     work = pathlib.Path(stage_input.get("work_dir") or run_dir)
     output_file = pathlib.Path(stage_input["output_file"]) if stage_input.get("output_file") else (work / f"{role}-output.json")
