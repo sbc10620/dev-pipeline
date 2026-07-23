@@ -2887,8 +2887,9 @@ class TestConfigMigration(unittest.TestCase):
     migrate-config converts a pre-3.0.0 config to bash runners."""
 
     def _write(self, cfg):
-        self._tmp = tempfile.TemporaryDirectory()
-        p = pathlib.Path(self._tmp.name) / "config.json"
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = pathlib.Path(tmp.name) / "config.json"
         p.write_text(json.dumps(cfg), encoding="utf-8")
         return p
 
