@@ -239,18 +239,28 @@ python3 agents/dev-pipeline-tools/driver.py migrate-config --config .dev-pipelin
 
 ## Testing
 
-Deterministic tests for the state machine live in `agents/dev-pipeline-tools/test/`.
-They drive `driver.py` as a CLI subprocess — exactly as the SKILL does — and assert on
-state transitions, the review gate, schema validation, and the auxiliary subcommands.
+Tests live in `agents/dev-pipeline-tools/test/`. They drive `driver.py` as a CLI
+subprocess — exactly as the SKILL does — and use the standard library only, no external
+dependencies:
+
+- **`test_driver.py`** — deterministic unit tests for the state machine: state
+  transitions, the review gate, schema validation, and the auxiliary subcommands. No LLM.
+- **`test_e2e.py`** (+ **`e2e_lib.py`**, the shared orchestration engine) — a deterministic
+  end-to-end run driven through **dummy bash runners** (file roles write real files, JSON
+  roles `cat` a canned result), exercising the whole plumbing (run-stage, git delta,
+  boundary, manifest, review diff, manifest-scoped commit) for both the TDD and legacy flows.
+  Still no LLM.
+- **`e2e_llm.py`** — the same engine wired to **real `claude` runners**; opt-in, needs the CLI
+  on `PATH` (skipped otherwise).
 
 ```bash
 python3 agents/dev-pipeline-tools/test/test_driver.py
-# or
+# or run the whole (deterministic) suite — test_driver + test_e2e:
 python3 -m unittest discover -s agents/dev-pipeline-tools/test -v
 ```
 
-Standard library only, no external dependencies. The tests do **not** invoke any LLM
-agent or codex — they verify `driver.py`'s deterministic logic in isolation.
+The deterministic suites (`test_driver` + `test_e2e`) do **not** invoke any LLM — they
+verify `driver.py`'s logic and the git choreography in isolation.
 
 ---
 
@@ -296,11 +306,15 @@ dev-pipeline/
         ├── config.example.json
         ├── RUNNERS.md              ← verified bash-runner command catalog (claude/codex/cline)
         ├── test/
-        │   └── test_driver.py
+        │   ├── test_driver.py      ← deterministic driver unit tests (no LLM)
+        │   ├── test_e2e.py         ← deterministic end-to-end run via dummy bash runners
+        │   ├── e2e_lib.py          ← shared end-to-end orchestration engine
+        │   └── e2e_llm.py          ← real-LLM end-to-end harness (claude runners)
         └── schemas/
             ├── config.schema.json
             ├── test-result.schema.json
             ├── review-result.schema.json
+            ├── implementor-result.schema.json
             └── state.schema.json
 ```
 
@@ -318,7 +332,7 @@ dev-pipeline/
 │           ├── driver.py           ← installed for standalone operation
 │           ├── config.example.json ← template for driver bootstrap-config
 │           ├── RUNNERS.md          ← verified bash-runner command catalog
-│           └── schemas/            ← config / test-result / review-result / state
+│           └── schemas/            ← config / test-result / review-result / implementor-result / state
 ├── .claude/
 │   └── skills/
 │       └── dev-pipeline/           ← real copy for Claude Code (see note below)

@@ -50,8 +50,11 @@ python3 agents/dev-pipeline-tools/driver.py run-stage --run <run_dir> --role imp
 # (main-session/subagent runners) validate a json result the SKILL executed itself
 python3 agents/dev-pipeline-tools/driver.py finalize-stage --run <run_dir> --role tester --stage-input <iter_dir>/stage-input.json
 
-# Validate a standalone test/review result JSON against its schema
-python3 agents/dev-pipeline-tools/driver.py validate-result --type <test|review> --file <path>
+# Validate a standalone result JSON against its schema (manual/debug tool only —
+# the normal flow gets this for free from run-stage/finalize-stage). --type picks
+# the schema: test|review, or implementor|test_implementor (both the shared
+# implementor-result schema, for a file role's status JSON)
+python3 agents/dev-pipeline-tools/driver.py validate-result --type <test|review|implementor|test_implementor> --file <path>
 
 # Migrate an old config's runners to the 'unconfigured' sentinel (also drops a removed
 # role like the pre-5.0.0 spec_author); reconfigure afterwards with --update-config
@@ -187,6 +190,8 @@ After editing, skim a sibling file side-by-side and confirm headings, step forma
 |---|---|
 | `agents/dev-pipeline-tools/driver.py` | State machine — single source of truth for state transitions |
 | `agents/dev-pipeline-tools/test/test_driver.py` | Deterministic black-box tests for the driver (CLI subprocess; no LLM) |
+| `agents/dev-pipeline-tools/test/test_e2e.py` + `e2e_lib.py` | Deterministic end-to-end run via dummy bash runners (`e2e_lib.py` = shared engine mirroring `states/*.md`; no LLM) |
+| `agents/dev-pipeline-tools/test/e2e_llm.py` | Real-LLM end-to-end harness (same engine, `claude` runners; opt-in) |
 | `agents/dev-pipeline-tools/schemas/` | JSON schemas for config, test-result, review-result, state, implementor-result (shared by `implementor`/`test_implementor`) |
 | `agents/dev-pipeline-tools/config.example.json` | Seed config (English defaults, placeholder tester instructions, `unconfigured` runners) |
 | `agents/dev-pipeline-tools/RUNNERS.md` | Verified `bash` runner command catalog — one template per role × CLI (claude/codex/cline), with result/log strategy notes; `--update-config` draws from it |
@@ -251,14 +256,23 @@ When TDD is enabled (default), `llm.test_implementor` and `runners.test_implemen
 
 ## Testing
 
-Deterministic tests for the state machine live in `agents/dev-pipeline-tools/test/test_driver.py`.
-They drive `driver.py` as a CLI subprocess (the way the SKILL does) and assert on state
-transitions, the review gate, schema validation, and the auxiliary subcommands. No LLM agent
-or codex is invoked; standard library only. After changing `driver.py` or any schema, run:
+Tests live in `agents/dev-pipeline-tools/test/`, drive `driver.py` as a CLI subprocess (the
+way the SKILL does), and use the standard library only — no LLM/codex invoked:
+
+- **`test_driver.py`** — deterministic unit tests for the state machine (transitions, the
+  review gate, schema validation, auxiliary subcommands).
+- **`test_e2e.py`** (+ `e2e_lib.py`, the shared orchestration engine mirroring `states/*.md`)
+  — a deterministic full `init → … → done` run via **dummy bash runners** (file roles write
+  real files, JSON roles `cat` a canned result), covering the TDD and legacy flows. When you
+  change the git choreography in a state file, update `e2e_lib.py` to match.
+- **`e2e_llm.py`** — the same engine wired to real `claude` runners (opt-in; skipped without
+  the CLI on `PATH`).
+
+After changing `driver.py` or any schema, run:
 
 ```bash
 python3 agents/dev-pipeline-tools/test/test_driver.py
-# or
+# or run the whole deterministic suite (test_driver + test_e2e):
 python3 -m unittest discover -s agents/dev-pipeline-tools/test -v
 ```
 
