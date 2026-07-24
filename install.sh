@@ -85,7 +85,7 @@ mkdir -p "${SKILLS_DST}/schemas" "${SKILLS_DST}/states" "${PROMPTS_DST}"
 # Copy role-prompt files (LLM-agnostic prose; run-stage assembles them into the
 # system prompt). They live inside the skill (agents/) — no longer a top-level
 # .claude/agents/ subagent dir.
-for f in dp-planner.md dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md; do
+for f in dp-planner.md dp-implementor.md dp-test-implementor.md dp-tester.md dp-reviewer.md dp-plan-reviewer.md; do
   src="${SOURCE_AGENTS}/${f}"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Source file not found: ${src}"
@@ -100,7 +100,7 @@ cp "${SOURCE_SKILL}/SKILL.md" "${SKILLS_DST}/SKILL.md"
 echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/SKILL.md"
 
 # Copy per-state orchestration files (the SKILL reads states/<state>.md per transition)
-for f in resume update_config planning init test_implementation red_test implementation test review done failed; do
+for f in resume update_config planning plan_review init test_implementation red_test implementation test review done failed; do
   src="${SOURCE_SKILL}/states/${f}.md"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Source file not found: ${src}"
@@ -108,14 +108,14 @@ for f in resume update_config planning init test_implementation red_test impleme
   fi
   cp "${src}" "${SKILLS_DST}/states/${f}.md"
 done
-echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/states/ (11 files)"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/states/ (12 files)"
 
 # Copy driver script (must be co-located with schemas for standalone operation)
 cp "${SOURCE_TOOLS}/driver.py" "${SKILLS_DST}/driver.py"
 echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/driver.py"
 
 # Copy schemas (driver.py expects schemas/ in the same directory)
-for f in config.schema.json test-result.schema.json review-result.schema.json state.schema.json implementor-result.schema.json; do
+for f in config.schema.json test-result.schema.json review-result.schema.json state.schema.json implementor-result.schema.json plan-review-result.schema.json; do
   src="${SOURCE_TOOLS}/schemas/${f}"
   if [[ ! -f "$src" ]]; then
     echo "[dev-pipeline] ERROR: Schema file not found: ${src}"
@@ -123,7 +123,7 @@ for f in config.schema.json test-result.schema.json review-result.schema.json st
   fi
   cp "${src}" "${SKILLS_DST}/schemas/${f}"
 done
-echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/schemas/ (5 files)"
+echo "[dev-pipeline] Copied: .agents/skills/dev-pipeline/schemas/ (6 files)"
 
 # Copy the config template next to driver.py so `driver bootstrap-config` can
 # seed .dev-pipeline/dev-pipeline.config.json on the first /dev-pipeline run.
@@ -262,3 +262,7 @@ echo "     Runners are chosen per role (bash CLI / subagent / main-session); a b
 echo "       calling e.g. the 'claude' or 'codex' CLI is the only mode with a hard tool sandbox."
 echo "     SECURITY: runners treat plan.md / the contract as untrusted; a bash runner runs"
 echo "       headless with only its scoped tools. Run dev-pipeline in a sandboxed/throwaway env."
+echo ""
+echo "  3. (optional) /dev-pipeline --plan-review plan.md — a standalone, read-only adversarial"
+echo "       review of a plan.md before you run it. Never runs automatically; configured on"
+echo "       first use and does not affect the config above."

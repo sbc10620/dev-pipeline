@@ -90,6 +90,14 @@
               "enum": ["working-tree", "branch", "auto"]
             }
           }
+        },
+        "plan_reviewer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["focus"],
+          "properties": {
+            "focus": { "type": "string", "minLength": 1 }
+          }
         }
       }
     },
@@ -101,7 +109,8 @@
         "implementor":      { "$ref": "#/$defs/runner_array" },
         "tester":           { "$ref": "#/$defs/runner_array" },
         "test_implementor": { "$ref": "#/$defs/runner_array" },
-        "reviewer":         { "$ref": "#/$defs/runner_array" }
+        "reviewer":         { "$ref": "#/$defs/runner_array" },
+        "plan_reviewer":    { "$ref": "#/$defs/runner_array" }
       }
     }
   },

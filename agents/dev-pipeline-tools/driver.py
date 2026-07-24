@@ -11,11 +11,12 @@ Usage:
   python3 driver.py cleanup-worktree --run <run_dir>
   python3 driver.py status           --run <run_dir>
   python3 driver.py validate-config  --config <path> [--plan <path>]
-  python3 driver.py validate-result  --type test|review|implementor|test_implementor --file <path>
+  python3 driver.py validate-result  --type test|review|implementor|test_implementor|plan_review --file <path>
   python3 driver.py check-boundary   --run <run_dir> --role <test_implementation|implementation> --changed <file...>
   python3 driver.py record-changes   --run <run_dir> --changed <file...>
   python3 driver.py run-stage        --run <run_dir> --role <role> [--stage-input <file>]
   python3 driver.py finalize-stage   --run <run_dir> --role <role> [--stage-input <file>]
+  python3 driver.py review-plan      --plan <path> --config <path> [--project <dir>]
   python3 driver.py migrate-config   --config <path> [--out <path>]
   python3 driver.py --version
   python3 driver.py --help
@@ -42,7 +43,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "7.2.0"
+__version__ = "7.3.0"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -464,6 +465,34 @@ def validate_config_data(cfg: dict) -> list[str]:
                 errors.append(f"runners.{role}[{i}].command references unknown placeholder(s) "
                               f"{{{', '.join(unknown)}}}; allowed: {sorted(known)}")
 
+    return errors
+
+
+def plan_reviewer_config_errors(cfg: dict) -> list[str]:
+    """Readiness check for `driver review-plan` ONLY — deliberately separate from
+    `validate_config_data`. plan_reviewer is an opt-in, standalone role (see
+    ROLE_META's comment): it must never affect `config_complete` or block a
+    normal pipeline run for a project that has not configured it, so its
+    'not configured yet' / 'still unconfigured' checks live here instead of in
+    `_unconfigured_runner_roles`/`validate_config_data`'s required-role checks.
+    Once a real (non-placeholder, non-unconfigured) plan_reviewer IS present,
+    `validate_config_data`'s generic per-role shape/placeholder checks already
+    cover it like any other role — this function only gates the one-time
+    'has it been set up at all' question."""
+    errors = []
+    runners = cfg.get("runners", {}).get("plan_reviewer")
+    if not runners or not isinstance(runners, list):
+        return ["runners.plan_reviewer: not configured — run `/dev-pipeline --update-config` "
+                "(or answer the one-time setup prompt `--plan-review` shows) to add a runner."]
+    if any(isinstance(r, dict) and r.get("type") == "unconfigured" for r in runners):
+        return ["runners.plan_reviewer: still the 'unconfigured' sentinel — configure a real "
+                "runner (bash / subagent / main-session) via `/dev-pipeline --update-config`."]
+    errors += _runner_shape_errors({"runners": {"plan_reviewer": runners}})
+    focus = cfg.get("llm", {}).get("plan_reviewer", {}).get("focus", "")
+    if not isinstance(focus, str) or not focus.strip():
+        errors.append("llm.plan_reviewer.focus: must be a non-empty string")
+    elif _is_placeholder(focus):
+        errors.append("llm.plan_reviewer.focus: still contains a placeholder value — replace it")
     return errors
 
 
@@ -1920,6 +1949,7 @@ SCHEMA_BY_TYPE = {
     "review":          "review-result.schema.json",
     "implementor":     "implementor-result.schema.json",
     "test_implementor": "implementor-result.schema.json",
+    "plan_review":     "plan-review-result.schema.json",
 }
 
 
@@ -2067,6 +2097,14 @@ ROLE_META = {
     "implementor":      {"category": "file",  "schema": "implementor-result", "prompt": "dp-implementor"},
     "tester":           {"category": "json",  "schema": "test-result",       "prompt": "dp-tester"},
     "reviewer":         {"category": "json",  "schema": "review-result",     "prompt": "dp-reviewer"},
+    # plan_reviewer is NOT a pipeline stage: it has no state-machine transition,
+    # no run_dir of its own kind, and is never driven by `driver advance` — it is
+    # a standalone, on-demand check invoked via `driver review-plan` (see
+    # `--plan-review` in SKILL.md). It shares run-stage/finalize-stage's category/
+    # schema machinery (a "json" role, same as tester/reviewer) purely so it gets
+    # the same runner abstraction (bash/subagent/main-session), retry, and
+    # validation behavior for free — not because it participates in a run.
+    "plan_reviewer":    {"category": "json",  "schema": "plan-review-result", "prompt": "dp-plan-reviewer"},
 }
 
 
@@ -2613,6 +2651,83 @@ def cmd_finalize_stage(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: review-plan (standalone, on-demand plan_reviewer — see
+# `--plan-review` in SKILL.md / states/plan_review.md; NOT a pipeline stage)
+# ---------------------------------------------------------------------------
+
+def cmd_review_plan(args) -> None:
+    """Run the plan_reviewer role against a plan.md, standalone: no pipeline run
+    is created, plan.md is never touched (the role is read-only), and none of
+    this is part of the init/advance state machine — it exists purely so a user
+    can get an adversarial second opinion on a plan before committing to a run.
+
+    Builds a throwaway run-stage scaffold (config.snapshot.json + a minimal
+    state.json + stage-input.json under
+    <project_root>/.dev-pipeline/plan-reviews/<id>/) and tail-calls
+    cmd_run_stage so the exact runner abstraction every other role gets (bash /
+    subagent / main-session, retry-once, fallback, live logging) is reused
+    verbatim instead of drifting via a parallel implementation. cmd_run_stage
+    owns the single emit()/exit-code contract for this call — review-plan must
+    NOT also emit (AGENTS.md: one JSON object per subcommand)."""
+    plan_path = pathlib.Path(args.plan).resolve()
+    if not plan_path.exists():
+        die(f"Plan file not found: {plan_path}")
+
+    config_path = pathlib.Path(args.config).resolve()
+    if not config_path.exists():
+        die(f"Config file not found: {config_path}")
+    cfg = load_json(config_path)
+
+    errors = plan_reviewer_config_errors(cfg)
+    if errors:
+        sys.stderr.write("[dev-pipeline] plan_reviewer is not ready:\n")
+        for e in errors:
+            sys.stderr.write(f"  - {e}\n")
+        sys.exit(1)
+
+    project_root = (pathlib.Path(args.project).resolve() if getattr(args, "project", None)
+                    else config_path.parent.parent)
+
+    # Claim a review dir the same way cmd_init claims a run dir: mkdir(exist_ok=
+    # False) in a retry loop, not just a probe — see AGENTS.md "Collision safety".
+    reviews_root = project_root / ".dev-pipeline" / "plan-reviews"
+    reviews_root.mkdir(parents=True, exist_ok=True)
+    while True:
+        review_dir = reviews_root / run_id_new()
+        try:
+            review_dir.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            continue
+
+    save_json(review_dir / "config.snapshot.json", cfg)
+    # A minimal stand-in for a real run's state.json: cmd_run_stage reads it only
+    # as a project_root FALLBACK (stage_input below sets project_root explicitly,
+    # so this is never actually consulted) — see its `state.get(...)` chain.
+    save_json(review_dir / "state.json",
+              {"work_root": str(project_root), "project_dir": str(project_root)})
+
+    stage_input = {
+        "role": "plan_reviewer",
+        "project_root": str(project_root),
+        "work_dir": str(review_dir),
+        # plan_path is the one input dp-plan-reviewer.md names explicitly (same
+        # pattern as the reviewer's contract_path/changes_diff); plan_reviewer_config
+        # mirrors reviewer_config/test_implementor_config's "whole llm.<role> block"
+        # convention — extra guidance shown under the auto-rendered ## Inputs.
+        "inputs": {
+            "plan_path": str(plan_path),
+            "plan_reviewer_config": cfg["llm"]["plan_reviewer"],
+        },
+        "output_file": str(review_dir / "plan-review-result.json"),
+    }
+    save_json(review_dir / "stage-input.json", stage_input)
+
+    cmd_run_stage(argparse.Namespace(run=str(review_dir), role="plan_reviewer",
+                                      stage_input="stage-input.json"))
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: migrate-config (legacy runners → 'unconfigured' sentinel)
 # ---------------------------------------------------------------------------
 
@@ -2668,10 +2783,15 @@ WORKFLOW OVERVIEW
      /dev-pipeline --update-config "<plan>"         (recommend + write config.json)
      /dev-pipeline --request "<what to build>"      (planner writes plan.md for you)
      /dev-pipeline --plan plan.md                   (run an existing plan.md)
+     /dev-pipeline --plan-review plan.md            (standalone adversarial plan review)
    A plan.md is a pure spec body (Requirements, Acceptance Criteria, Interface) —
    no config header. Config (runners, tester instructions, tdd_mode, …) lives only
    in config.json; --update-config recommends the values and writes them. --plan /
    --request auto-run --update-config first when the config is incomplete.
+   --plan-review is independent of the pipeline: it runs the read-only
+   plan_reviewer role against a plan.md and stops — no run is created, the plan
+   is never modified. plan_reviewer is opt-in (unlike implementor/tester/
+   reviewer, it does not affect config_complete) and is configured on first use.
 
 STATES
 ------
@@ -2699,11 +2819,12 @@ DRIVER CLI
   cleanup-worktree Remove a --worktree run's checkout + branch (no-op if not a worktree run)
   status           Print current run state
   validate-config  Check config completeness and schema   [--plan <path>]
-  validate-result  Check a test/review/implementor/test_implementor result file
+  validate-result  Check a test/review/implementor/test_implementor/plan_review result file
   check-boundary   (TDD) verify a role only touched files it is allowed to
   record-changes   Accumulate pipeline-produced files into changed-manifest.txt
   run-stage        Execute a role via its configured runner (bash), or hand off (main-session/subagent)
   finalize-stage   Normalize + schema-validate a json result the SKILL got from a main-session/subagent runner
+  review-plan      Standalone: run plan_reviewer against a plan.md (--plan-review; not a pipeline stage)
   migrate-config   Reset an old config's runners to the 'unconfigured' sentinel
   --version        Print the dev-pipeline version and exit
   --help           Show this message
@@ -2807,7 +2928,7 @@ def main() -> None:
 
     p_vr = sub.add_parser("validate-result")
     p_vr.add_argument("--type", required=True,
-                      choices=["test", "review", "implementor", "test_implementor"])
+                      choices=["test", "review", "implementor", "test_implementor", "plan_review"])
     p_vr.add_argument("--file", required=True)
 
     p_cb = sub.add_parser("check-boundary")
@@ -2830,6 +2951,11 @@ def main() -> None:
     p_fs.add_argument("--role", required=True, choices=list(ROLE_META.keys()))
     p_fs.add_argument("--stage-input", dest="stage_input", default="stage-input.json")
 
+    p_rp = sub.add_parser("review-plan")
+    p_rp.add_argument("--plan", required=True)
+    p_rp.add_argument("--config", required=True)
+    p_rp.add_argument("--project")
+
     p_mc = sub.add_parser("migrate-config")
     p_mc.add_argument("--config", required=True)
     p_mc.add_argument("--out", default="")
@@ -2850,6 +2976,7 @@ def main() -> None:
         "record-changes":   cmd_record_changes,
         "run-stage":        cmd_run_stage,
         "finalize-stage":   cmd_finalize_stage,
+        "review-plan":      cmd_review_plan,
         "migrate-config":   cmd_migrate_config,
     }
 

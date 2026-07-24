@@ -1,6 +1,6 @@
 ---
 name: dev-pipeline
-description: Turns a goal into a plan.md and drives the (TDD) test → implement → review pipeline. Usage: /dev-pipeline --request "<goal>" [--auto-run] | --plan <path> | --update-config [<plan>]
+description: Turns a goal into a plan.md and drives the (TDD) test → implement → review pipeline. Usage: /dev-pipeline --request "<goal>" [--auto-run] | --plan <path> | --update-config [<plan>] | --plan-review <path>
 user-invocable: true
 allowed-tools: Read, Write, Bash, Grep, Glob, Task
 ---
@@ -35,11 +35,12 @@ The per-state procedures live in separate files under `states/` so this file sta
 
 1. Do **[Step 0]** below once (arguments, driver location, config bootstrap, clean-tree reminder).
 2. If invoked with `--resume`, follow `states/resume.md` to continue an interrupted run from where it stopped (no new run, no planning/config-gate/init), then run the normal advance loop (step 7) from the recovered state.
-3. If invoked with `--update-config`, run **only** the config-setup state by following `states/update_config.md` (with `plan_path` if one was given), then **stop** (report the config is ready; the user re-invokes with `--plan`/`--request` to run the pipeline).
-4. If invoked with `--request`, run the **planning** state by following `states/planning.md` (build + approve the `plan.md` spec). With `--plan`, skip straight to the config gate.
-5. **Config gate:** if Step 0 reported `config_complete: false`, run the config-setup state by following `states/update_config.md` (using `plan_path`) before continuing. If `config_complete` was true, skip it.
-6. Run the **init** state by following `states/init.md`.
-7. After **every** `driver advance`, read its JSON output, take `next_state`, and **open and follow `states/<next_state>.md`** (e.g. `next_state: "red_test"` → follow `states/red_test.md`). Repeat until `next_state` is `done` or `failed`. (This is also where `--resume` rejoins the loop.)
+3. If invoked with `--plan-review`, run **only** the plan-review state by following `states/plan_review.md`, then **stop**. This is a standalone check — it is never auto-invoked during planning, has no `run_dir`, and does not chain into the config gate or `init`.
+4. If invoked with `--update-config`, run **only** the config-setup state by following `states/update_config.md` (with `plan_path` if one was given), then **stop** (report the config is ready; the user re-invokes with `--plan`/`--request` to run the pipeline).
+5. If invoked with `--request`, run the **planning** state by following `states/planning.md` (build + approve the `plan.md` spec). With `--plan`, skip straight to the config gate.
+6. **Config gate:** if Step 0 reported `config_complete: false`, run the config-setup state by following `states/update_config.md` (using `plan_path`) before continuing. If `config_complete` was true, skip it.
+7. Run the **init** state by following `states/init.md`.
+8. After **every** `driver advance`, read its JSON output, take `next_state`, and **open and follow `states/<next_state>.md`** (e.g. `next_state: "red_test"` → follow `states/red_test.md`). Repeat until `next_state` is `done` or `failed`. (This is also where `--resume` rejoins the loop.)
 
 ### Run Context (the only state you carry between steps)
 
@@ -63,6 +64,7 @@ Each advance echoes a `directive` (e.g. `run_test_implementor`, `run_tester`, `r
 | next_state            | follow                          |
 |-----------------------|---------------------------------|
 | `resume`              | `states/resume.md` (`--resume` only) |
+| `plan_review`         | `states/plan_review.md` (`--plan-review` only; standalone, stops after reporting) |
 | `update_config`       | `states/update_config.md` (`--update-config`, or the config gate) |
 | `planning`            | `states/planning.md` (`--request` only) |
 | `init`                | `states/init.md`                |
@@ -95,7 +97,7 @@ For a handoff mode the driver **prepends a firm persona-switch preamble** to the
   1. **Validate the status JSON** — run `driver finalize-stage --run <run_dir> --role <role> --stage-input <stage_input_path>` (the same command a json role's handoff gets) to normalize + schema-check it: `ok: true` → continue; `ok: false` → re-execute **once**, appending a `## Your previous output was REJECTED` section with the `problem`; if it fails again, stop and report.
   2. **Read the (now guaranteed-valid) status** — `status: "blocked"` is the role's DELIBERATE outcome: an empty or partial delta is expected and correct, **do not** apply the empty-delta guard below; relay the `concern` to the user instead (see `states/implementation.md` / `states/test_implementation.md`). Otherwise (`status: "implemented"`), compute the delta as the state file does.
   3. **Empty-delta guard** (only when `status: "implemented"`) — an empty delta means the role did not run: re-execute once, stating that nothing was produced; if still empty, stop and report (the handoff equivalent of `all_runners_failed`).
-- **json role** (`category: "json"` — tester / reviewer): the executor writes its JSON result to the exact echoed `output_file` (nothing else there — no markdown fences; the handoff `normalizer` defaults to `default`, which tolerates a fence anyway). Then validate: `python3 <driver_path> finalize-stage --run <run_dir> --role <role> --stage-input <iter_dir>/stage-input.json`. `ok: true` → proceed. `ok: false` → re-execute **once**, appending a `## Your previous output was REJECTED` section with the `problem` after the otherwise-verbatim prompt; if it fails again, stop and report.
+- **json role** (`category: "json"` — tester / reviewer / plan_reviewer): the executor writes its JSON result to the exact echoed `output_file` (nothing else there — no markdown fences; the handoff `normalizer` defaults to `default`, which tolerates a fence anyway). Then validate: `python3 <driver_path> finalize-stage --run <run_dir> --role <role> --stage-input <iter_dir>/stage-input.json`. `ok: true` → proceed. `ok: false` → re-execute **once**, appending a `## Your previous output was REJECTED` section with the `problem` after the otherwise-verbatim prompt; if it fails again, stop and report.
 
 After the role completes and validates, **you are the orchestrator again** — resume the state file from where it dispatched (delta/boundary/manifest, then `driver advance`) and run **only** driver commands; do not keep doing role work (in `main-session` this is the moment the role/orchestrator boundary blurs — the role is done, so switch back). This is Global Rule 11: the role's own output — even an approving review — is not itself a stopping point. **Security note:** a subagent/main-session runner has **no hard tool sandbox** (dev-pipeline stays LLM-free, so there are no host agent-definition files) — its only containment is the role prose. For a read-only role (reviewer/tester) that processes untrusted code/contract, prefer a **bash** runner with a scoped tool envelope (`--allowedTools Read Grep Glob`) unless you accept prose-only discipline. **Reviewer independence:** a `main-session` reviewer runs in the same session as whatever authored the code earlier in this run — not guaranteed independent. **`states/review.md` asks the user every time the reviewer is `main-session`** (continue here, or open a new session via `/dev-pipeline --resume <run_dir>` — see that state file) rather than silently proceeding. Prefer `subagent` or `bash` for the reviewer by default so at least one of author/reviewer is independent by construction and this question rarely comes up. If the user chooses to continue in the same session, compact first (below), and rely on the reviewer prompt's independence rule (dp-reviewer.md re-frames it as an independent auditor of unknown-author code) — it is still best-effort, not guaranteed, even after compaction (compaction shrinks tokens, not identity).
 
@@ -103,16 +105,17 @@ After the role completes and validates, **you are the orchestrator again** — r
 
 ## ⚙️ [Step 0] Parse arguments and prerequisites
 
-**Accepted arguments** (exactly one entry mode: `--request`, `--plan`, `--update-config`, or `--resume`):
+**Accepted arguments** (exactly one entry mode: `--request`, `--plan`, `--update-config`, `--plan-review`, or `--resume`):
 - `--request "<goal>"` — build a `plan.md` spec conversationally from the goal (planning state), then run the pipeline.
 - `--plan <path>` — run an already-written `plan.md` (a pure spec body).
 - `--update-config [<plan>]` — recommend + write `config.json` (runners, tester/test_implementor instructions, gate keys), then stop. A plan path is **optional** (it sharpens the recommendations — framework, test_paths, commands — from that plan; omit it to reconfigure from the repo + the current config). This is the only way config is written; `--plan`/`--request` auto-run it (with their plan) when the config is incomplete.
+- `--plan-review <path>` — run a **standalone**, read-only adversarial review of an already-written `plan.md` and report findings, then stop. Never auto-invoked during planning; does not create a run, does not modify `plan.md`, and does not chain into the config gate or `init`. See `states/plan_review.md`. The `plan_reviewer` role is **opt-in**: unlike `implementor`/`test_implementor`/`tester`/`reviewer`, it is absent from a freshly bootstrapped config and never affects `config_complete` — it is configured on first use, scoped to only its own keys.
 - `--resume [<run_dir>]` — continue an **interrupted** run from where it stopped (default `<project_root>/.dev-pipeline/latest`). No new run is created; the run's config/contract are already frozen, so planning, the config gate, and init are all skipped. See `states/resume.md`. `--auto-run` does not apply.
 - `--auto-run` — optional (`--request`/`--plan`). Skip the post-plan approval gate and run end-to-end. Planning-phase and config-setup questions are still asked, and so is `states/review.md`'s main-session reviewer question (below) — it is a runtime safety confirmation, not an approval gate, so `--auto-run` does not suppress it.
 - `--worktree` — optional (`--request`/`--plan` only; not `--update-config`/`--resume`, whose run — if any — already fixed this at its own `init`). Run this pipeline run's code edits and working-tree git bookkeeping in an isolated git worktree + branch instead of `project_root`'s own working tree, so the run never touches the user's real checkout and can run concurrently with others. Requires `project_root` to be a git repo with an existing commit. Threaded straight through to `driver init --worktree`; not a config key (a per-run choice, not a project-wide default — see `states/init.md`).
 - `--help` — print skill usage summary and stop.
 
-`--request`, `--plan`, `--update-config`, and `--resume` are mutually exclusive; exactly one is required. If more than one/none, or any unknown argument is present, report an error and stop.
+`--request`, `--plan`, `--update-config`, `--plan-review`, and `--resume` are mutually exclusive; exactly one is required. If more than one/none, or any unknown argument is present, report an error and stop.
 
 - [Step 1] If `--help` is present, print the following and stop:
   ```
@@ -122,6 +125,7 @@ After the role completes and validates, **you are the orchestrator again** — r
     /dev-pipeline --request "<what to build>" [--auto-run] [--worktree]
     /dev-pipeline --plan <path-to-plan.md>    [--auto-run] [--worktree]
     /dev-pipeline --update-config [<path-to-plan.md>]
+    /dev-pipeline --plan-review <path-to-plan.md>
     /dev-pipeline --resume [<run_dir>]
     /dev-pipeline --help
 
@@ -129,6 +133,8 @@ After the role completes and validates, **you are the orchestrator again** — r
     --request "<goal>"        Build plan.md spec conversationally (planner), then run.
     --plan <path>             Run an existing plan.md (a pure spec body).
     --update-config [<plan>]  Recommend + write config.json (plan optional), then stop.
+    --plan-review <path>      Standalone adversarial review of a plan.md; reports and stops.
+                              Never runs automatically; does not create a run or edit the plan.
     --resume [<run_dir>]      Continue an interrupted run (default .dev-pipeline/latest).
     --auto-run                Skip the post-plan approval gate; run end-to-end.
     --worktree                Isolate this run in a git worktree + branch; auto-merged on done.
@@ -165,6 +171,7 @@ After the role completes and validates, **you are the orchestrator again** — r
 
 - [Step 3] Resolve the entry mode. Save `auto_run` (whether `--auto-run` was passed) in the Run Context.
   - `--plan <path>`: verify the plan file exists; save it as `plan_path`.
+  - `--plan-review <path>`: verify the plan file exists; save it as `plan_path`.
   - `--update-config [<path>]`: a plan path is optional — if given, verify it exists and save it as `plan_path`; if omitted, leave `plan_path` unset (reconfigure from the repo + current config).
   - `--request "<goal>"`: note the goal; `plan_path` will be set during planning.
   - `--resume [<run_dir>]`: save `resume_run` (the given path, or unset → default to `latest` inside `states/resume.md`). The run is already frozen, so **skip the config-bootstrap/gate/clean-tree steps below**: after Step 4 locates `project_root` (do NOT bootstrap), go straight to `states/resume.md`. If the walk finds no project and `resume_run` is an explicit path, take `project_root` from `driver resume`'s `project_dir` instead; if neither yields a project, stop: "No run to resume."
@@ -175,7 +182,7 @@ After the role completes and validates, **you are the orchestrator again** — r
   ```
   In every case, determine `config_complete` — whether `config.json` is ready to run (runners configured **and** no placeholder instructions) — so you know whether the config gate (`states/update_config.md`) still needs to run:
   - **(a) Found** → save the printed directory as `project_root`, then run `python3 <driver_path> bootstrap-config --project <project_root>` (idempotent — it reports `status: "exists"` for an existing config) and read `config_complete` from its JSON.
-  - **(b) Not found** → bootstrap the config via the driver (do NOT create directories or copy files yourself; for `--plan`/`--update-config`, first try walking up from the plan file's directory):
+  - **(b) Not found** → bootstrap the config via the driver (do NOT create directories or copy files yourself; for `--plan`/`--plan-review`/`--update-config`, first try walking up from the plan file's directory):
     ```bash
     python3 <driver_path> bootstrap-config
     ```
@@ -185,15 +192,15 @@ After the role completes and validates, **you are the orchestrator again** — r
     - Non-zero exit, or `config_complete == null` (config unreadable): report the driver's error and stop.
   - Save `config_complete` in the Run Context. The config gate (loop Step 4) uses it. **`--update-config` always runs `states/update_config.md` regardless of `config_complete`** (the user asked to reconfigure).
 
-- [Step 5] Remind the user: **"For accurate role-boundary checks and review, start this pipeline with a clean working tree. In particular, the installed dev-pipeline files (the canonical `.agents/skills/dev-pipeline/` tree, the `.claude/skills/dev-pipeline/` copy, and the `.clinerules/workflows/dev-pipeline.md` pointer) should already be committed."** (The commit and the review diff are both scoped to the change manifest, so stray untracked files are neither committed nor reviewed; only a codex reviewer runner, if you configure one, scans the working tree. A clean tree still keeps role-boundary checks accurate. Because the commit stages only files the pipeline produced, any **unrelated edits you already had** in the working tree will NOT be included in the pipeline's commit — commit or stash them first if you want them kept separately.)
+- [Step 5] (Skip for `--plan-review` — it does no git bookkeeping and touches nothing in the working tree.) Remind the user: **"For accurate role-boundary checks and review, start this pipeline with a clean working tree. In particular, the installed dev-pipeline files (the canonical `.agents/skills/dev-pipeline/` tree, the `.claude/skills/dev-pipeline/` copy, and the `.clinerules/workflows/dev-pipeline.md` pointer) should already be committed."** (The commit and the review diff are both scoped to the change manifest, so stray untracked files are neither committed nor reviewed; only a codex reviewer runner, if you configure one, scans the working tree. A clean tree still keeps role-boundary checks accurate. Because the commit stages only files the pipeline produced, any **unrelated edits you already had** in the working tree will NOT be included in the pipeline's commit — commit or stash them first if you want them kept separately.)
 
 **Step 0 checklist:**
-- [ ] Exactly one of `--request` / `--plan` / `--update-config` / `--resume`; `--auto-run` noted as `auto_run`; unknown args rejected
+- [ ] Exactly one of `--request` / `--plan` / `--update-config` / `--plan-review` / `--resume`; `--auto-run` noted as `auto_run`; unknown args rejected
 - [ ] `driver.py` found at `<skill_dir>/driver.py`
 - [ ] Project root identified; (non-`--resume`) `config_complete` read from `bootstrap-config` (both found and bootstrapped paths) and saved to the Run Context
-- [ ] User notified about clean working tree (skipped for `--resume`)
+- [ ] User notified about clean working tree (skipped for `--resume` and `--plan-review`)
 
-Now: `--resume` → follow `states/resume.md`; `--update-config` → follow `states/update_config.md` and stop; `--request` → follow `states/planning.md`; `--plan` → the config gate (`states/update_config.md` if `config_complete` is false) then `states/init.md`.
+Now: `--resume` → follow `states/resume.md`; `--plan-review` → follow `states/plan_review.md` and stop; `--update-config` → follow `states/update_config.md` and stop; `--request` → follow `states/planning.md`; `--plan` → the config gate (`states/update_config.md` if `config_complete` is false) then `states/init.md`.
 
 ---
 

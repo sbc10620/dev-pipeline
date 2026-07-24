@@ -246,6 +246,25 @@ See Security above: no hard sandbox for cline.
 { "type": "bash", "command": "cline --auto-approve true \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\"", "normalizer": "default" }
 ```
 
+## plan_reviewer (json role, read-only, standalone)
+
+Not a pipeline stage — invoked on demand via `/dev-pipeline --plan-review <plan.md>` / `driver review-plan` (see AGENTS.md), never automatically during planning or a run. Same shape and same read-only sandbox rationale as the reviewer above: it Reads `plan.md` and, at most, the repo it references, and must never edit `plan.md` itself. Unlike every other role, it is **opt-in** — `runners.plan_reviewer` / `llm.plan_reviewer` are absent from a freshly bootstrapped config and do not affect `config_complete`; add them (via `--update-config`, or the one-time prompt `--plan-review` shows) only once you actually want a second opinion on a plan.
+
+**claude**
+```json
+{ "type": "bash", "command": "cat {user_file} | claude -p --model sonnet --append-system-prompt-file {system_file} --allowedTools Read Grep Glob > {output_file}", "normalizer": "default" }
+```
+
+**codex**
+```json
+{ "type": "bash", "command": "codex exec -s read-only -C {project_root} --skip-git-repo-check -c model_reasoning_summary=auto -o {output_file} \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\" < /dev/null", "normalizer": "default" }
+```
+
+**cline** — ⚠️ no hard read-only sandbox (see Security); prefer claude/codex.
+```json
+{ "type": "bash", "command": "cline --auto-approve true \"$(printf '# System Prompt\\n\\n'; cat {system_file}; printf '\\n\\n# User Prompt\\n\\n'; cat {user_file})\"", "normalizer": "default" }
+```
+
 ---
 
 ## Verified combinations

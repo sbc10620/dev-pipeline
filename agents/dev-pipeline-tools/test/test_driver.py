@@ -138,6 +138,17 @@ def review_result(verdict="approve", findings=None, **extra):
     return obj
 
 
+def plan_review_result(verdict="approve", findings=None, **extra):
+    """Build a schema-valid plan-review-result dict."""
+    obj = {
+        "verdict": verdict,
+        "summary": "stub plan review result",
+        "findings": findings if findings is not None else [],
+    }
+    obj.update(extra)
+    return obj
+
+
 def finding(severity="critical", title="Stub finding", file="src/foo.py"):
     """Build a schema-valid review finding."""
     return {
@@ -3282,6 +3293,158 @@ class TestRunnerModes(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("problem", r.stdout)
         self.assertIn("source", r.stdout)  # rejected specifically for the stray key
+
+
+class TestPlanReview(unittest.TestCase):
+    """`driver review-plan` / plan_reviewer: a standalone, opt-in role — no
+    run_dir, never part of config_complete, reuses run-stage's runner
+    abstraction via a throwaway .dev-pipeline/plan-reviews/<id>/ scaffold."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.proj = pathlib.Path(self._tmp.name) / "proj"
+        self.proj.mkdir()
+        self.plan = self.proj / "plan.md"
+        self.plan.write_text(
+            "# Plan: Widget\n\n## Requirements\n- R1. Add a widget.\n\n"
+            "## Acceptance Criteria\n- [ ] AC1. Widget exists.\n\n"
+            "## Interface\nSome interface.\n",
+            encoding="utf-8",
+        )
+        self.config_path = self.proj / ".dev-pipeline" / "dev-pipeline.config.json"
+        self.config_path.parent.mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_config(self, cfg):
+        self.config_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    def test_fresh_bootstrap_has_no_plan_reviewer(self):
+        # A freshly bootstrapped config must NOT carry plan_reviewer at all (it is
+        # opt-in) — only the four required roles are seeded as 'unconfigured', and
+        # config_complete is false purely because of THOSE (unrelated to plan_reviewer).
+        r = run_driver("bootstrap-config", "--project", str(self.proj))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(r.json["config_complete"])
+        cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertNotIn("plan_reviewer", cfg.get("runners", {}))
+        self.assertNotIn("plan_reviewer", cfg.get("llm", {}))
+
+    def test_review_plan_dies_when_plan_reviewer_unconfigured(self):
+        self._write_config(valid_config())  # no plan_reviewer key at all
+        r = run_driver("review-plan", "--plan", str(self.plan), "--config", str(self.config_path))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("runners.plan_reviewer", r.stderr)
+        self.assertIn("not configured", r.stderr)
+        self.assertFalse((self.proj / ".dev-pipeline" / "plan-reviews").exists())
+
+    def test_review_plan_dies_when_focus_is_placeholder(self):
+        cfg = valid_config()
+        cfg["runners"]["plan_reviewer"] = [{"type": "bash", "command": "echo x > {output_file}"}]
+        cfg["llm"]["plan_reviewer"] = {"focus": "<REQUIRED: fill this in>"}
+        self._write_config(cfg)
+        r = run_driver("review-plan", "--plan", str(self.plan), "--config", str(self.config_path))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("llm.plan_reviewer.focus", r.stderr)
+        self.assertIn("placeholder", r.stderr)
+
+    def _configured(self, command, normalizer="default"):
+        cfg = valid_config()
+        cfg["runners"]["plan_reviewer"] = [{"type": "bash", "command": command, "normalizer": normalizer}]
+        cfg["llm"]["plan_reviewer"] = {"focus": "Be adversarial about ambiguity and coverage gaps."}
+        self._write_config(cfg)
+        return cfg
+
+    def test_review_plan_bash_runner_end_to_end(self):
+        payload = json.dumps(plan_review_result(
+            verdict="needs-revision",
+            findings=[{"severity": "high", "title": "Vague AC", "body": "AC1 lacks a concrete effect.",
+                       "section": "Acceptance Criteria", "confidence": 0.9,
+                       "recommendation": "Rewrite AC1 with a concrete input/output."}],
+        ))
+        self._configured("echo " + shlex.quote(payload) + " > {output_file}")
+        r = run_driver("review-plan", "--plan", str(self.plan), "--config", str(self.config_path))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["ok"])
+        self.assertEqual(r.json["role"], "plan_reviewer")
+
+        reviews = list((self.proj / ".dev-pipeline" / "plan-reviews").iterdir())
+        self.assertEqual(len(reviews), 1)
+        review_dir = reviews[0]
+        result = json.loads((review_dir / "plan-review-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["verdict"], "needs-revision")
+        self.assertEqual(result["findings"][0]["section"], "Acceptance Criteria")
+
+        # plan_reviewer is read-only: the plan file itself must be untouched, and
+        # nothing was created under runs/ (this is not a pipeline run).
+        self.assertEqual(self.plan.read_text(encoding="utf-8").count("AC1"), 1)
+        self.assertFalse((self.proj / ".dev-pipeline" / "runs").exists())
+
+        # The assembled prompt names plan_path explicitly (dp-plan-reviewer.md
+        # Step 1 relies on this exact input key) and carries the configured focus.
+        user_text = (review_dir / "plan_reviewer-user.txt").read_text(encoding="utf-8")
+        self.assertIn(str(self.plan), user_text)
+        self.assertIn("adversarial about ambiguity", user_text)
+
+    def test_review_plan_missing_plan_file_dies(self):
+        self._configured("echo x > {output_file}")
+        r = run_driver("review-plan", "--plan", str(self.proj / "nope.md"), "--config", str(self.config_path))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Plan file not found", r.stderr)
+
+    def test_review_plan_subagent_handoff(self):
+        cfg = valid_config()
+        cfg["runners"]["plan_reviewer"] = [{"type": "subagent"}]
+        cfg["llm"]["plan_reviewer"] = {"focus": "Be adversarial."}
+        self._write_config(cfg)
+        r = run_driver("review-plan", "--plan", str(self.plan), "--config", str(self.config_path))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json["mode"], "subagent")
+        self.assertEqual(r.json["role"], "plan_reviewer")
+        self.assertTrue(pathlib.Path(r.json["system_file"]).exists())
+
+        # finalize-stage validates the handoff result the same way as any other
+        # json role, against the review dir run-stage created.
+        review_dir = pathlib.Path(r.json["system_file"]).parent
+        out = pathlib.Path(r.json["output_file"])
+        out.write_text(json.dumps(plan_review_result(verdict="approve")), encoding="utf-8")
+        fr = run_driver("finalize-stage", "--run", str(review_dir), "--role", "plan_reviewer",
+                         "--stage-input", "stage-input.json")
+        self.assertEqual(fr.returncode, 0, fr.stderr)
+        self.assertTrue(fr.json["ok"])
+
+    def test_adding_plan_reviewer_does_not_affect_config_complete(self):
+        # A fully-configured project (the 4 required roles) must stay
+        # config_complete both before and after plan_reviewer is added.
+        self._write_config(valid_config())
+        before = run_driver("bootstrap-config", "--project", str(self.proj))
+        self.assertTrue(before.json["config_complete"])
+
+        values = self.proj / "values.json"
+        values.write_text(json.dumps({
+            "llm": {"plan_reviewer": {"focus": "Be adversarial about ambiguity."}},
+            "runners": {"plan_reviewer": [{"type": "bash", "command": "echo x > {output_file}",
+                                            "normalizer": "default"}]},
+        }), encoding="utf-8")
+        ac = run_driver("apply-config", "--config", str(self.config_path), "--values-file", str(values))
+        self.assertEqual(ac.returncode, 0, ac.stderr)
+        self.assertTrue(ac.json["config_complete"])
+
+        after = run_driver("bootstrap-config", "--project", str(self.proj))
+        self.assertTrue(after.json["config_complete"])
+
+    def test_validate_result_plan_review_round_trip(self):
+        good = self.proj / "good.json"
+        good.write_text(json.dumps(plan_review_result()), encoding="utf-8")
+        r = run_driver("validate-result", "--type", "plan_review", "--file", str(good))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.json["valid"])
+
+        bad = self.proj / "bad.json"
+        bad.write_text(json.dumps({"verdict": "bogus", "summary": "x", "findings": []}), encoding="utf-8")
+        r2 = run_driver("validate-result", "--type", "plan_review", "--file", str(bad))
+        self.assertNotEqual(r2.returncode, 0)
 
 
 if __name__ == "__main__":

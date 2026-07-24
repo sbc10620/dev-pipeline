@@ -9,6 +9,39 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [7.3.0] - 2026-07-24
+
+**Added a standalone, adversarial `plan_reviewer` role and `/dev-pipeline --plan-review <plan.md>` /
+`driver review-plan`, so a plan.md can get an independent, read-only second opinion before it ever drives a
+run.** This is deliberately **not** a pipeline stage: it has no state-machine transition, is never invoked
+automatically by `states/planning.md`, never chains into the config gate or `init`, and never edits `plan.md`
+— it only reports `verdict`/`summary`/`findings` (ambiguity, untestable acceptance criteria, coverage gaps,
+interface gaps, stale reuse claims, scope, TDD/no-TDD mode mismatches) and stops. `plan_reviewer` reuses the
+same runner abstraction as every other role (bash/subagent/main-session, retry, fallback, logging) via
+`driver review-plan` tail-calling the existing `run-stage` machinery against a throwaway
+`.dev-pipeline/plan-reviews/<id>/` scaffold — no parallel execution path was written.
+
+`plan_reviewer` is deliberately the one **opt-in** role: `runners.plan_reviewer`/`llm.plan_reviewer` are
+absent from a freshly bootstrapped config, are never checked by `validate_config_data`/`config_complete`, and
+so never force an existing project through `--update-config` just because this new role exists. It is
+configured — scoped to only its own two keys, via the same `apply-config` — the first time `--plan-review` is
+actually used (`states/plan_review.md`), or opportunistically during a normal `--update-config` if the user
+asks for it there.
+
+### Added
+- `agents/skills/dev-pipeline/agents/dp-plan-reviewer.md` — the plan reviewer role prompt (read-only,
+  adversarial, mirrors `dp-reviewer.md`'s structure but judges a spec, not a diff).
+- `agents/skills/dev-pipeline/states/plan_review.md` — `--plan-review` orchestration (one-time scoped config
+  setup, `driver review-plan`, report, stop).
+- `schemas/plan-review-result.schema.json` — `{verdict: approve|needs-revision, summary, findings[]}`, each
+  finding carrying a `section` (the plan section it's about) instead of a reviewer finding's `file`/
+  `line_start`/`line_end`.
+- `driver.py`: `ROLE_META["plan_reviewer"]` (category `json`), `plan_reviewer_config_errors()` (a
+  standalone readiness check, deliberately separate from `validate_config_data` — see above), and the
+  `review-plan` subcommand.
+- `config.schema.json`: optional (not required) `llm.plan_reviewer`/`runners.plan_reviewer` properties.
+- `RUNNERS.md`: `plan_reviewer` command templates (claude/codex/cline), same read-only shape as `reviewer`.
+
 ## [7.2.0] - 2026-07-22
 
 **Tightened the implementor/test_implementor result contract: `blocked_on` is now required (no implicit
