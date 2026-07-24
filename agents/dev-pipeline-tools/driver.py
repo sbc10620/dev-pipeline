@@ -456,15 +456,64 @@ def validate_config_data(cfg: dict) -> list[str]:
 
     # Runner commands may only reference placeholders the driver substitutes, so a
     # typo fails fast at validate time instead of breaking at the shell.
-    known = {"system_file", "user_file", "output_file", "project_root", "run_dir", "work_dir"}
+    errors += _unknown_placeholder_errors(cfg)
+
+    return errors
+
+
+# Placeholders the driver substitutes into a bash runner's `command`. Named once
+# so both the all-roles scan below and plan_reviewer's own scoped scan
+# (`_plan_reviewer_shape_errors`) stay in sync.
+_KNOWN_RUNNER_PLACEHOLDERS = {"system_file", "user_file", "output_file", "project_root", "run_dir", "work_dir"}
+
+
+def _unknown_placeholder_errors(cfg: dict) -> list[str]:
+    """A runner command may only reference `_KNOWN_RUNNER_PLACEHOLDERS`, so a typo
+    fails fast at validate time instead of breaking at the shell. Shared by
+    `validate_config_data` (every role in `cfg["runners"]`) and
+    `_plan_reviewer_shape_errors` (called with a synthetic single-role dict so
+    the same typo class is caught for the one role that isn't checked by
+    `validate_config_data` at all — see that function's docstring)."""
+    errors = []
     for role, arr in (cfg.get("runners") or {}).items():
         for i, r in enumerate(arr if isinstance(arr, list) else []):
             cmd = r.get("command", "") if isinstance(r, dict) else ""
-            unknown = sorted(set(re.findall(r"(?<!\$)\{(\w+)\}", cmd)) - known)
+            unknown = sorted(set(re.findall(r"(?<!\$)\{(\w+)\}", cmd)) - _KNOWN_RUNNER_PLACEHOLDERS)
             if unknown:
                 errors.append(f"runners.{role}[{i}].command references unknown placeholder(s) "
-                              f"{{{', '.join(unknown)}}}; allowed: {sorted(known)}")
+                              f"{{{', '.join(unknown)}}}; allowed: {sorted(_KNOWN_RUNNER_PLACEHOLDERS)}")
+    return errors
 
+
+def _plan_reviewer_shape_errors(cfg: dict) -> list[str]:
+    """Validate `llm.plan_reviewer`/`runners.plan_reviewer` IF PRESENT, without
+    requiring plan_reviewer to exist at all (that existence gate is
+    `plan_reviewer_config_errors`, below, which also requires it to be
+    present). Shared by:
+      - `plan_reviewer_config_errors` (`driver review-plan`'s full readiness
+        gate — plan_reviewer must exist AND be well-formed);
+      - `cmd_apply_config`'s plan_reviewer-only scoped write path, which must
+        NOT require the other (required) roles to already be complete —
+        plan_reviewer is opt-in and independent of them (see
+        `plan_reviewer_config_errors`'s docstring); it only validates what a
+        plan_reviewer-only values file actually touches.
+    """
+    errors = []
+    runners = cfg.get("runners", {}).get("plan_reviewer")
+    if runners is not None:
+        if not isinstance(runners, list) or any(
+                isinstance(r, dict) and r.get("type") == "unconfigured" for r in runners):
+            errors.append("runners.plan_reviewer: still the 'unconfigured' sentinel (or malformed) — "
+                          "configure a real runner (bash / subagent / main-session).")
+        else:
+            errors += _runner_shape_errors({"runners": {"plan_reviewer": runners}})
+            errors += _unknown_placeholder_errors({"runners": {"plan_reviewer": runners}})
+    focus = cfg.get("llm", {}).get("plan_reviewer", {}).get("focus")
+    if focus is not None:
+        if not isinstance(focus, str) or not focus.strip():
+            errors.append("llm.plan_reviewer.focus: must be a non-empty string")
+        elif _is_placeholder(focus):
+            errors.append("llm.plan_reviewer.focus: still contains a placeholder value — replace it")
     return errors
 
 
@@ -475,25 +524,43 @@ def plan_reviewer_config_errors(cfg: dict) -> list[str]:
     normal pipeline run for a project that has not configured it, so its
     'not configured yet' / 'still unconfigured' checks live here instead of in
     `_unconfigured_runner_roles`/`validate_config_data`'s required-role checks.
-    Once a real (non-placeholder, non-unconfigured) plan_reviewer IS present,
-    `validate_config_data`'s generic per-role shape/placeholder checks already
-    cover it like any other role — this function only gates the one-time
-    'has it been set up at all' question."""
-    errors = []
-    runners = cfg.get("runners", {}).get("plan_reviewer")
-    if not runners or not isinstance(runners, list):
+    Unlike `_plan_reviewer_shape_errors`, this ALSO requires plan_reviewer to
+    exist at all — `review-plan` cannot proceed on a project that never
+    configured it, which `_plan_reviewer_shape_errors` alone would silently
+    accept (it treats "absent" as "nothing to check")."""
+    if not cfg.get("runners", {}).get("plan_reviewer"):
         return ["runners.plan_reviewer: not configured — run `/dev-pipeline --update-config` "
                 "(or answer the one-time setup prompt `--plan-review` shows) to add a runner."]
-    if any(isinstance(r, dict) and r.get("type") == "unconfigured" for r in runners):
-        return ["runners.plan_reviewer: still the 'unconfigured' sentinel — configure a real "
-                "runner (bash / subagent / main-session) via `/dev-pipeline --update-config`."]
-    errors += _runner_shape_errors({"runners": {"plan_reviewer": runners}})
-    focus = cfg.get("llm", {}).get("plan_reviewer", {}).get("focus", "")
-    if not isinstance(focus, str) or not focus.strip():
+    errors = _plan_reviewer_shape_errors(cfg)
+    if not cfg.get("llm", {}).get("plan_reviewer", {}).get("focus"):
         errors.append("llm.plan_reviewer.focus: must be a non-empty string")
-    elif _is_placeholder(focus):
-        errors.append("llm.plan_reviewer.focus: still contains a placeholder value — replace it")
     return errors
+
+
+def _values_touch_only_plan_reviewer(values: dict) -> bool:
+    """True when an `apply-config` values file touches ONLY the plan_reviewer
+    leaves (no `driver` key; `llm`/`runners` restricted to exactly the
+    `plan_reviewer` key). Lets `cmd_apply_config` validate+write plan_reviewer's
+    opt-in config independent of whether the other (required) roles are
+    configured yet — the write-side half of the same 'opt-in, standalone'
+    guarantee `plan_reviewer_config_errors` enforces on the read side. Without
+    this, `apply-config`'s normal full-config validation would reject a
+    plan_reviewer-only write on any project whose required roles are still
+    the bootstrap 'unconfigured' sentinel — exactly the first-use case
+    `states/plan_review.md` promises ('their other roles, if any, are
+    untouched')."""
+    if "driver" in values:
+        return False
+    touched = False
+    for key in ("llm", "runners"):
+        v = values.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, dict) or set(v.keys()) - {"plan_reviewer"}:
+            return False
+        if "plan_reviewer" in v:
+            touched = True
+    return touched
 
 
 # ---------------------------------------------------------------------------
@@ -1881,7 +1948,18 @@ def cmd_apply_config(args) -> None:
     merged = json.loads(json.dumps(base))  # deep copy so a validation failure writes nothing
     _deep_merge(merged, values)
 
-    errors = validate_config_data(merged)
+    # plan_reviewer is the one opt-in role (see plan_reviewer_config_errors): a
+    # values file that touches ONLY its keys must validate — and write —
+    # independent of whether the other (required) roles are configured yet.
+    # `validate_config_data`'s full check would otherwise reject this write on
+    # any project whose required roles are still the bootstrap 'unconfigured'
+    # sentinel, defeating `states/plan_review.md`'s documented first-use flow
+    # ("their other roles, if any, are untouched"). Every other write keeps the
+    # existing full-config validation unchanged.
+    if _values_touch_only_plan_reviewer(values):
+        errors = _plan_reviewer_shape_errors(merged)
+    else:
+        errors = validate_config_data(merged)
     if errors:
         die("Invalid merged config — nothing was written:\n  " + "\n  ".join(errors))
 
@@ -1899,8 +1977,12 @@ def cmd_apply_config(args) -> None:
     # legitimately point at the config).
     if values_path != config_path:
         values_path.unlink(missing_ok=True)
+    # config_complete reflects the FULL merged config, not just what this write
+    # touched — a plan_reviewer-only write can succeed while the required roles
+    # remain incomplete, and callers (the SKILL's config gate) need the real
+    # answer, not an assumption that any successful write means "done".
     emit({"ok": True, "config": str(config_path), "seeded": seeded,
-          "applied": sorted(values), "config_complete": True})
+          "applied": sorted(values), "config_complete": not validate_config_data(merged)})
 
 
 # ---------------------------------------------------------------------------

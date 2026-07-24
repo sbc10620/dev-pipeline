@@ -39,6 +39,15 @@ asks for it there.
 - `driver.py`: `ROLE_META["plan_reviewer"]` (category `json`), `plan_reviewer_config_errors()` (a
   standalone readiness check, deliberately separate from `validate_config_data` — see above), and the
   `review-plan` subcommand.
+- `apply-config` gained a plan_reviewer-only scoped write path (`_values_touch_only_plan_reviewer` +
+  `_plan_reviewer_shape_errors`): a values file touching *only* `llm.plan_reviewer`/`runners.plan_reviewer`
+  validates and writes independent of whether the other (required) roles are configured yet, instead of
+  being rejected by the full-config check. Without this, `states/plan_review.md`'s documented first-use
+  setup ("their other roles, if any, are untouched") would fail on exactly the project most likely to try
+  it — one that hasn't run `--update-config` for the main pipeline at all. `apply-config`'s
+  `config_complete` in its response now also reflects the true state of the full merged config (it was
+  previously hardcoded `true` on any successful write) — a plan_reviewer-only write can succeed while the
+  rest of the config is still incomplete.
 - `config.schema.json`: optional (not required) `llm.plan_reviewer`/`runners.plan_reviewer` properties.
 - `RUNNERS.md`: `plan_reviewer` command templates (claude/codex/cline), same read-only shape as `reviewer`.
 

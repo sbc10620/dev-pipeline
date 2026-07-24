@@ -3349,6 +3349,88 @@ class TestPlanReview(unittest.TestCase):
         self.assertIn("llm.plan_reviewer.focus", r.stderr)
         self.assertIn("placeholder", r.stderr)
 
+    def test_review_plan_dies_on_unknown_placeholder_in_command(self):
+        # Regression: review-plan's readiness gate must catch the same
+        # unknown-{placeholder} typo class validate-config/apply-config already
+        # do for every other role, instead of failing opaquely at runtime.
+        cfg = valid_config()
+        cfg["runners"]["plan_reviewer"] = [{"type": "bash", "command": "echo {sytem_file} > {output_file}"}]
+        cfg["llm"]["plan_reviewer"] = {"focus": "Be adversarial."}
+        self._write_config(cfg)
+        r = run_driver("review-plan", "--plan", str(self.plan), "--config", str(self.config_path))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unknown placeholder", r.stderr)
+        self.assertIn("sytem_file", r.stderr)
+
+    def test_apply_config_plan_reviewer_only_write_succeeds_on_unconfigured_project(self):
+        # Regression: a plan_reviewer-only values file must apply successfully
+        # even while the four required roles are still the bootstrap
+        # 'unconfigured' sentinel (states/plan_review.md's documented first-use
+        # flow: "their other roles, if any, are untouched"). Before the fix,
+        # apply-config validated the WHOLE merged config and died on the
+        # unrelated unconfigured roles.
+        r = run_driver("bootstrap-config", "--project", str(self.proj))
+        self.assertFalse(r.json["config_complete"])
+
+        payload = shlex.quote(json.dumps(plan_review_result()))
+        values = self.proj / "values.json"
+        values.write_text(json.dumps({
+            "llm": {"plan_reviewer": {"focus": "Adversarially review plan.md."}},
+            "runners": {"plan_reviewer": [{"type": "bash",
+                                            "command": f"echo {payload} > " + "{output_file}",
+                                            "normalizer": "default"}]},
+        }), encoding="utf-8")
+        ac = run_driver("apply-config", "--config", str(self.config_path), "--values-file", str(values))
+        self.assertEqual(ac.returncode, 0, ac.stderr)
+        # The rest of the config is still incomplete, so config_complete must
+        # honestly report False here — a plan_reviewer-only write does not
+        # magically finish the pipeline config.
+        self.assertFalse(ac.json["config_complete"])
+
+        cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["llm"]["plan_reviewer"]["focus"], "Adversarially review plan.md.")
+        for role in ("implementor", "test_implementor", "tester", "reviewer"):
+            self.assertEqual(cfg["runners"][role], [{"type": "unconfigured"}])
+
+        # review-plan itself must now be usable despite the rest being unconfigured.
+        rp = run_driver("review-plan", "--plan", str(self.plan), "--config", str(self.config_path))
+        self.assertEqual(rp.returncode, 0, rp.stderr)
+
+    def test_apply_config_rejects_plan_reviewer_only_write_with_bad_shape(self):
+        # The scoped validation path must still catch a genuinely broken
+        # plan_reviewer value — it is narrower, not absent.
+        run_driver("bootstrap-config", "--project", str(self.proj))
+        values = self.proj / "values.json"
+        values.write_text(json.dumps({
+            "llm": {"plan_reviewer": {"focus": "<REQUIRED: fill this in>"}},
+            "runners": {"plan_reviewer": [{"type": "bash", "command": "echo x > {output_file}"}]},
+        }), encoding="utf-8")
+        ac = run_driver("apply-config", "--config", str(self.config_path), "--values-file", str(values))
+        self.assertNotEqual(ac.returncode, 0)
+        self.assertIn("llm.plan_reviewer.focus", ac.stderr)
+        self.assertFalse(self.config_path.exists() and
+                          "plan_reviewer" in json.loads(self.config_path.read_text(encoding="utf-8")).get("llm", {}),
+                          "a rejected merge must not have been written")
+
+    def test_apply_config_mixed_write_still_fully_validates(self):
+        # A values file touching plan_reviewer ALONGSIDE another role must NOT
+        # take the scoped path — it should still be held to the full
+        # validate_config_data check (only a plan_reviewer-ONLY write is scoped).
+        run_driver("bootstrap-config", "--project", str(self.proj))
+        values = self.proj / "values.json"
+        values.write_text(json.dumps({
+            "llm": {"plan_reviewer": {"focus": "Be adversarial."}},
+            "runners": {
+                "plan_reviewer": [{"type": "bash", "command": "echo x > {output_file}", "normalizer": "default"}],
+                "implementor": [{"type": "bash", "command": "echo x"}],
+            },
+        }), encoding="utf-8")
+        ac = run_driver("apply-config", "--config", str(self.config_path), "--values-file", str(values))
+        # Still fails: test_implementor/tester/reviewer remain unconfigured, and
+        # this write is NOT plan_reviewer-only, so the full check must apply.
+        self.assertNotEqual(ac.returncode, 0)
+        self.assertIn("not configured yet", ac.stderr)
+
     def _configured(self, command, normalizer="default"):
         cfg = valid_config()
         cfg["runners"]["plan_reviewer"] = [{"type": "bash", "command": command, "normalizer": normalizer}]
