@@ -9,6 +9,29 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [7.3.2] - 2026-07-24
+
+Refined the 7.3.1 inline-test guidance in `states/update_config.md` — **no driver.py logic change**, prose
+only. The previous wording jumped straight to recommending `driver.tdd_mode: false` for any plan touching a
+language that embeds unit tests inside the same file as the code (e.g. Rust's `#[cfg(test)] mod tests`). That
+overreaches: many such languages ALSO have a structurally separate, public-interface-only test target — Rust's
+own `tests/` directory (integration tests, outside `src/`) is the clearest example — which keeps TDD's
+file-level boundary perfectly valid whenever the plan's acceptance criteria are verifiable through the public
+interface, which is the common case.
+
+### Changed
+- **`states/update_config.md` §Step 3** — the inline-test bullet now checks first whether the ACs are
+  verifiable through a separately-located integration-test target; if so, scope `test_paths` there (e.g.
+  `tests/**`) and keep `tdd_mode: true` — the implementor may still add its own inline unit tests as part of
+  its own work, just not as the test author's TDD deliverable. `tdd_mode: false` is now reserved for the
+  narrower case where the ACs genuinely require white-box assertions on internals unreachable from the public
+  interface (inline unit tests are the *only* way to verify them, not merely *a* way).
+- Checklist item reworded to match.
+
+### Versioning note
+PATCH: prose-only guidance refinement in one state file; no driver.py, schema, or test change (the 220-test
+suite passes unchanged).
+
 ## [7.3.1] - 2026-07-24
 
 Strengthened `states/update_config.md`'s `test_paths` guidance — **no driver.py logic change**, prose only.
