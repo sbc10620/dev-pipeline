@@ -9,6 +9,27 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [7.3.3] - 2026-07-24
+
+Forbid naming tests after their Acceptance Criterion number (`AC1`/`AC2`/…) in `dp-test-implementor.md` /
+`dp-implementor.md` — **no driver.py logic change**, prose only. Both roles already said "mirror the
+project's existing test conventions," but that alone did not stop an AC-number naming scheme from being
+layered on top as a perceived traceability aid. It isn't one: nothing downstream — the driver, `state.json`,
+the reviewer, a later run — persists or correlates a plan's `AC1`/`AC2` labels back to anything, so the
+prefix adds no real traceability and just produces test names that don't read like the rest of the suite.
+
+### Changed
+- **`dp-test-implementor.md` Rule 7** now explicitly forbids an `AC1`/`AC2`/`ac_3`-style prefix and gives a
+  concrete fallback (name the test for the behavior it asserts, in the language/framework's own convention)
+  for when there is no existing project convention to mirror. Step 2.2 and the Step 4 self-check checklist
+  updated to match.
+- **`dp-implementor.md` Rule 9's non-TDD branch** (the implementor owns tests too when `tdd_mode` is off)
+  gained the identical instruction, since the same risk applies there.
+
+### Versioning note
+PATCH: prose-only instruction added to two role prompts; no driver.py, schema, or test change (the 220-test
+suite passes unchanged).
+
 ## [7.3.2] - 2026-07-24
 
 Refined the 7.3.1 inline-test guidance in `states/update_config.md` — **no driver.py logic change**, prose
