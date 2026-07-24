@@ -22,12 +22,12 @@ This state is entered two ways: **`--update-config [<plan>]`** (always, to (re)c
   ```bash
   python3 <driver_path> apply-config --config <project_root>/.dev-pipeline/dev-pipeline.config.json --values-file <project_root>/.dev-pipeline/.update-config-tmp.json
   ```
-  - `ok: true` → the scratch file is deleted automatically; `config_complete: true`. Continue.
+  - `ok: true` → the scratch file is deleted automatically; read the response's own `config_complete` (do **not** assume `true` — a values file that touched only the optional `plan_reviewer` keys can return `ok: true` with `config_complete: false` if the required roles are still incomplete). Continue.
   - Non-zero exit → **bounded repair loop:** show the user the exact error (a placeholder that survived, an invalid/mismatched runner, a missing required field), revise the values JSON to fix exactly that — re-confirming any executable/gate value a repair changes — and retry. After **3** attempts without success, **stop** and ask the user to set `config.json` by hand. **Never hand-edit `config.json` yourself** (Global Rule 10).
 
 - [Step 5] **Hand off.**
   - **`--update-config` mode:** stop and tell the user the config is ready (`<config_path>`) and to re-invoke with `--plan`/`--request` to run the pipeline.
-  - **Config gate mode:** set `config_complete = true` in the Run Context and continue to `states/init.md`.
+  - **Config gate mode:** set `config_complete` in the Run Context to the value `apply-config` actually returned, and continue to `states/init.md` **only if it is `true`** — this state's Step 3 batch recommends every required role, so a normal full write returns `true`; if it doesn't (e.g. the batch was scoped down to only `plan_reviewer`), loop back to [Step 3] for the still-missing required values instead of handing off to `init` on an incomplete config.
 
 **Checklist:**
 - [ ] Read the plan (if `plan_path` set) + explored the repo read-only; loaded any existing `config.json`; executed nothing from repo files

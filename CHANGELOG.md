@@ -9,6 +9,36 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [7.3.4] - 2026-07-24
+
+A final pre-merge Opus adversarial review of all 5 `plan_reviewer` commits (7.3.0-7.3.3) against `main` found
+one real bug: `apply-config`'s plan_reviewer-only scoped write path (added in 7.3.1) validated only its own
+business rules (`_plan_reviewer_shape_errors`), never the raw JSON-schema constraints every other role gets
+via `validate_against_schema` over the whole config. Two concrete consequences: (a) a non-dict
+`llm.plan_reviewer` in the values file crashed with an uncaught `AttributeError` instead of a clean `die()`
+(bare `.get()` calls on a value that might not be a dict); (b) a schema-invalid `runners.plan_reviewer` entry
+(e.g. `timeout: 0`, below the schema's `minimum: 1`, or an unknown property — the schema is
+`additionalProperties: false`) was silently accepted and written, later failing opaquely at review-plan
+runtime instead of at config-write time.
+
+### Fixed
+- **`driver.py`** gained `_plan_reviewer_schema_errors()`, which schema-checks `llm.plan_reviewer`/
+  `runners.plan_reviewer` (IF PRESENT) against the exact `$defs` `config.schema.json` already declares for
+  them, via the existing generic `_validate()` — no need to construct a fake whole config just to reuse the
+  schema. `_plan_reviewer_shape_errors()` now calls it, and its own business-rule checks are guarded with
+  `isinstance(..., dict)` before any `.get()` call, closing the crash. `plan_reviewer_config_errors()`
+  (review-plan's own readiness gate) had the identical unguarded pattern and is fixed the same way.
+- **`states/update_config.md`** no longer asserts `config_complete: true` unconditionally after a successful
+  `apply-config` write — it now reads the response's actual `config_complete` value (a plan_reviewer-only
+  write can legitimately return `ok: true` with `config_complete: false`) and, in config-gate mode, loops back
+  to Step 3 instead of handing off to `init` when it's still `false`.
+
+### Testing
+- 4 new regression tests: a non-dict `llm.plan_reviewer` block is rejected cleanly (not a traceback) via both
+  `apply-config` and `review-plan`; a schema-invalid `runners.plan_reviewer` entry is rejected and not
+  persisted; a `main-session` plan_reviewer handoff (previously only `bash`/`subagent` were covered) validates
+  end-to-end through `finalize-stage`.
+
 ## [7.3.3] - 2026-07-24
 
 Forbid naming tests after their Acceptance Criterion number (`AC1`/`AC2`/…) in `dp-test-implementor.md` /

@@ -3431,6 +3431,56 @@ class TestPlanReview(unittest.TestCase):
         self.assertNotEqual(ac.returncode, 0)
         self.assertIn("not configured yet", ac.stderr)
 
+    def test_apply_config_plan_reviewer_only_write_rejects_non_dict_llm_block(self):
+        # Regression: the scoped write path must reject a malformed
+        # llm.plan_reviewer (e.g. a bare string instead of an object) with a
+        # clean error, not an uncaught AttributeError from a bare .get() call.
+        run_driver("bootstrap-config", "--project", str(self.proj))
+        values = self.proj / "values.json"
+        values.write_text(json.dumps({
+            "llm": {"plan_reviewer": "not-an-object"},
+            "runners": {"plan_reviewer": [{"type": "bash", "command": "echo x > {output_file}"}]},
+        }), encoding="utf-8")
+        ac = run_driver("apply-config", "--config", str(self.config_path), "--values-file", str(values))
+        self.assertNotEqual(ac.returncode, 0)
+        # The failure must be a clean die() (the "[dev-pipeline] ERROR" framing
+        # every other rejection uses), not an uncaught Python traceback.
+        self.assertIn("[dev-pipeline] ERROR", ac.stderr)
+        self.assertNotIn("Traceback", ac.stderr)
+        cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertNotIn("plan_reviewer", cfg.get("llm", {}))
+
+    def test_apply_config_plan_reviewer_only_write_rejects_schema_invalid_runner(self):
+        # Regression: the scoped write path must still enforce the raw
+        # JSON-schema constraints (not just the business-rule checks) on
+        # runners.plan_reviewer, e.g. `timeout` below its schema minimum of 1,
+        # and an unknown extra property (additionalProperties: false).
+        run_driver("bootstrap-config", "--project", str(self.proj))
+        values = self.proj / "values.json"
+        values.write_text(json.dumps({
+            "llm": {"plan_reviewer": {"focus": "Be adversarial."}},
+            "runners": {"plan_reviewer": [{"type": "bash", "command": "echo x > {output_file}",
+                                            "timeout": 0, "bogus": "y"}]},
+        }), encoding="utf-8")
+        ac = run_driver("apply-config", "--config", str(self.config_path), "--values-file", str(values))
+        self.assertNotEqual(ac.returncode, 0)
+        cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertNotIn("plan_reviewer", cfg.get("runners", {}),
+                          "a schema-invalid runner must not have been persisted")
+
+    def test_review_plan_dies_cleanly_on_non_dict_llm_plan_reviewer(self):
+        # Same crash-guard as above, exercised through review-plan's own
+        # readiness gate (plan_reviewer_config_errors) instead of apply-config.
+        cfg = valid_config()
+        cfg["runners"]["plan_reviewer"] = [{"type": "bash", "command": "echo x > {output_file}"}]
+        cfg["llm"]["plan_reviewer"] = "not-an-object"
+        self._write_config(cfg)
+        r = run_driver("review-plan", "--plan", str(self.plan), "--config", str(self.config_path))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("plan_reviewer is not ready", r.stderr)
+        self.assertIn("llm.plan_reviewer", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
     def _configured(self, command, normalizer="default"):
         cfg = valid_config()
         cfg["runners"]["plan_reviewer"] = [{"type": "bash", "command": command, "normalizer": normalizer}]
@@ -3488,6 +3538,28 @@ class TestPlanReview(unittest.TestCase):
 
         # finalize-stage validates the handoff result the same way as any other
         # json role, against the review dir run-stage created.
+        review_dir = pathlib.Path(r.json["system_file"]).parent
+        out = pathlib.Path(r.json["output_file"])
+        out.write_text(json.dumps(plan_review_result(verdict="approve")), encoding="utf-8")
+        fr = run_driver("finalize-stage", "--run", str(review_dir), "--role", "plan_reviewer",
+                         "--stage-input", "stage-input.json")
+        self.assertEqual(fr.returncode, 0, fr.stderr)
+        self.assertTrue(fr.json["ok"])
+
+    def test_review_plan_main_session_handoff(self):
+        # main-session is the third supported execution mode (alongside bash
+        # and subagent, covered above) — must get the same handoff contract.
+        cfg = valid_config()
+        cfg["runners"]["plan_reviewer"] = [{"type": "main-session"}]
+        cfg["llm"]["plan_reviewer"] = {"focus": "Be adversarial."}
+        self._write_config(cfg)
+        r = run_driver("review-plan", "--plan", str(self.plan), "--config", str(self.config_path))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json["mode"], "main-session")
+        self.assertEqual(r.json["role"], "plan_reviewer")
+        self.assertTrue(r.json["compact_first"])
+        self.assertTrue(pathlib.Path(r.json["system_file"]).exists())
+
         review_dir = pathlib.Path(r.json["system_file"]).parent
         out = pathlib.Path(r.json["output_file"])
         out.write_text(json.dumps(plan_review_result(verdict="approve")), encoding="utf-8")

@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 # Single source of truth for the dev-pipeline version. driver.py is the only
 # executable copied into installs, so install.sh and state.json read this value
 # rather than maintaining their own copy.
-__version__ = "7.3.3"
+__version__ = "7.3.4"
 
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 # Config template, co-located with driver.py (install.sh copies it next to this
@@ -485,6 +485,36 @@ def _unknown_placeholder_errors(cfg: dict) -> list[str]:
     return errors
 
 
+def _plan_reviewer_schema_errors(cfg: dict) -> list[str]:
+    """Schema-shape-check `llm.plan_reviewer`/`runners.plan_reviewer` IF PRESENT
+    in `cfg`, against the exact `$defs` `config.schema.json` already declares
+    for them (`_validate` is generic — it doesn't require validating the WHOLE
+    config object, just the fragment + a root_schema for `$ref` resolution).
+    `_runner_shape_errors`/the focus checks in `_plan_reviewer_shape_errors`
+    cover business rules (unconfigured sentinel, missing command, placeholder
+    text) but not raw JSON-schema constraints like `timeout: minimum 1` or
+    `additionalProperties: false` — every OTHER role gets those for free from
+    `validate_config_data`'s whole-object `validate_against_schema` call; this
+    gives plan_reviewer the same coverage without requiring the rest of the
+    config to be schema-valid too (that's the whole point of the scoped path —
+    see `_values_touch_only_plan_reviewer`). Also doubles as the crash guard:
+    `_validate` type-checks before any dict access, so a non-dict
+    `llm.plan_reviewer` (or a non-list `runners.plan_reviewer`) is reported
+    cleanly here instead of raising in `_plan_reviewer_shape_errors`'s own
+    `.get()` calls."""
+    schema = load_json(SCHEMA_DIR / "config.schema.json")
+    errors = []
+    if "runners" in cfg:
+        errors += _validate(cfg["runners"].get("plan_reviewer"),
+                             schema["properties"]["runners"]["properties"]["plan_reviewer"],
+                             "runners.plan_reviewer", schema)
+    if "llm" in cfg:
+        errors += _validate(cfg["llm"].get("plan_reviewer"),
+                             schema["properties"]["llm"]["properties"]["plan_reviewer"],
+                             "llm.plan_reviewer", schema)
+    return errors
+
+
 def _plan_reviewer_shape_errors(cfg: dict) -> list[str]:
     """Validate `llm.plan_reviewer`/`runners.plan_reviewer` IF PRESENT, without
     requiring plan_reviewer to exist at all (that existence gate is
@@ -497,6 +527,10 @@ def _plan_reviewer_shape_errors(cfg: dict) -> list[str]:
         plan_reviewer is opt-in and independent of them (see
         `plan_reviewer_config_errors`'s docstring); it only validates what a
         plan_reviewer-only values file actually touches.
+    Every branch below only inspects `runners`/`llm_pr` after an `isinstance`
+    check — never a bare `.get()` on a value that might not be a dict — so a
+    malformed value (e.g. `llm.plan_reviewer` given as a bare string) cannot
+    crash this function; `_plan_reviewer_schema_errors` reports it instead.
     """
     errors = []
     runners = cfg.get("runners", {}).get("plan_reviewer")
@@ -508,12 +542,17 @@ def _plan_reviewer_shape_errors(cfg: dict) -> list[str]:
         else:
             errors += _runner_shape_errors({"runners": {"plan_reviewer": runners}})
             errors += _unknown_placeholder_errors({"runners": {"plan_reviewer": runners}})
-    focus = cfg.get("llm", {}).get("plan_reviewer", {}).get("focus")
-    if focus is not None:
-        if not isinstance(focus, str) or not focus.strip():
-            errors.append("llm.plan_reviewer.focus: must be a non-empty string")
-        elif _is_placeholder(focus):
-            errors.append("llm.plan_reviewer.focus: still contains a placeholder value — replace it")
+        errors += _plan_reviewer_schema_errors({"runners": {"plan_reviewer": runners}})
+    llm_pr = cfg.get("llm", {}).get("plan_reviewer")
+    if llm_pr is not None:
+        if isinstance(llm_pr, dict):
+            focus = llm_pr.get("focus")
+            if focus is not None:
+                if not isinstance(focus, str) or not focus.strip():
+                    errors.append("llm.plan_reviewer.focus: must be a non-empty string")
+                elif _is_placeholder(focus):
+                    errors.append("llm.plan_reviewer.focus: still contains a placeholder value — replace it")
+        errors += _plan_reviewer_schema_errors({"llm": {"plan_reviewer": llm_pr}})
     return errors
 
 
@@ -532,7 +571,8 @@ def plan_reviewer_config_errors(cfg: dict) -> list[str]:
         return ["runners.plan_reviewer: not configured — run `/dev-pipeline --update-config` "
                 "(or answer the one-time setup prompt `--plan-review` shows) to add a runner."]
     errors = _plan_reviewer_shape_errors(cfg)
-    if not cfg.get("llm", {}).get("plan_reviewer", {}).get("focus"):
+    llm_pr = cfg.get("llm", {}).get("plan_reviewer")
+    if not (isinstance(llm_pr, dict) and llm_pr.get("focus")):
         errors.append("llm.plan_reviewer.focus: must be a non-empty string")
     return errors
 
