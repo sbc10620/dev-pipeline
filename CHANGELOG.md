@@ -9,6 +9,29 @@ The version is defined in one place — `__version__` in
 `agents/dev-pipeline-tools/driver.py`. Check an installed copy with
 `python3 .agents/skills/dev-pipeline/driver.py --version`.
 
+## [7.3.1] - 2026-07-24
+
+Strengthened `states/update_config.md`'s `test_paths` guidance — **no driver.py logic change**, prose only.
+`test_paths` is the hard boundary `driver check-boundary` enforces file-by-file (the implementor's changes
+must all be outside it, the test author's all inside it); a `test_paths` glob that unintentionally also
+matches files the implementor needs to touch was previously only warned about in one clause ("too broad
+blocks the implementor"), with no guidance on how that actually happens or what to recommend instead.
+
+### Changed
+- **`states/update_config.md` §Step 3** — the `test_paths` bullet is now three bullets: (1) an explicit
+  reminder that a wrong `test_paths` costs iteration budget on a `touched_tests`/`no_match` loop before the
+  run fails outright, and to verify it against the plan's `## File Layout`/`## Interface`, not a generic
+  guess; (2) prefer a **filename pattern** (`**/*_test.go`, `**/*.test.ts`) over a **directory glob** when the
+  framework co-locates tests with production code in the same directory — a directory glob would also match
+  the production files there; (3) when a language embeds unit tests **inside the same file** as the
+  production code (e.g. Rust's `#[cfg(test)] mod tests`), no glob can separate them — recommend
+  `driver.tdd_mode: false` for that plan instead of a TDD config whose file-level boundary can never hold.
+- Checklist gained a matching item for this verification step.
+
+### Versioning note
+PATCH: prose-only guidance improvement in one state file; no driver.py, schema, or test change (the 220-test
+suite passes unchanged — it exercises driver.py, which was not touched).
+
 ## [7.3.0] - 2026-07-24
 
 **Added a standalone, adversarial `plan_reviewer` role and `/dev-pipeline --plan-review <plan.md>` /
